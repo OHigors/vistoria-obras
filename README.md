@@ -41,7 +41,7 @@ http://localhost:8081
 Gere a versão estática:
 
 ```bash
-npm run build:web
+npm run build
 ```
 
 O resultado fica na pasta:
@@ -67,7 +67,7 @@ Esse comando serve a pasta `dist` com fallback para rotas internas do app.
 3. Importe o repositório.
 4. Confira as configurações:
    - Framework Preset: `Other` ou detectado automaticamente.
-   - Build Command: `npm run build:web`
+   - Build Command: `npm run build`
    - Output Directory: `dist`
 5. Publique o projeto.
 6. Acesse a URL gerada pela Vercel no celular usando 4G/5G.
