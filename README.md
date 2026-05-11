@@ -1,50 +1,112 @@
-# Welcome to your Expo app 👋
+# Vistoria Obras
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+MVP web/mobile-first para vistoria, checklist, cronograma, medição local e relatórios de uma obra residencial. O protótipo usa dados mockados do Residencial Cagliari e persistência local no navegador via `localStorage`.
 
-## Get started
+## Objetivo
 
-1. Install dependencies
+Permitir testar em campo um fluxo inicial de acompanhamento de apartamentos:
 
-   ```bash
-   npm install
-   ```
+- dashboard da obra;
+- seleção de torres e apartamentos;
+- checklist de vistoria por etapa;
+- fotos locais por item;
+- histórico de visitas;
+- serviços travados por dependência;
+- cronograma planejado x realizado;
+- pré-medição técnica;
+- relatórios em texto, PDF imprimível e CSV.
 
-2. Start the app
+## Como rodar localmente
 
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
+Instale as dependências:
 
 ```bash
-npm run reset-project
+npm install
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+Rode no navegador:
 
-## Learn more
+```bash
+npm run web
+```
 
-To learn more about developing your project with Expo, look at the following resources:
+O Expo normalmente abre em:
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+```text
+http://localhost:8081
+```
 
-## Join the community
+## Build de produção web
 
-Join our community of developers creating universal apps.
+Gere a versão estática:
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+```bash
+npm run build:web
+```
+
+O resultado fica na pasta:
+
+```text
+dist
+```
+
+## Preview local do build
+
+Depois do build:
+
+```bash
+npm run preview
+```
+
+Esse comando serve a pasta `dist` com fallback para rotas internas do app.
+
+## Publicar na Vercel
+
+1. Suba o projeto para um repositório GitHub.
+2. Entre em https://vercel.com e clique em `Add New Project`.
+3. Importe o repositório.
+4. Confira as configurações:
+   - Framework Preset: `Other` ou detectado automaticamente.
+   - Build Command: `npm run build:web`
+   - Output Directory: `dist`
+5. Publique o projeto.
+6. Acesse a URL gerada pela Vercel no celular usando 4G/5G.
+
+O arquivo `vercel.json` já configura o build e um fallback para que rotas como `/torres/torre-1` e `/apartamentos/ap-11` funcionem mesmo ao atualizar a página diretamente.
+
+## Rotas importantes para teste
+
+- `/`
+- `/torres/torre-1`
+- `/apartamentos/ap-11`
+- `/gerar-relatorio`
+- `/servicos-etapas`
+- `/diagnostico`
+
+## Persistência local
+
+O app salva dados no `localStorage` do navegador. Isso significa:
+
+- os dados ficam no aparelho/navegador usado;
+- limpar dados do navegador apaga o protótipo local;
+- dados do celular e do computador não sincronizam entre si;
+- publicar na Vercel não cria banco de dados.
+
+## Limitações atuais
+
+- Sem Firebase ou backend.
+- Sem autenticação/login.
+- Fotos ficam salvas localmente como dados do navegador.
+- Sem sincronização multiusuário.
+- Sem controle real de permissões.
+- PDF é gerado pelo fluxo de impressão do navegador.
+- CSV é a exportação principal; Excel/XLSX está preparado para versão futura.
+
+## Próximos passos
+
+- Definir modelo de dados definitivo para Firebase.
+- Criar autenticação e perfis de acesso.
+- Migrar fotos para storage real.
+- Sincronizar vistorias, medições e relatórios entre dispositivos.
+- Criar ambiente de homologação e produção.
+- Melhorar exportação Excel/XLSX.

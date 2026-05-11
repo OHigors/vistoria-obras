@@ -1,3 +1,4 @@
+import type { Apartment, ChecklistItem } from '@/src/data/mockObras';
 import { checklistLabels } from '@/src/data/mockObras';
 
 export type ServiceStage = {
@@ -149,6 +150,55 @@ export const getServiceStagesFromStorage = (): ServiceStage[] => {
   }
 };
 
+const sortStagesByExecution = (stages: ServiceStage[]) =>
+  [...stages].sort((first, second) => first.ordemExecucao - second.ordemExecucao);
+
+export const getEtapasConfiguradas = () =>
+  sortStagesByExecution(getServiceStagesFromStorage());
+
+export const getEtapasAtivas = () =>
+  getEtapasConfiguradas().filter((stage) => stage.ativo);
+
+export const getEtapasChecklist = () =>
+  getEtapasAtivas().filter((stage) => stage.apareceNoChecklist);
+
+export const getEtapasMedicao = () =>
+  getEtapasAtivas().filter((stage) => stage.apareceNaMedicao);
+
+export const getEtapasCronograma = () =>
+  getEtapasAtivas().filter((stage) => stage.apareceNoCronograma);
+
+export const getServiceStageByName = (serviceName: string) =>
+  getServiceStagesFromStorage().find((stage) => stage.nome === serviceName);
+
+export const isCriticalStageForStatus = (serviceName: string) => {
+  const stage = getServiceStageByName(serviceName);
+
+  return Boolean(stage?.ativo && (stage.etapaCritica || stage.travaLiberacao));
+};
+
+const createChecklistItemFromStage = (stage: ServiceStage): ChecklistItem => ({
+  id: stage.id,
+  label: stage.nome,
+  state: 'ok',
+  comment: '',
+});
+
+export const getChecklistItemsForFeature = (
+  apartment: Apartment,
+  feature: 'checklist' | 'cronograma' | 'medicao',
+): ChecklistItem[] => {
+  const stages =
+    feature === 'checklist'
+      ? getEtapasChecklist()
+      : feature === 'cronograma'
+        ? getEtapasCronograma()
+        : getEtapasMedicao();
+  const apartmentItemsByLabel = new Map(apartment.checklist.map((item) => [item.label, item]));
+
+  return stages.map((stage) => apartmentItemsByLabel.get(stage.nome) ?? createChecklistItemFromStage(stage));
+};
+
 export const saveServiceStagesToStorage = (stages: ServiceStage[]) => {
   if (typeof window === 'undefined') {
     return;
@@ -175,8 +225,19 @@ export const createEmptyServiceStage = (order: number): ServiceStage => ({
 
 export const getServiceDependencyMap = () =>
   getServiceStagesFromStorage().reduce<Record<string, string[]>>((dependencies, stage) => {
-    if (stage.ativo && stage.servicosDependentes.length > 0) {
-      dependencies[stage.nome] = stage.servicosDependentes;
+    if (!stage.ativo) {
+      delete dependencies[stage.nome];
+      return dependencies;
+    }
+
+    const dependents = [...stage.servicosDependentes];
+
+    if (stage.travaLiberacao && !dependents.includes('liberação do apartamento')) {
+      dependents.push('liberação do apartamento');
+    }
+
+    if (dependents.length > 0) {
+      dependencies[stage.nome] = dependents;
     }
 
     return dependencies;

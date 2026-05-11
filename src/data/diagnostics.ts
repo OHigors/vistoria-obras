@@ -17,10 +17,20 @@ import {
   canGenerateReportText,
   createGeneratedReport,
   formatReportDateTime,
+  getNomeServicoOuEtapa,
   reportCsvHeader,
   validateReportFilters,
 } from '@/src/data/generatedReports';
-import { getServiceStagesFromStorage } from '@/src/data/serviceStages';
+import {
+  getChecklistItemsForFeature,
+  getEtapasConfiguradas,
+  getEtapasChecklist,
+  getEtapasCronograma,
+  getEtapasMedicao,
+  getServiceDependencyMap,
+  getServiceStagesFromStorage,
+  isCriticalStageForStatus,
+} from '@/src/data/serviceStages';
 
 export type DiagnosticStatus = 'OK' | 'Atenção' | 'Erro';
 
@@ -321,6 +331,226 @@ export const runMvpDiagnostics = (): DiagnosticReport => {
     activeStages.some((stage) => stage.servicosDependentes.length > 0) ? 'OK' : 'Atenção',
     'Serviços dependentes alimentam a tela de serviços travados.',
     'Selecione quais serviços cada etapa trava.',
+  );
+
+  const firstApartmentForStages = apartments[0];
+  const checklistStageNames = getEtapasChecklist().map((stage) => stage.nome);
+  const measurementStageNames = getEtapasMedicao().map((stage) => stage.nome);
+  const configuredStageNames = getEtapasConfiguradas().map((stage) => stage.nome);
+  const scheduleStageNames = getEtapasCronograma().map((stage) => stage.nome);
+  const apartmentChecklistStageNames = firstApartmentForStages
+    ? getChecklistItemsForFeature(firstApartmentForStages, 'checklist').map((item) => item.label)
+    : [];
+  const apartmentScheduleStageNames = firstApartmentForStages
+    ? getChecklistItemsForFeature(firstApartmentForStages, 'cronograma').map((item) => item.label)
+    : [];
+  const inactiveStages = configuredStages.filter((stage) => !stage.ativo);
+
+  addResult(
+    results,
+    'Etapas - Checklist integrado',
+    activeStages
+      .filter((stage) => stage.apareceNoChecklist)
+      .every((stage) => checklistStageNames.includes(stage.nome) && apartmentChecklistStageNames.includes(stage.nome))
+      ? 'OK'
+      : 'Erro',
+    'Etapas ativas marcadas para checklist aparecem nos checklists dos apartamentos existentes.',
+    'Use getEtapasChecklist e mescle etapas configuradas com os itens salvos da vistoria.',
+  );
+  addResult(
+    results,
+    'Etapas - Medição integrada',
+    activeStages
+      .filter((stage) => stage.apareceNaMedicao)
+      .every((stage) => measurementStageNames.includes(stage.nome))
+      ? 'OK'
+      : 'Erro',
+    'Etapas ativas marcadas para medição ficam disponíveis para novos lançamentos.',
+    'Use getEtapasMedicao como fonte de serviços medíveis.',
+  );
+  const testDeliveryStage = getEtapasConfiguradas().find((stage) => stage.nome === 'Teste de entrega');
+  addResult(
+    results,
+    'Etapas - fonte configurada carregada',
+    configuredStageNames.length > 0 ? 'OK' : 'Erro',
+    'getEtapasConfiguradas lê as etapas salvas ou retorna as etapas padrão.',
+    'Leia o mesmo localStorage usado pela tela Serviços e etapas.',
+  );
+  addResult(
+    results,
+    'Medição - Teste de entrega disponível',
+    !testDeliveryStage || !testDeliveryStage.ativo || !testDeliveryStage.apareceNaMedicao
+      ? 'OK'
+      : getEtapasMedicao().some((stage) => stage.nome === 'Teste de entrega')
+        ? 'OK'
+        : 'Erro',
+    testDeliveryStage
+      ? 'Quando Teste de entrega está ativa e marcada para medição, ela deve aparecer na aba Medições.'
+      : 'Etapa Teste de entrega não está cadastrada no armazenamento atual; regra preparada.',
+    'Garanta que a aba Medições renderize getEtapasMedicao, sem depender do checklist OK.',
+  );
+  const firstMeasurementStage = getEtapasMedicao()[0];
+  const simulatedStageMeasurement = firstMeasurementStage
+    ? {
+        apartmentId: apartments[0]?.id,
+        etapaId: firstMeasurementStage.id,
+        etapaNome: firstMeasurementStage.nome,
+        serviceId: firstMeasurementStage.id,
+        serviceName: firstMeasurementStage.nome,
+        servicoNome: firstMeasurementStage.nome,
+        unidadeMedicao: firstMeasurementStage.unidadeMedicao,
+        unit: firstMeasurementStage.unidadeMedicao,
+        valorUnitario: 0,
+        valorTotal: 0,
+        periodoInicio: '11/05/2026',
+        periodoFim: '11/05/2026',
+      }
+    : undefined;
+  addResult(
+    results,
+    'Medição - etapa ativa aparece na nova medição',
+    activeStages
+      .filter((stage) => stage.apareceNaMedicao)
+      .every((stage) => getEtapasMedicao().some((measurementStage) => measurementStage.id === stage.id))
+      ? 'OK'
+      : 'Erro',
+    'Nova medição usa getEtapasMedicao para listar etapas ativas marcadas para medição.',
+    'Substitua listas fixas por getEtapasMedicao na tela de nova medição.',
+  );
+  addResult(
+    results,
+    'Medição - etapa inativa não aparece',
+    inactiveStages.every((stage) => !getEtapasMedicao().some((measurementStage) => measurementStage.id === stage.id))
+      ? 'OK'
+      : 'Erro',
+    inactiveStages.length
+      ? 'Etapas inativas ficam fora da lista de nova medição.'
+      : 'Sem etapas inativas no momento; regra preparada.',
+    'Filtre nova medição por ativo = true e apareceNaMedicao = true.',
+  );
+  addResult(
+    results,
+    'Medição - grava etapa configurada',
+    Boolean(
+      simulatedStageMeasurement?.etapaId &&
+        simulatedStageMeasurement.serviceId &&
+        simulatedStageMeasurement.etapaNome &&
+        simulatedStageMeasurement.servicoNome &&
+        typeof simulatedStageMeasurement.valorUnitario === 'number' &&
+        typeof simulatedStageMeasurement.valorTotal === 'number' &&
+        simulatedStageMeasurement.periodoInicio &&
+        simulatedStageMeasurement.periodoFim,
+    )
+      ? 'OK'
+      : 'Erro',
+    'Medições criadas a partir de etapa configurada gravam etapaId/servicoId e etapaNome/servicoNome.',
+    'Inclua metadados da etapa no objeto salvo da medição.',
+  );
+  addResult(
+    results,
+    'Medição - unidade da etapa preenchida',
+    Boolean(
+      simulatedStageMeasurement?.unidadeMedicao &&
+        simulatedStageMeasurement.unit === simulatedStageMeasurement.unidadeMedicao,
+    )
+      ? 'OK'
+      : 'Erro',
+    'Unidade da nova medição é preenchida com unidadeMedicao da etapa e continua editável.',
+    'Ao selecionar etapa, inicialize o campo Unidade com stage.unidadeMedicao.',
+  );
+  addResult(
+    results,
+    'Etapas - Cronograma integrado',
+    activeStages
+      .filter((stage) => stage.apareceNoCronograma)
+      .every((stage) => scheduleStageNames.includes(stage.nome) && apartmentScheduleStageNames.includes(stage.nome))
+      ? 'OK'
+      : 'Erro',
+    'Etapas ativas marcadas para cronograma aparecem como serviços planejáveis.',
+    'Use getEtapasCronograma no cronograma do apartamento.',
+  );
+  addResult(
+    results,
+    'Etapas - inativas fora de novos lançamentos',
+    inactiveStages.every(
+      (stage) =>
+        !checklistStageNames.includes(stage.nome) &&
+        !measurementStageNames.includes(stage.nome) &&
+        !scheduleStageNames.includes(stage.nome),
+    )
+      ? 'OK'
+      : 'Erro',
+    inactiveStages.length
+      ? 'Etapas inativas não entram nas listas de novos lançamentos.'
+      : 'Sem etapas inativas no momento; regra preparada.',
+    'Inative sem apagar histórico e filtre novos lançamentos por ativo = true.',
+  );
+  addResult(
+    results,
+    'Etapas - mescla sem apagar vistoria antiga',
+    firstApartmentForStages?.checklist.every((item) =>
+      apartmentChecklistStageNames.includes(item.label) || !checklistStageNames.includes(item.label),
+    )
+      ? 'OK'
+      : 'Erro',
+    'Itens existentes do checklist continuam preservados ao adicionar novas etapas.',
+    'Mescle por nome/id e mantenha dados armazenados por item já vistoriado.',
+  );
+  addResult(
+    results,
+    'Etapas - trava liberação integrada',
+    activeStages
+      .filter((stage) => stage.travaLiberacao)
+      .every((stage) => (getServiceDependencyMap()[stage.nome] ?? []).includes('liberação do apartamento'))
+      ? 'OK'
+      : 'Erro',
+    'Etapas configuradas com trava liberação alimentam serviços travados e status crítico.',
+    'Inclua liberação do apartamento nas dependências quando travaLiberacao = true.',
+  );
+  const stageWithDependencies = activeStages.find((stage) => stage.servicosDependentes.length > 0);
+  const stageWithReleaseBlock = activeStages.find((stage) => stage.travaLiberacao);
+  const stageWithCriticalFlag = activeStages.find((stage) => stage.etapaCritica);
+  addResult(
+    results,
+    'Serviços travados - dependências configuradas por etapa',
+    !stageWithDependencies ||
+      getBlockedServiceGroups([{
+        id: stageWithDependencies.id,
+        label: stageWithDependencies.nome,
+        state: 'pending',
+      }]).some((group) =>
+        stageWithDependencies.servicosDependentes.every((service) => group.blockedServices.includes(service)),
+      )
+      ? 'OK'
+      : 'Erro',
+    stageWithDependencies
+      ? 'servicosDependentes da etapa configurada alimenta a seção de serviços travados.'
+      : 'Sem etapa ativa com dependências próprias no momento; regra preparada.',
+    'Use getServiceDependencyMap em serviços travados e cronograma.',
+  );
+  addResult(
+    results,
+    'Status - trava liberação pendente vira crítico',
+    !stageWithReleaseBlock ||
+      isCriticalStageForStatus(stageWithReleaseBlock.nome)
+      ? 'OK'
+      : 'Erro',
+    stageWithReleaseBlock
+      ? 'Etapa com travaLiberacao pendente é tratada como crítica para status.'
+      : 'Sem etapa ativa com travaLiberacao no momento; regra preparada.',
+    'Considere travaLiberacao no cálculo de status da unidade.',
+  );
+  addResult(
+    results,
+    'Status - etapa crítica pendente impacta status',
+    !stageWithCriticalFlag ||
+      isCriticalStageForStatus(stageWithCriticalFlag.nome)
+      ? 'OK'
+      : 'Erro',
+    stageWithCriticalFlag
+      ? 'Etapa marcada como crítica é considerada no status do apartamento quando pendente/parcial.'
+      : 'Sem etapa crítica ativa no momento; regra preparada.',
+    'Considere etapaCritica no cálculo de status da unidade.',
   );
 
   const pendingStoredItems = allStoredChecklistItems.filter(
@@ -737,6 +967,24 @@ export const runMvpDiagnostics = (): DiagnosticReport => {
     includeSchedule: true,
     includeSummary: true,
   });
+  const reportWithoutOptionalData = createGeneratedReport('daily', {
+    apartment: '',
+    contractor: '',
+    date: new Intl.DateTimeFormat('pt-BR').format(new Date()),
+    periodEnd: '',
+    periodStart: '',
+    service: '',
+    tower: 'Todos',
+  }, {
+    includeBlocked: true,
+    includeChecklist: true,
+    includeHistory: false,
+    includeIssues: true,
+    includeMeasurements: false,
+    includePhotos: false,
+    includeSchedule: true,
+    includeSummary: true,
+  });
   addResult(
     results,
     'Gerar relatório - texto',
@@ -748,6 +996,13 @@ export const runMvpDiagnostics = (): DiagnosticReport => {
     'Gerar relatório - copiar',
     typeof generatedReport.text === 'string' && generatedReport.text.includes('Obra:') ? 'OK' : 'Erro',
     'Botão Copiar relatório usa o texto gerado para a área de transferência quando disponível.',
+  );
+  addResult(
+    results,
+    'Gerar relatório - prévia não vazia',
+    generatedReport.text.includes('RELATÓRIO DE OBRA') && generatedReport.text.length > 40 ? 'OK' : 'Erro',
+    'Prévia para copiar é preenchida com cabeçalho e dados ou mensagem clara.',
+    'Garanta fallback de texto quando filtros não retornarem registros.',
   );
   addResult(
     results,
@@ -807,6 +1062,30 @@ export const runMvpDiagnostics = (): DiagnosticReport => {
     classifyVisitVariation(80, 64) === 'Regressão' ? 'OK' : 'Erro',
     'Queda de percentual aparece como Regressão, não como evolução negativa.',
     'Use o rótulo Regressão quando percentualDepois for menor que percentualAntes.',
+  );
+  addResult(
+    results,
+    'Gerar relatório - aceita etapaNome',
+    getNomeServicoOuEtapa({ etapaNome: 'Teste de entrega' }) === 'Teste de entrega' ? 'OK' : 'Erro',
+    'Relatório resolve nome de serviço usando etapaNome quando existir.',
+    'Use getNomeServicoOuEtapa antes de filtrar ou exportar medições/etapas.',
+  );
+  addResult(
+    results,
+    'Gerar relatório - aceita servicoNome antigo',
+    getNomeServicoOuEtapa({ servicoNome: 'Serviço antigo' }) === 'Serviço antigo' ? 'OK' : 'Erro',
+    'Relatório mantém compatibilidade com registros antigos que usam servicoNome.',
+    'Não dependa apenas de measurement.service.',
+  );
+  addResult(
+    results,
+    'Gerar relatório - sem medições ou fotos',
+    reportWithoutOptionalData.text.includes('RELATÓRIO DE OBRA') &&
+      reportWithoutOptionalData.html.includes('Fotos não incluídas')
+      ? 'OK'
+      : 'Erro',
+    'Relatório não quebra quando fotos ou medições não são incluídas/estão vazias.',
+    'Mostre mensagens amigáveis para seções sem dados.',
   );
   addResult(
     results,

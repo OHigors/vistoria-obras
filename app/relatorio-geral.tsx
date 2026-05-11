@@ -12,6 +12,7 @@ import { apartments, getApartmentById, getTowerById, project, towers } from '@/s
 import { consolidatedReportHeader } from '@/src/data/reportExports';
 import { getScheduleRows, getScheduledChecklistForApartment } from '@/src/data/schedule';
 import { getBlockedServiceGroups } from '@/src/data/serviceBlockers';
+import { isCriticalStageForStatus } from '@/src/data/serviceStages';
 import { statusConfig } from '@/src/ui/status';
 
 type IssueCriticality = 'Baixa' | 'Média' | 'Alta' | 'Crítica';
@@ -163,8 +164,13 @@ const calculateStatus = (checklist: ChecklistItem[], progress: number): Apartmen
   const pendingCount = checklist.filter((item) => item.state === 'pending').length;
   const partialCount = checklist.filter((item) => item.state === 'partial').length;
   const manyPending = pendingCount >= Math.max(3, Math.ceil(checklist.length * 0.35));
+  const hasCriticalStage = checklist.some(
+    (item) =>
+      (item.state === 'pending' || item.state === 'partial') &&
+      isCriticalStageForStatus(item.label),
+  );
 
-  if (progress < 50 || manyPending) {
+  if (progress < 50 || manyPending || hasCriticalStage) {
     return 'critical';
   }
 

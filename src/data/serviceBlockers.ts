@@ -1,5 +1,9 @@
 import type { Apartment, ChecklistItem } from '@/src/data/mockObras';
-import { defaultServiceDependencies, getServiceDependencyMap } from '@/src/data/serviceStages';
+import {
+  defaultServiceDependencies,
+  getChecklistItemsForFeature,
+  getServiceDependencyMap,
+} from '@/src/data/serviceStages';
 
 export type BlockImpact = 'Baixo' | 'Médio' | 'Alto' | 'Crítico';
 
@@ -54,21 +58,22 @@ const classifyImpact = (blockedServices: string[]): BlockImpact => {
 
 export const getChecklistForApartment = (apartment: Apartment): ChecklistItem[] => {
   if (typeof window === 'undefined') {
-    return apartment.checklist;
+    return getChecklistItemsForFeature(apartment, 'checklist');
   }
 
   try {
     const storedValue = window.localStorage.getItem(getStorageKey(apartment.id));
 
     if (!storedValue) {
-      return apartment.checklist;
+      return getChecklistItemsForFeature(apartment, 'checklist');
     }
 
     const storedItems = JSON.parse(storedValue) as Partial<ChecklistItem>[];
     const storedItemsById = new Map(storedItems.map((item) => [item.id, item]));
+    const storedItemsByLabel = new Map(storedItems.map((item) => [item.label, item]));
 
-    return apartment.checklist.map((item) => {
-      const storedItem = storedItemsById.get(item.id);
+    return getChecklistItemsForFeature(apartment, 'checklist').map((item) => {
+      const storedItem = storedItemsById.get(item.id) ?? storedItemsByLabel.get(item.label);
 
       if (
         !storedItem ||
@@ -87,7 +92,7 @@ export const getChecklistForApartment = (apartment: Apartment): ChecklistItem[] 
       };
     });
   } catch {
-    return apartment.checklist;
+    return getChecklistItemsForFeature(apartment, 'checklist');
   }
 };
 

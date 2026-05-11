@@ -38,7 +38,12 @@ import { getApartmentById, getTowerById, project } from '@/src/data/mockObras';
 import type { ScheduleFields } from '@/src/data/schedule';
 import { formatDateBr, getScheduleRows, isValidBrDate, maskDateBr, normalizeDateForDisplay } from '@/src/data/schedule';
 import { getBlockedServiceGroups } from '@/src/data/serviceBlockers';
-import { isServiceActiveForFeature } from '@/src/data/serviceStages';
+import {
+  getChecklistItemsForFeature,
+  getEtapasMedicao,
+  getServiceStageByName,
+  isCriticalStageForStatus,
+} from '@/src/data/serviceStages';
 import { checklistConfig, statusConfig } from '@/src/ui/status';
 
 const checklistOptions: ChecklistState[] = ['ok', 'pending', 'partial', 'notApplicable'];
@@ -67,6 +72,10 @@ type EditableChecklistItem = ChecklistItem & {
   comment: string;
   issueCriticality?: IssueCriticality;
   issueComment?: string;
+  categoria?: string;
+  unidadeMedicao?: string;
+  etapaCritica?: boolean;
+  travaLiberacao?: boolean;
 } & ScheduleFields;
 
 const isChecklistState = (state: unknown): state is ChecklistState =>
@@ -75,8 +84,43 @@ const isChecklistState = (state: unknown): state is ChecklistState =>
 const isIssueCriticality = (criticality: unknown): criticality is IssueCriticality =>
   criticalityOptions.includes(criticality as IssueCriticality);
 
-const getInitialChecklist = (items?: ChecklistItem[]): EditableChecklistItem[] =>
-  (items ?? []).filter((item) => isServiceActiveForFeature(item.label, 'checklist')).map((item) => ({
+const normalizeServiceKey = (value: string) =>
+  value
+    .trim()
+    .toLocaleLowerCase('pt-BR')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+
+const getMeasurementItems = (): EditableChecklistItem[] => {
+  const seen = new Set<string>();
+
+  return getEtapasMedicao().flatMap((stage) => {
+    const key = stage.id || normalizeServiceKey(stage.nome);
+
+    if (seen.has(key) || seen.has(normalizeServiceKey(stage.nome))) {
+      return [];
+    }
+
+    seen.add(key);
+    seen.add(normalizeServiceKey(stage.nome));
+
+    return [{
+      id: stage.id,
+      label: stage.nome,
+      state: 'ok' as const,
+      comment: '',
+      categoria: stage.categoria,
+      unidadeMedicao: stage.unidadeMedicao,
+      etapaCritica: stage.etapaCritica,
+      travaLiberacao: stage.travaLiberacao,
+    }];
+  });
+};
+
+const getInitialChecklist = (apartment?: NonNullable<ReturnType<typeof getApartmentById>>): EditableChecklistItem[] =>
+  (apartment ? getChecklistItemsForFeature(apartment, 'checklist') : []).map((item) => ({
     ...item,
     comment: item.comment ?? '',
     issueCriticality: item.state === 'pending' || item.state === 'partial' ? 'Média' : undefined,
@@ -161,9 +205,10 @@ const getChecklistFromStorage = (
 
     const storedItems = JSON.parse(storedValue) as Partial<EditableChecklistItem>[];
     const storedItemsById = new Map(storedItems.map((item) => [item.id, item]));
+    const storedItemsByLabel = new Map(storedItems.map((item) => [item.label, item]));
 
     return fallbackItems.map((item) => {
-      const storedItem = storedItemsById.get(item.id);
+      const storedItem = storedItemsById.get(item.id) ?? storedItemsByLabel.get(item.label);
 
       if (!storedItem) {
         return item;
@@ -238,8 +283,14 @@ const calculateApartmentStatus = (items: EditableChecklistItem[], progress: numb
   const pendingCount = items.filter((item) => item.state === 'pending').length;
   const partialCount = items.filter((item) => item.state === 'partial').length;
   const manyPending = pendingCount >= Math.max(3, Math.ceil(items.length * 0.35));
+  const hasCriticalConfiguredStage = items.some((item) => {
+    return (
+      (item.state === 'pending' || item.state === 'partial') &&
+      isCriticalStageForStatus(item.label)
+    );
+  });
 
-  if (progress < 50 || manyPending) {
+  if (progress < 50 || manyPending || hasCriticalConfiguredStage) {
     return 'critical';
   }
 
@@ -268,8 +319,8 @@ export default function ApartmentDetailScreen() {
   const visitStorageKey = getInspectionVisitStorageKey(apartment?.id);
 
   const initialChecklist = useMemo(
-    () => getInitialChecklist(apartment?.checklist),
-    [apartment?.checklist],
+    () => getInitialChecklist(apartment),
+    [apartment],
   );
   const [checklist, setChecklist] = useState<EditableChecklistItem[]>(initialChecklist);
   const [loadedStorageKey, setLoadedStorageKey] = useState<string>();
@@ -358,9 +409,7 @@ export default function ApartmentDetailScreen() {
   const okCount = checklist.filter((item) => item.state === 'ok' || item.state === 'notApplicable').length;
   const currentStatusKey = calculateApartmentStatus(checklist, progress);
   const status = statusConfig[currentStatusKey];
-  const measurableItems = checklist.filter(
-    (item) => item.state === 'ok' && isServiceActiveForFeature(item.label, 'medicao'),
-  );
+  const measurableItems = getMeasurementItems();
   const blockedServiceGroups = getBlockedServiceGroups(checklist);
   const scheduleRows = getScheduleRows(checklist);
   const totalBlockedServices = blockedServiceGroups.reduce(
@@ -786,8 +835,15 @@ export default function ApartmentDetailScreen() {
     });
   };
 
-  const getMeasurementDraft = (itemId: string) =>
-    measurementDrafts[itemId] ?? createEmptyMeasurementDraft();
+  const getMeasurementDraft = (item: EditableChecklistItem) => {
+    const stage = getServiceStageByName(item.label);
+    const draft = measurementDrafts[item.id] ?? createEmptyMeasurementDraft();
+
+    return {
+      ...draft,
+      unit: draft.unit || stage?.unidadeMedicao || 'un',
+    };
+  };
 
   const updateMeasurementDraft = (
     itemId: string,
@@ -845,8 +901,9 @@ export default function ApartmentDetailScreen() {
       return;
     }
 
-    const draft = getMeasurementDraft(item.id);
+    const draft = getMeasurementDraft(item);
     const contractor = draft.contractor.trim();
+    const stage = getServiceStageByName(item.label);
 
     if (!contractor) {
       setMeasurementAlert('Empreiteiro é obrigatório.');
@@ -922,15 +979,25 @@ export default function ApartmentDetailScreen() {
         towerId: tower.id,
         apartmentId: apartment.id,
         serviceId: item.id,
+        etapaId: stage?.id ?? item.id,
         contractorId,
         service: item.label,
+        serviceName: item.label,
+        servicoNome: item.label,
+        etapaNome: stage?.nome ?? item.label,
+        categoria: stage?.categoria,
+        unidadeMedicao: stage?.unidadeMedicao ?? (draft.unit.trim() || 'un'),
         contractor,
         quantity,
-        unit: draft.unit.trim() || 'un',
+        unit: draft.unit.trim() || stage?.unidadeMedicao || 'un',
         unitPrice,
+        valorUnitario: unitPrice,
         totalValue,
+        valorTotal: totalValue,
         periodStart,
         periodEnd,
+        periodoInicio: periodStart,
+        periodoFim: periodEnd,
         status: draft.status,
         comment: draft.comment.trim(),
         measurementType: draft.measurementType,
@@ -945,7 +1012,10 @@ export default function ApartmentDetailScreen() {
 
     setMeasurementDrafts((currentDrafts) => ({
       ...currentDrafts,
-      [item.id]: createEmptyMeasurementDraft(),
+      [item.id]: {
+        ...createEmptyMeasurementDraft(),
+        unit: stage?.unidadeMedicao ?? '',
+      },
     }));
   };
 
@@ -1635,12 +1705,12 @@ export default function ApartmentDetailScreen() {
       {measurableItems.length === 0 ? (
         <View style={styles.emptyPanel}>
           <Text style={styles.emptyPanelText}>
-            Marque um item do checklist como OK para gerar uma medição.
+            Cadastre uma etapa ativa com Medição = sim em Serviços e etapas.
           </Text>
         </View>
       ) : (
         measurableItems.map((item) => {
-          const draft = getMeasurementDraft(item.id);
+          const draft = getMeasurementDraft(item);
           const draftTotalValue = toNumber(draft.quantity) * toNumber(draft.unitPrice);
           const hasMeasurementForContractor =
             Boolean(draft.contractor.trim()) &&
@@ -1671,7 +1741,7 @@ export default function ApartmentDetailScreen() {
               <View style={styles.measurementHeader}>
                 <View>
                   <Text style={styles.measurementService}>{item.label}</Text>
-                  <Text style={styles.sectionHint}>Disponível porque o serviço está OK</Text>
+                  <Text style={styles.sectionHint}>Etapa ativa configurada para medição</Text>
                 </View>
                 <Text style={styles.measurementTotal}>{formatCurrency(draftTotalValue)}</Text>
               </View>

@@ -7,6 +7,7 @@ import type { Apartment, ApartmentStatus, ChecklistItem } from '@/src/data/mockO
 import { getApartmentsByTower, getTowerById } from '@/src/data/mockObras';
 import { summarizeApartmentSchedule } from '@/src/data/schedule';
 import { getBlockedServiceGroups, getChecklistForApartment } from '@/src/data/serviceBlockers';
+import { isCriticalStageForStatus } from '@/src/data/serviceStages';
 import { statusConfig } from '@/src/ui/status';
 
 const viewModes = ['Lista detalhada', 'Mapa compacto'] as const;
@@ -55,8 +56,13 @@ const calculateStatus = (items: ChecklistItem[], progress: number): ApartmentSta
   const pendingCount = items.filter((item) => item.state === 'pending').length;
   const partialCount = items.filter((item) => item.state === 'partial').length;
   const manyPending = pendingCount >= Math.max(3, Math.ceil(items.length * 0.35));
+  const hasCriticalStage = items.some(
+    (item) =>
+      (item.state === 'pending' || item.state === 'partial') &&
+      isCriticalStageForStatus(item.label),
+  );
 
-  if (progress < 50 || manyPending) {
+  if (progress < 50 || manyPending || hasCriticalStage) {
     return 'critical';
   }
 

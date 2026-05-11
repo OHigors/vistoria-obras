@@ -1,5 +1,5 @@
 import type { Apartment, ChecklistItem, ChecklistState } from '@/src/data/mockObras';
-import { getServiceDependencyMap, isServiceActiveForFeature } from '@/src/data/serviceStages';
+import { getChecklistItemsForFeature, getServiceDependencyMap } from '@/src/data/serviceStages';
 
 export type ScheduleStatus = 'No prazo' | 'Atenção' | 'Atrasado' | 'Concluído';
 
@@ -200,22 +200,25 @@ export const getScheduleStatus = (item: ScheduledChecklistItem): ScheduleStatus 
 };
 
 export const getScheduledChecklistForApartment = (apartment: Apartment): ScheduledChecklistItem[] => {
+  const scheduleItems = getChecklistItemsForFeature(apartment, 'cronograma');
+
   if (typeof window === 'undefined') {
-    return apartment.checklist.filter((item) => isServiceActiveForFeature(item.label, 'cronograma'));
+    return scheduleItems;
   }
 
   try {
     const storedValue = window.localStorage.getItem(getStorageKey(apartment.id));
 
     if (!storedValue) {
-      return apartment.checklist.filter((item) => isServiceActiveForFeature(item.label, 'cronograma'));
+      return scheduleItems;
     }
 
     const storedItems = JSON.parse(storedValue) as Partial<ScheduledChecklistItem>[];
     const storedItemsById = new Map(storedItems.map((item) => [item.id, item]));
+    const storedItemsByLabel = new Map(storedItems.map((item) => [item.label, item]));
 
-    return apartment.checklist.filter((item) => isServiceActiveForFeature(item.label, 'cronograma')).map((item) => {
-      const storedItem = storedItemsById.get(item.id);
+    return scheduleItems.map((item) => {
+      const storedItem = storedItemsById.get(item.id) ?? storedItemsByLabel.get(item.label);
 
       return {
         ...item,
@@ -246,7 +249,7 @@ export const getScheduledChecklistForApartment = (apartment: Apartment): Schedul
       };
     });
   } catch {
-    return apartment.checklist.filter((item) => isServiceActiveForFeature(item.label, 'cronograma'));
+    return scheduleItems;
   }
 };
 
