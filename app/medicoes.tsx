@@ -16,7 +16,13 @@ import {
   saveMeasurementsToStorage,
   toNumber,
 } from '@/src/data/localMeasurements';
-import { apartments, getApartmentById, getTowerById, project, towers } from '@/src/data/mockObras';
+import {
+  getApartmentById,
+  getConfiguredApartments,
+  getConfiguredTowers,
+  getTowerById,
+  project,
+} from '@/src/data/mockObras';
 
 type EnrichedMeasurement = Measurement & {
   apartmentNumber: string;
@@ -41,7 +47,7 @@ type EditDraft = {
 const allFilter = 'Todos';
 
 const getEnrichedMeasurements = (): EnrichedMeasurement[] =>
-  loadAllMeasurements(apartments.map((apartment) => apartment.id)).map((measurement) => {
+  loadAllMeasurements(getConfiguredApartments().map((apartment) => apartment.id)).map((measurement) => {
     const apartment = getApartmentById(measurement.apartmentId);
     const tower = apartment ? getTowerById(apartment.towerId) : undefined;
 
@@ -156,6 +162,7 @@ const persistMeasurementsForApartment = (
 };
 
 export default function MeasurementsScreen() {
+  const towers = getConfiguredTowers();
   const [measurements, setMeasurements] = useState<EnrichedMeasurement[]>([]);
   const [towerFilter, setTowerFilter] = useState(allFilter);
   const [apartmentFilter, setApartmentFilter] = useState('');

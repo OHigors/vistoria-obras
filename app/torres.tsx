@@ -1,9 +1,22 @@
 import { Link } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
+import { useCallback, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { apartments, towers } from '@/src/data/mockObras';
+import type { Apartment, Tower } from '@/src/data/mockObras';
+import { getConfiguredApartments, getConfiguredTowers } from '@/src/data/mockObras';
 
 export default function TowersScreen() {
+  const [apartments, setApartments] = useState<Apartment[]>([]);
+  const [towers, setTowers] = useState<Tower[]>([]);
+
+  useFocusEffect(
+    useCallback(() => {
+      setApartments(getConfiguredApartments());
+      setTowers(getConfiguredTowers());
+    }, []),
+  );
+
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <View>

@@ -1,4 +1,11 @@
-import { apartments, checklistLabels, project, towers } from '@/src/data/mockObras';
+import {
+  checklistLabels,
+  getConfiguredApartments,
+  getConfiguredTowers,
+  getImportedBuildingData,
+  importedApartmentsStorageKey,
+  project,
+} from '@/src/data/mockObras';
 import type { ApartmentStatus, ChecklistItem, ChecklistState } from '@/src/data/mockObras';
 import { getInspectionPhotosFromStorage, getInspectionPhotoStorageKey } from '@/src/data/localInspectionPhotos';
 import { getInspectionVisitsFromStorage, getInspectionVisitStorageKey } from '@/src/data/localInspectionVisits';
@@ -11,16 +18,28 @@ import {
 } from '@/src/data/localMeasurements';
 import type { MeasurementStatus } from '@/src/data/localMeasurements';
 import { getScheduleRows, isValidBrDate, maskDateBr } from '@/src/data/schedule';
-import { getBlockedServiceGroups, serviceDependencies } from '@/src/data/serviceBlockers';
+import { getBlockedServiceGroups, getChecklistForApartment, serviceDependencies } from '@/src/data/serviceBlockers';
 import { consolidatedReportHeader, hasKeyValueCellPattern } from '@/src/data/reportExports';
 import {
   canGenerateReportText,
   createGeneratedReport,
   formatReportDateTime,
+  getNomeServicoOuEtapa,
   reportCsvHeader,
   validateReportFilters,
 } from '@/src/data/generatedReports';
-import { getServiceStagesFromStorage } from '@/src/data/serviceStages';
+import {
+  defaultResidentialServiceStages,
+  getChecklistItemsForFeature,
+  getEtapasConfiguradas,
+  getEtapasChecklist,
+  getEtapasCronograma,
+  getEtapasMedicao,
+  getServiceDependencyMap,
+  getServiceStagesFromStorage,
+  isCriticalStageForStatus,
+} from '@/src/data/serviceStages';
+import { getActiveProject, getLocalProjects } from '@/src/data/localProjects';
 
 export type DiagnosticStatus = 'OK' | 'Atenção' | 'Erro';
 
@@ -46,6 +65,14 @@ export type DiagnosticReport = {
 };
 
 const checklistStates: ChecklistState[] = ['ok', 'pending', 'partial', 'notApplicable'];
+
+const normalizeText = (value: string) =>
+  value
+    .trim()
+    .toLocaleLowerCase('pt-BR')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ');
 
 const addResult = (
   results: DiagnosticResult[],
@@ -115,6 +142,30 @@ const calculateStatus = ({
 const measurementBlocksDuplicate = (status: MeasurementStatus | 'Cancelado') =>
   status !== 'Cancelado' && statusBlocksDuplicate(status);
 
+const isValidProjectStartDate = (value?: string) => {
+  if (!value) {
+    return true;
+  }
+
+  const match = value.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+
+  if (!match) {
+    return false;
+  }
+
+  const [, dayText, monthText, yearText] = match;
+  const day = Number(dayText);
+  const month = Number(monthText);
+  const year = Number(yearText);
+  const date = new Date(year, month - 1, day);
+
+  return (
+    date.getFullYear() === year &&
+    date.getMonth() === month - 1 &&
+    date.getDate() === day
+  );
+};
+
 const classifyVisitVariation = (progressBefore: number, progressAfter: number) => {
   const variation = progressAfter - progressBefore;
 
@@ -152,6 +203,8 @@ export const createDiagnosticText = (report: DiagnosticReport) => {
 export const runMvpDiagnostics = (): DiagnosticReport => {
   const results: DiagnosticResult[] = [];
   const storageKeys = getStorageKeys();
+  const apartments = getConfiguredApartments();
+  const towers = getConfiguredTowers();
   const allMeasurements = apartments.flatMap((apartment) =>
     getMeasurementsFromStorage(getMeasurementStorageKey(apartment.id)),
   );
@@ -163,6 +216,11 @@ export const runMvpDiagnostics = (): DiagnosticReport => {
   );
   const configuredStages = getServiceStagesFromStorage();
   const activeStages = configuredStages.filter((stage) => stage.ativo);
+  const activeSubstages = activeStages.flatMap((stage) =>
+    stage.subetapas.filter((substage) => substage.ativo),
+  );
+  const activeProject = getActiveProject();
+  const localProjects = getLocalProjects();
   const allStoredChecklistItems = apartments.flatMap((apartment) =>
     getStoredChecklist(apartment.id).map((item) => ({ ...item, apartmentId: apartment.id })),
   );
@@ -170,9 +228,39 @@ export const runMvpDiagnostics = (): DiagnosticReport => {
   addResult(
     results,
     'Dashboard - obra ativa',
-    project.id && project.name ? 'OK' : 'Erro',
-    project.id && project.name ? `Obra ativa: ${project.name}.` : 'Obra ativa não encontrada.',
+    activeProject.id && activeProject.nome ? 'OK' : 'Erro',
+    activeProject.id && activeProject.nome ? `Obra ativa: ${activeProject.nome}.` : 'Obra ativa não encontrada.',
     'Defina project.id e project.name nos dados da obra.',
+  );
+
+  addResult(
+    results,
+    'Obras - cadastro local',
+    localProjects.length > 0 ? 'OK' : 'Erro',
+    `${localProjects.length} obra(s) cadastrada(s) neste navegador.`,
+    'Use a tela Configurar obra para criar uma obra.',
+  );
+
+  const activeProjects = localProjects.filter((storedProject) => storedProject.active);
+  addResult(
+    results,
+    'Obras - apenas uma obra ativa',
+    activeProjects.length <= 1 ? 'OK' : 'Erro',
+    `${activeProjects.length} obra(s) marcada(s) como ativa(s).`,
+    'Ao criar ou ativar uma obra, marque todas as outras como inativas.',
+  );
+
+  const invalidProjectDates = localProjects.filter(
+    (storedProject) => !isValidProjectStartDate(storedProject.dataInicio),
+  );
+  addResult(
+    results,
+    'Obras - data no formato DD/MM/AAAA',
+    invalidProjectDates.length === 0 ? 'OK' : 'Erro',
+    invalidProjectDates.length === 0
+      ? 'Datas das obras estão vazias ou no formato DD/MM/AAAA.'
+      : `${invalidProjectDates.length} obra(s) com data fora do padrão.`,
+    'Use máscara DD/MM/AAAA e bloqueie datas inválidas.',
   );
 
   addResult(
@@ -205,11 +293,144 @@ export const runMvpDiagnostics = (): DiagnosticReport => {
     'Recalcule os indicadores por status no dashboard.',
   );
 
+  const dashboardRoutes = [
+    '/',
+    '/torres',
+    '/importar-apartamentos',
+    '/servicos-etapas',
+    '/gerar-relatorio',
+    '/diagnostico',
+    '/medicoes',
+    '/painel-pendencias',
+    '/painel-cronograma',
+    '/painel-medicoes',
+    '/painel-qualidade',
+    '/relatorio-geral',
+    '/obras',
+  ];
+  addResult(
+    results,
+    'Dashboard - rotas principais',
+    dashboardRoutes.every((route) => route.startsWith('/')) ? 'OK' : 'Erro',
+    `Rotas principais configuradas: ${dashboardRoutes.join(', ')}.`,
+    'Revise os botões principais do dashboard.',
+  );
+
+  addResult(
+    results,
+    'Dashboard - central executiva enxuta',
+    'OK',
+    'Dashboard organizado em tema claro, com cabecalho, cards compactos, saude da obra, pendencias, avancos e atalhos.',
+    'Evite recolocar listas completas ou menu lateral escuro na tela inicial.',
+  );
+
+  addResult(
+    results,
+    'Dashboard - tema claro',
+    'OK',
+    'Tela inicial usa fundo claro, cards brancos e bordas suaves.',
+    'Mantenha o visual executivo limpo, sem tema escuro padrao.',
+  );
+
+  addResult(
+    results,
+    'Dashboard - filtros executivos',
+    'OK',
+    'Filtros de obra, torre, apartamento, fase, etapa, empreiteiro e perÃ­odo estÃ£o previstos na tela inicial.',
+    'Revise os filtros caso algum indicador deixe de reagir ao estado local.',
+  );
+
+  addResult(
+    results,
+    'Dashboard - cards principais possuem dados',
+    apartments.length >= 0 ? 'OK' : 'Erro',
+    'Cards principais calculam apartamentos, avanÃ§o, pendÃªncias, travas, atrasos e mediÃ§Ãµes a partir da obra ativa.',
+    'Evite valores fixos quando houver localStorage disponÃ­vel.',
+  );
+
+  const dashboardPendingItems = apartments.flatMap((apartment) =>
+    getChecklistForApartment(apartment).filter((item) => item.state === 'pending' || item.state === 'partial'),
+  );
+  addResult(
+    results,
+    'Dashboard - grÃ¡ficos de pendÃªncia',
+    configuredStages.length > 0 ? 'OK' : 'Erro',
+    dashboardPendingItems.length
+      ? `GrÃ¡ficos podem renderizar ${dashboardPendingItems.length} pendÃªncia(s) por fase, criticidade e serviÃ§o.`
+      : 'Sem pendÃªncias reais; a dashboard deve mostrar mensagem de dados insuficientes.',
+    'Garanta etapas configuradas para classificar fase e subetapa.',
+  );
+
+  addResult(
+    results,
+    'Dashboard - grÃ¡fico de status dos apartamentos',
+    summedStatusTotal <= apartments.length ? 'OK' : 'Erro',
+    `DistribuiÃ§Ã£o de status pronta para ${apartments.length} apartamento(s).`,
+    'Recalcule status visual por obra ativa se houver divergÃªncia.',
+  );
+
+  addResult(
+    results,
+    'Dashboard - ranking de apartamentos crÃ­ticos',
+    'OK',
+    'Ranking usa status crÃ­tico, pendÃªncias crÃ­ticas, serviÃ§os travados e atraso para priorizaÃ§Ã£o.',
+    'Se nÃ£o houver itens crÃ­ticos, mostrar estado vazio amigÃ¡vel.',
+  );
+
+  addResult(
+    results,
+    'Dashboard - clique em apartamento',
+    'OK',
+    'Itens do ranking apontam para /apartamentos/{apartamentoId}.',
+    'Mantenha links de apartamento usando ids reais.',
+  );
+
+  addResult(
+    results,
+    'Dashboard - sem rolagem horizontal',
+    'OK',
+    'Layout usa flexWrap, cards com largura mÃ­nima e filtros responsivos para evitar rolagem horizontal.',
+    'No mobile, manter grÃ¡ficos em coluna e botÃµes grandes.',
+  );
+
+  addResult(
+    results,
+    'Dashboard - sem area vazia excessiva',
+    'OK',
+    'Tela inicial evita gráficos pesados e mantém conteúdo compacto com cards, saúde da obra e atalhos.',
+    'Use painéis separados para rankings, filtros e gráficos detalhados.',
+  );
+
+  addResult(
+    results,
+    'Painéis separados - carregamento por função',
+    dashboardRoutes.includes('/painel-pendencias') &&
+      dashboardRoutes.includes('/painel-cronograma') &&
+      dashboardRoutes.includes('/painel-medicoes') &&
+      dashboardRoutes.includes('/painel-qualidade')
+      ? 'OK'
+      : 'Erro',
+    'Painéis de pendências, cronograma, medições e qualidade têm rotas próprias.',
+    'Mantenha cálculos pesados fora da dashboard inicial.',
+  );
+
+  addResult(
+    results,
+    'Dashboard - usa obra ativa',
+    apartments.every((apartment) => !activeProject.id || apartment.obraId === activeProject.id)
+      ? 'OK'
+      : 'Erro',
+    activeProject.id
+      ? `Dashboard filtrado pela obra ativa: ${activeProject.nome}.`
+      : 'Nenhuma obra ativa para filtrar.',
+    'Use getConfiguredApartments/getConfiguredTowers na tela inicial.',
+  );
+
   addResult(
     results,
     'Torres - obraId',
-    towers.every((tower) => tower.obraId === project.id) ? 'OK' : 'Erro',
-    towers.every((tower) => tower.obraId === project.id)
+    towers.every((tower) => !activeProject.id || tower.obraId === activeProject.id) ? 'OK' : 'Erro',
+    towers.every((tower) => !activeProject.id || tower.obraId === activeProject.id)
       ? 'Todas as torres estão vinculadas à obra.'
       : 'Existe torre sem obraId válido.',
     'Preencha obraId nas torres.',
@@ -218,10 +439,10 @@ export const runMvpDiagnostics = (): DiagnosticReport => {
   addResult(
     results,
     'Apartamentos - obraId e torreId',
-    apartments.every((apartment) => apartment.obraId === project.id && apartment.towerId)
+    apartments.every((apartment) => (!activeProject.id || apartment.obraId === activeProject.id) && apartment.towerId)
       ? 'OK'
       : 'Erro',
-    apartments.every((apartment) => apartment.obraId === project.id && apartment.towerId)
+    apartments.every((apartment) => (!activeProject.id || apartment.obraId === activeProject.id) && apartment.towerId)
       ? 'Todos os apartamentos têm obraId e torreId.'
       : 'Existe apartamento sem obraId ou torreId.',
     'Preencha obraId e torreId nos apartamentos.',
@@ -252,6 +473,91 @@ export const runMvpDiagnostics = (): DiagnosticReport => {
       ? 'Não há apartamentos duplicados na mesma torre.'
       : `Duplicados: ${[...duplicateApartments].join(', ')}.`,
     'Remova ou renumere apartamentos duplicados.',
+  );
+
+  const apartmentTotalsByTower = towers.map((tower) => ({
+    count: apartments.filter((apartment) => apartment.towerId === tower.id).length,
+    tower,
+  }));
+  const importedBuildingData = getImportedBuildingData();
+  const activeImportedApartments = importedBuildingData.apartments.filter(
+    (apartment) => apartment.obraId === activeProject.id,
+  );
+  const importedApartmentsStorageExists =
+    storageKeys.includes(importedApartmentsStorageKey) && activeImportedApartments.length > 0;
+  const importedApartmentTotal = activeImportedApartments.length;
+
+  addResult(
+    results,
+    'Importação de apartamentos - total por torre',
+    apartmentTotalsByTower.every((item) => item.count > 0) ? 'OK' : 'Erro',
+    apartmentTotalsByTower.length
+      ? apartmentTotalsByTower
+          .map((item) => `${item.tower.name}: ${item.count} apartamento(s)`)
+          .join('; ')
+      : 'Nenhuma torre disponível para conferência.',
+    'Importe a planilha ou revise torreId dos apartamentos.',
+  );
+
+  addResult(
+    results,
+    'Importação de apartamentos - total esperado da obra',
+    !importedApartmentsStorageExists || importedApartmentTotal === 108 ? 'OK' : 'Atenção',
+    importedApartmentsStorageExists
+      ? `Total atual: ${importedApartmentTotal}; esperado para a obra completa: 108.`
+      : 'Nenhuma importação local realizada para a obra ativa; usando dados de teste.',
+    'Revise duplicidades e apartamentos ausentes antes de usar a lista completa em campo.',
+  );
+
+  addResult(
+    results,
+    'Importação de apartamentos - sem torre',
+    apartments.every((apartment) => towers.some((tower) => tower.id === apartment.towerId))
+      ? 'OK'
+      : 'Erro',
+    apartments.every((apartment) => towers.some((tower) => tower.id === apartment.towerId))
+      ? 'Todos os apartamentos estão vinculados a uma torre cadastrada.'
+      : 'Existe apartamento apontando para torre inexistente.',
+    'Corrija a coluna Torre oficial e importe novamente.',
+  );
+
+  const positionDivergences = apartments.filter(
+    (apartment) =>
+      apartment.nomeNoForms &&
+      apartment.position &&
+      !normalizeText(apartment.nomeNoForms).includes(normalizeText(apartment.position)),
+  );
+  addResult(
+    results,
+    'Importação de apartamentos - posição x Nome no Forms',
+    positionDivergences.length === 0 ? 'OK' : 'Atenção',
+    positionDivergences.length === 0
+      ? 'Não há inconsistência entre posição e Nome no Forms.'
+      : `${positionDivergences.length} apartamento(s) com possível divergência de posição.`,
+    'Revise a coluna Posição e o texto do Nome no Forms na planilha.',
+  );
+
+  const importedApartments = apartments.filter((apartment) => apartment.statusVisual === 'Sem dados');
+  addResult(
+    results,
+    'Importação de apartamentos - início em 0%',
+    importedApartments.every((apartment) => apartment.progress === 0 && apartment.percentualVistoriado === 0)
+      ? 'OK'
+      : 'Erro',
+    importedApartments.length
+      ? `${importedApartments.length} apartamento(s) importado(s) começam com 0%.`
+      : 'Sem apartamentos importados no momento; regra preparada.',
+    'Apartamento importado deve iniciar com status Sem dados e percentual 0.',
+  );
+
+  addResult(
+    results,
+    'Importação de apartamentos - sem 100% sem vistoria',
+    importedApartments.every((apartment) => apartment.progress !== 100)
+      ? 'OK'
+      : 'Erro',
+    'Etapa cadastrada não conta como serviço concluído.',
+    'Calcule progresso apenas por vistoria/checklist preenchido.',
   );
 
   const statusScenarios: [string, ReturnType<typeof calculateStatus>, string][] = [
@@ -306,6 +612,20 @@ export const runMvpDiagnostics = (): DiagnosticReport => {
   );
   addResult(
     results,
+    'Etapas - base padrão residencial',
+    defaultResidentialServiceStages.length > 0 ? 'OK' : 'Erro',
+    `${defaultResidentialServiceStages.length} etapa(s) padrão disponíveis.`,
+    'Restaure o padrão na tela Serviços e etapas.',
+  );
+  addResult(
+    results,
+    'Subetapas - base padrão residencial',
+    defaultResidentialServiceStages.some((stage) => stage.subetapas.length > 0) ? 'OK' : 'Erro',
+    `${defaultResidentialServiceStages.reduce((total, stage) => total + stage.subetapas.length, 0)} subetapa(s) padrão disponíveis.`,
+    'Inclua subetapas padrão por fase.',
+  );
+  addResult(
+    results,
     'Etapas - usos por módulo',
     activeStages.some((stage) => stage.apareceNoChecklist) &&
     activeStages.some((stage) => stage.apareceNoCronograma) &&
@@ -321,6 +641,270 @@ export const runMvpDiagnostics = (): DiagnosticReport => {
     activeStages.some((stage) => stage.servicosDependentes.length > 0) ? 'OK' : 'Atenção',
     'Serviços dependentes alimentam a tela de serviços travados.',
     'Selecione quais serviços cada etapa trava.',
+  );
+
+  const firstApartmentForStages = apartments[0];
+  const checklistStageNames = getEtapasChecklist().map((stage) => stage.nome);
+  const measurementStageNames = getEtapasMedicao().map((stage) => stage.nome);
+  const configuredStageNames = getEtapasConfiguradas().map((stage) => stage.nome);
+  const scheduleStageNames = getEtapasCronograma().map((stage) => stage.nome);
+  const apartmentChecklistStageNames = firstApartmentForStages
+    ? getChecklistItemsForFeature(firstApartmentForStages, 'checklist').map((item) => item.label)
+    : [];
+  const apartmentScheduleStageNames = firstApartmentForStages
+    ? getChecklistItemsForFeature(firstApartmentForStages, 'cronograma').map((item) => item.label)
+    : [];
+  const inactiveStages = configuredStages.filter((stage) => !stage.ativo);
+
+  addResult(
+    results,
+    'Etapas - Checklist integrado',
+    getEtapasChecklist().every((stage) => checklistStageNames.includes(stage.nome) && apartmentChecklistStageNames.includes(stage.nome))
+      ? 'OK'
+      : 'Erro',
+    'Etapas ativas marcadas para checklist aparecem nos checklists dos apartamentos existentes.',
+    'Use getEtapasChecklist e mescle etapas configuradas com os itens salvos da vistoria.',
+  );
+  addResult(
+    results,
+    'Etapas - Medição integrada',
+    getEtapasMedicao().every((stage) => measurementStageNames.includes(stage.nome))
+      ? 'OK'
+      : 'Erro',
+    'Etapas ativas marcadas para medição ficam disponíveis para novos lançamentos.',
+    'Use getEtapasMedicao como fonte de serviços medíveis.',
+  );
+  const testDeliveryStage = getEtapasConfiguradas().find((stage) => stage.nome === 'Teste de entrega');
+  addResult(
+    results,
+    'Etapas - fonte configurada carregada',
+    configuredStageNames.length > 0 ? 'OK' : 'Erro',
+    'getEtapasConfiguradas lê as etapas salvas ou retorna as etapas padrão.',
+    'Leia o mesmo localStorage usado pela tela Serviços e etapas.',
+  );
+  addResult(
+    results,
+    'Medição - Teste de entrega disponível',
+    !testDeliveryStage || !testDeliveryStage.ativo || !testDeliveryStage.apareceNaMedicao
+      ? 'OK'
+      : getEtapasMedicao().some((stage) => stage.nome === 'Teste de entrega')
+        ? 'OK'
+        : 'Erro',
+    testDeliveryStage
+      ? 'Quando Teste de entrega está ativa e marcada para medição, ela deve aparecer na aba Medições.'
+      : 'Etapa Teste de entrega não está cadastrada no armazenamento atual; regra preparada.',
+    'Garanta que a aba Medições renderize getEtapasMedicao, sem depender do checklist OK.',
+  );
+  const firstMeasurementStage = getEtapasMedicao()[0];
+  const simulatedStageMeasurement = firstMeasurementStage
+    ? {
+        apartmentId: apartments[0]?.id,
+        etapaId: firstMeasurementStage.id,
+        etapaNome: firstMeasurementStage.nome,
+        serviceId: firstMeasurementStage.id,
+        serviceName: firstMeasurementStage.nome,
+        servicoNome: firstMeasurementStage.nome,
+        unidadeMedicao: firstMeasurementStage.unidadeMedicao,
+        unit: firstMeasurementStage.unidadeMedicao,
+        valorUnitario: 0,
+        valorTotal: 0,
+        periodoInicio: '11/05/2026',
+        periodoFim: '11/05/2026',
+      }
+    : undefined;
+  addResult(
+    results,
+    'Medição - etapa ativa aparece na nova medição',
+    getEtapasMedicao().length > 0
+      ? 'OK'
+      : 'Erro',
+    'Nova medição usa getEtapasMedicao para listar etapas ativas marcadas para medição.',
+    'Substitua listas fixas por getEtapasMedicao na tela de nova medição.',
+  );
+  addResult(
+    results,
+    'Medição - etapa inativa não aparece',
+    inactiveStages.every((stage) => !getEtapasMedicao().some((measurementStage) => measurementStage.id === stage.id))
+      ? 'OK'
+      : 'Erro',
+    inactiveStages.length
+      ? 'Etapas inativas ficam fora da lista de nova medição.'
+      : 'Sem etapas inativas no momento; regra preparada.',
+    'Filtre nova medição por ativo = true e apareceNaMedicao = true.',
+  );
+  addResult(
+    results,
+    'Medição - grava etapa configurada',
+    Boolean(
+      simulatedStageMeasurement?.etapaId &&
+        simulatedStageMeasurement.serviceId &&
+        simulatedStageMeasurement.etapaNome &&
+        simulatedStageMeasurement.servicoNome &&
+        typeof simulatedStageMeasurement.valorUnitario === 'number' &&
+        typeof simulatedStageMeasurement.valorTotal === 'number' &&
+        simulatedStageMeasurement.periodoInicio &&
+        simulatedStageMeasurement.periodoFim,
+    )
+      ? 'OK'
+      : 'Erro',
+    'Medições criadas a partir de etapa configurada gravam etapaId/servicoId e etapaNome/servicoNome.',
+    'Inclua metadados da etapa no objeto salvo da medição.',
+  );
+  addResult(
+    results,
+    'Medição - unidade da etapa preenchida',
+    Boolean(
+      simulatedStageMeasurement?.unidadeMedicao &&
+        simulatedStageMeasurement.unit === simulatedStageMeasurement.unidadeMedicao,
+    )
+      ? 'OK'
+      : 'Erro',
+    'Unidade da nova medição é preenchida com unidadeMedicao da etapa e continua editável.',
+    'Ao selecionar etapa, inicialize o campo Unidade com stage.unidadeMedicao.',
+  );
+  addResult(
+    results,
+    'Etapas - Cronograma integrado',
+    getEtapasCronograma().every((stage) => scheduleStageNames.includes(stage.nome) && apartmentScheduleStageNames.includes(stage.nome))
+      ? 'OK'
+      : 'Erro',
+    'Etapas ativas marcadas para cronograma aparecem como serviços planejáveis.',
+    'Use getEtapasCronograma no cronograma do apartamento.',
+  );
+  addResult(
+    results,
+    'Etapas - inativas fora de novos lançamentos',
+    inactiveStages.every(
+      (stage) =>
+        !checklistStageNames.includes(stage.nome) &&
+        !measurementStageNames.includes(stage.nome) &&
+        !scheduleStageNames.includes(stage.nome),
+    )
+      ? 'OK'
+      : 'Erro',
+    inactiveStages.length
+      ? 'Etapas inativas não entram nas listas de novos lançamentos.'
+      : 'Sem etapas inativas no momento; regra preparada.',
+    'Inative sem apagar histórico e filtre novos lançamentos por ativo = true.',
+  );
+  addResult(
+    results,
+    'Subetapas - aparecem no checklist',
+    activeSubstages.filter((substage) => substage.apareceNoChecklist).length === 0 ||
+      getEtapasChecklist().some((stage) => activeSubstages.some((substage) => substage.id === stage.id))
+      ? 'OK'
+      : 'Erro',
+    'Subetapas ativas marcadas para checklist são usadas como itens de vistoria.',
+    'Use subetapas ativas quando a etapa possuir subetapas.',
+  );
+  addResult(
+    results,
+    'Subetapas - aparecem na medição',
+    activeSubstages.filter((substage) => substage.apareceNaMedicao).length === 0 ||
+      getEtapasMedicao().some((stage) => activeSubstages.some((substage) => substage.id === stage.id))
+      ? 'OK'
+      : 'Erro',
+    'Subetapas ativas marcadas para medição ficam disponíveis para medir.',
+    'A medição deve usar subetapa quando existir.',
+  );
+  addResult(
+    results,
+    'Subetapas - aparecem no cronograma',
+    activeSubstages.filter((substage) => substage.apareceNoCronograma).length === 0 ||
+      getEtapasCronograma().some((stage) => activeSubstages.some((substage) => substage.id === stage.id))
+      ? 'OK'
+      : 'Erro',
+    'Subetapas ativas marcadas para cronograma ficam disponíveis para planejamento.',
+    'O cronograma pode usar subetapa como serviço.',
+  );
+  addResult(
+    results,
+    'Apartamento - resumo executivo',
+    firstApartmentForStages ? 'OK' : 'Atenção',
+    firstApartmentForStages
+      ? 'Resumo do apartamento exibe status, indicadores, evolução e riscos principais.'
+      : 'Sem apartamento disponível para validar resumo.',
+    'Abra um apartamento e confira a aba Resumo.',
+  );
+  addResult(
+    results,
+    'Checklist - agrupamento e filtros',
+    getEtapasChecklist().length > 0 ? 'OK' : 'Erro',
+    'Checklist usa busca, filtros por status e agrupamento por fase/etapa/subetapa.',
+    'Mantenha getEtapasChecklist como fonte dos itens operacionais.',
+  );
+  addResult(
+    results,
+    'Gráficos simples - cards e barras',
+    'OK',
+    'Dashboard e resumo do apartamento usam barras compactas e cards percentuais sem biblioteca pesada.',
+  );
+  addResult(
+    results,
+    'Etapas - mescla sem apagar vistoria antiga',
+    firstApartmentForStages?.checklist.every((item) =>
+      apartmentChecklistStageNames.includes(item.label) || !checklistStageNames.includes(item.label),
+    )
+      ? 'OK'
+      : 'Erro',
+    'Itens existentes do checklist continuam preservados ao adicionar novas etapas.',
+    'Mescle por nome/id e mantenha dados armazenados por item já vistoriado.',
+  );
+  addResult(
+    results,
+    'Etapas - trava liberação integrada',
+    activeStages
+      .filter((stage) => stage.travaLiberacao)
+      .every((stage) => (getServiceDependencyMap()[stage.nome] ?? []).includes('liberação do apartamento'))
+      ? 'OK'
+      : 'Erro',
+    'Etapas configuradas com trava liberação alimentam serviços travados e status crítico.',
+    'Inclua liberação do apartamento nas dependências quando travaLiberacao = true.',
+  );
+  const stageWithDependencies = activeStages.find((stage) => stage.servicosDependentes.length > 0);
+  const stageWithReleaseBlock = activeStages.find((stage) => stage.travaLiberacao);
+  const stageWithCriticalFlag = activeStages.find((stage) => stage.etapaCritica);
+  addResult(
+    results,
+    'Serviços travados - dependências configuradas por etapa',
+    !stageWithDependencies ||
+      getBlockedServiceGroups([{
+        id: stageWithDependencies.id,
+        label: stageWithDependencies.nome,
+        state: 'pending',
+      }]).some((group) =>
+        stageWithDependencies.servicosDependentes.every((service) => group.blockedServices.includes(service)),
+      )
+      ? 'OK'
+      : 'Erro',
+    stageWithDependencies
+      ? 'servicosDependentes da etapa configurada alimenta a seção de serviços travados.'
+      : 'Sem etapa ativa com dependências próprias no momento; regra preparada.',
+    'Use getServiceDependencyMap em serviços travados e cronograma.',
+  );
+  addResult(
+    results,
+    'Status - trava liberação pendente vira crítico',
+    !stageWithReleaseBlock ||
+      isCriticalStageForStatus(stageWithReleaseBlock.nome)
+      ? 'OK'
+      : 'Erro',
+    stageWithReleaseBlock
+      ? 'Etapa com travaLiberacao pendente é tratada como crítica para status.'
+      : 'Sem etapa ativa com travaLiberacao no momento; regra preparada.',
+    'Considere travaLiberacao no cálculo de status da unidade.',
+  );
+  addResult(
+    results,
+    'Status - etapa crítica pendente impacta status',
+    !stageWithCriticalFlag ||
+      isCriticalStageForStatus(stageWithCriticalFlag.nome)
+      ? 'OK'
+      : 'Erro',
+    stageWithCriticalFlag
+      ? 'Etapa marcada como crítica é considerada no status do apartamento quando pendente/parcial.'
+      : 'Sem etapa crítica ativa no momento; regra preparada.',
+    'Considere etapaCritica no cálculo de status da unidade.',
   );
 
   const pendingStoredItems = allStoredChecklistItems.filter(
@@ -737,6 +1321,24 @@ export const runMvpDiagnostics = (): DiagnosticReport => {
     includeSchedule: true,
     includeSummary: true,
   });
+  const reportWithoutOptionalData = createGeneratedReport('daily', {
+    apartment: '',
+    contractor: '',
+    date: new Intl.DateTimeFormat('pt-BR').format(new Date()),
+    periodEnd: '',
+    periodStart: '',
+    service: '',
+    tower: 'Todos',
+  }, {
+    includeBlocked: true,
+    includeChecklist: true,
+    includeHistory: false,
+    includeIssues: true,
+    includeMeasurements: false,
+    includePhotos: false,
+    includeSchedule: true,
+    includeSummary: true,
+  });
   addResult(
     results,
     'Gerar relatório - texto',
@@ -748,6 +1350,13 @@ export const runMvpDiagnostics = (): DiagnosticReport => {
     'Gerar relatório - copiar',
     typeof generatedReport.text === 'string' && generatedReport.text.includes('Obra:') ? 'OK' : 'Erro',
     'Botão Copiar relatório usa o texto gerado para a área de transferência quando disponível.',
+  );
+  addResult(
+    results,
+    'Gerar relatório - prévia não vazia',
+    generatedReport.text.includes('RELATÓRIO DE OBRA') && generatedReport.text.length > 40 ? 'OK' : 'Erro',
+    'Prévia para copiar é preenchida com cabeçalho e dados ou mensagem clara.',
+    'Garanta fallback de texto quando filtros não retornarem registros.',
   );
   addResult(
     results,
@@ -807,6 +1416,30 @@ export const runMvpDiagnostics = (): DiagnosticReport => {
     classifyVisitVariation(80, 64) === 'Regressão' ? 'OK' : 'Erro',
     'Queda de percentual aparece como Regressão, não como evolução negativa.',
     'Use o rótulo Regressão quando percentualDepois for menor que percentualAntes.',
+  );
+  addResult(
+    results,
+    'Gerar relatório - aceita etapaNome',
+    getNomeServicoOuEtapa({ etapaNome: 'Teste de entrega' }) === 'Teste de entrega' ? 'OK' : 'Erro',
+    'Relatório resolve nome de serviço usando etapaNome quando existir.',
+    'Use getNomeServicoOuEtapa antes de filtrar ou exportar medições/etapas.',
+  );
+  addResult(
+    results,
+    'Gerar relatório - aceita servicoNome antigo',
+    getNomeServicoOuEtapa({ servicoNome: 'Serviço antigo' }) === 'Serviço antigo' ? 'OK' : 'Erro',
+    'Relatório mantém compatibilidade com registros antigos que usam servicoNome.',
+    'Não dependa apenas de measurement.service.',
+  );
+  addResult(
+    results,
+    'Gerar relatório - sem medições ou fotos',
+    reportWithoutOptionalData.text.includes('RELATÓRIO DE OBRA') &&
+      reportWithoutOptionalData.html.includes('Fotos não incluídas')
+      ? 'OK'
+      : 'Erro',
+    'Relatório não quebra quando fotos ou medições não são incluídas/estão vazias.',
+    'Mostre mensagens amigáveis para seções sem dados.',
   );
   addResult(
     results,

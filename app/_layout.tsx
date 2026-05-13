@@ -22,9 +22,15 @@ export default function RootLayout() {
         <Stack.Screen name="torres/[torreId]" options={{ title: 'Apartamentos' }} />
         <Stack.Screen name="apartamentos/[apartamentoId]" options={{ title: 'Vistoria' }} />
         <Stack.Screen name="medicoes" options={{ title: 'Medições' }} />
+        <Stack.Screen name="painel-pendencias" options={{ title: 'Painel de pendências' }} />
+        <Stack.Screen name="painel-cronograma" options={{ title: 'Painel de cronograma' }} />
+        <Stack.Screen name="painel-medicoes" options={{ title: 'Painel de medições' }} />
+        <Stack.Screen name="painel-qualidade" options={{ title: 'Painel de qualidade' }} />
         <Stack.Screen name="relatorio-geral" options={{ title: 'Relatório geral' }} />
         <Stack.Screen name="gerar-relatorio" options={{ title: 'Gerar relatório' }} />
         <Stack.Screen name="servicos-etapas" options={{ title: 'Serviços e etapas' }} />
+        <Stack.Screen name="obras" options={{ title: 'Configurar obra' }} />
+        <Stack.Screen name="importar-apartamentos" options={{ title: 'Importar apartamentos' }} />
         <Stack.Screen name="diagnostico" options={{ title: 'Diagnóstico do MVP' }} />
       </Stack>
       <StatusBar style="auto" />

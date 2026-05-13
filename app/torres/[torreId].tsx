@@ -21,6 +21,13 @@ const filterOptions = [
   'Travado',
 ] as const;
 
+const noDataStatus = {
+  background: '#F1F5F9',
+  border: '#CBD5E1',
+  color: '#64748B',
+  label: 'Sem dados',
+};
+
 type ViewMode = (typeof viewModes)[number];
 type FilterOption = (typeof filterOptions)[number];
 
@@ -96,6 +103,7 @@ export default function TowerApartmentsScreen() {
 
   const apartmentSummaries: ApartmentSummary[] = towerApartments.map((apartment) => {
     const checklist = getChecklistForApartment(apartment);
+    const hasNoInspectionData = apartment.statusVisual === 'Sem dados';
     const pendingCount = checklist.filter(
       (item) => item.state === 'pending' || item.state === 'partial',
     ).length;
@@ -108,13 +116,13 @@ export default function TowerApartmentsScreen() {
 
     return {
       apartment,
-      blockedCount,
+      blockedCount: hasNoInspectionData ? 0 : blockedCount,
       checklist,
-      maxDelayDays: scheduleSummary.maxDelayDays,
-      mostDelayedService: scheduleSummary.mostDelayedService,
-      pendingCount,
-      progress,
-      statusKey: calculateStatus(checklist, progress),
+      maxDelayDays: hasNoInspectionData ? 0 : scheduleSummary.maxDelayDays,
+      mostDelayedService: hasNoInspectionData ? undefined : scheduleSummary.mostDelayedService,
+      pendingCount: hasNoInspectionData ? 0 : pendingCount,
+      progress: hasNoInspectionData ? 0 : progress,
+      statusKey: hasNoInspectionData ? 'attention' : calculateStatus(checklist, progress),
     };
   });
 
@@ -122,7 +130,10 @@ export default function TowerApartmentsScreen() {
     const normalizedSearch = normalizeApartmentSearch(search);
     const matchesSearch =
       !normalizedSearch || summary.apartment.number.includes(normalizedSearch);
-    const statusLabel = statusConfig[summary.statusKey].label;
+    const statusLabel =
+      summary.apartment.statusVisual === 'Sem dados'
+        ? noDataStatus.label
+        : statusConfig[summary.statusKey].label;
     const matchesFilter =
       filter === 'Todos' ||
       statusLabel === filter ||
@@ -219,7 +230,10 @@ export default function TowerApartmentsScreen() {
       ) : viewMode === 'Lista detalhada' ? (
         <View style={styles.grid}>
           {filteredSummaries.map((summary) => {
-            const status = statusConfig[summary.statusKey];
+            const status =
+              summary.apartment.statusVisual === 'Sem dados'
+                ? noDataStatus
+                : statusConfig[summary.statusKey];
             const { apartment } = summary;
 
             return (
@@ -290,7 +304,10 @@ export default function TowerApartmentsScreen() {
               <Text style={styles.floorTitle}>{floor}</Text>
               <View style={styles.compactGrid}>
                 {summariesByFloor[floor].map((summary) => {
-                  const status = statusConfig[summary.statusKey];
+                  const status =
+                    summary.apartment.statusVisual === 'Sem dados'
+                      ? noDataStatus
+                      : statusConfig[summary.statusKey];
 
                   return (
                     <Link

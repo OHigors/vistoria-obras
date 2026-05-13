@@ -7,8 +7,15 @@ import { getInspectionPhotosFromStorage, getInspectionPhotoStorageKey } from '@/
 import { getInspectionVisitsFromStorage, getInspectionVisitStorageKey } from '@/src/data/localInspectionVisits';
 import type { Measurement, MeasurementStatus } from '@/src/data/localMeasurements';
 import { formatCurrency, loadAllMeasurements, measurementStatusOptions, parseBrDateForMeasurement } from '@/src/data/localMeasurements';
+import { getActiveProject } from '@/src/data/localProjects';
 import type { Apartment, ApartmentStatus, ChecklistItem } from '@/src/data/mockObras';
-import { apartments, getApartmentById, getTowerById, project, towers } from '@/src/data/mockObras';
+import {
+  getApartmentById,
+  getConfiguredApartments,
+  getConfiguredTowers,
+  getTowerById,
+  project,
+} from '@/src/data/mockObras';
 import { consolidatedReportHeader } from '@/src/data/reportExports';
 import { getScheduleRows, getScheduledChecklistForApartment } from '@/src/data/schedule';
 import { getBlockedServiceGroups } from '@/src/data/serviceBlockers';
@@ -211,6 +218,9 @@ const getTowerLabel = (towerId: string) => {
 
 export default function GeneralReportScreen() {
   const [refreshToken, setRefreshToken] = useState(0);
+  const towers = getConfiguredTowers();
+  const activeProject = getActiveProject();
+  const projectName = activeProject.nome || project.name;
   const [towerFilter, setTowerFilter] = useState(allFilter);
   const [apartmentFilter, setApartmentFilter] = useState('');
   const [serviceFilter, setServiceFilter] = useState('');
@@ -238,6 +248,7 @@ export default function GeneralReportScreen() {
 
   const reportData = useMemo(() => {
     void refreshToken;
+    const apartments = getConfiguredApartments();
 
     const measurements: MeasurementReportRow[] = loadAllMeasurements(apartments.map((apartment) => apartment.id))
       .map((measurement) => {
@@ -411,7 +422,7 @@ export default function GeneralReportScreen() {
       'relatorio-apartamentos-residencial-cagliari.csv',
       ['obra', 'torre', 'apartamento', 'pavimento', 'status_visual', 'percentual_vistoriado', 'pendencias', 'servicos_travados', 'dias_atraso', 'ultima_visita'],
       apartmentRows.map((row) => [
-        project.name,
+        projectName,
         row.towerLabel,
         row.apartment.number,
         row.floor,
@@ -429,7 +440,7 @@ export default function GeneralReportScreen() {
       'relatorio-pendencias-residencial-cagliari.csv',
       ['obra', 'torre', 'apartamento', 'servico', 'descricao', 'status', 'criticidade', 'trava_servico', 'fotos', 'data_criacao'],
       pendingRows.map((row) => [
-        project.name,
+        projectName,
         row.towerLabel,
         row.apartmentNumber,
         row.service,
@@ -447,7 +458,7 @@ export default function GeneralReportScreen() {
       'relatorio-servicos-travados-residencial-cagliari.csv',
       ['obra', 'torre', 'apartamento', 'servico_origem', 'servicos_impactados', 'tipo_bloqueio', 'impacto_cronograma', 'impacto_liberacao', 'status_apartamento'],
       blockedRows.map((row) => [
-        project.name,
+        projectName,
         row.towerLabel,
         row.apartmentNumber,
         row.originService,
@@ -464,7 +475,7 @@ export default function GeneralReportScreen() {
       'relatorio-cronograma-residencial-cagliari.csv',
       ['obra', 'torre', 'apartamento', 'servico', 'inicio_planejado', 'fim_planejado', 'inicio_real', 'fim_real', 'status', 'dias_atraso', 'servico_bloqueado_por'],
       scheduleRows.map((row) => [
-        project.name,
+        projectName,
         row.towerLabel,
         row.apartmentNumber,
         row.service,
@@ -483,7 +494,7 @@ export default function GeneralReportScreen() {
       'relatorio-medicoes-residencial-cagliari.csv',
       ['obra', 'torre', 'apartamento', 'servico', 'empreiteiro', 'periodo_inicio', 'periodo_fim', 'quantidade', 'unidade', 'valor_unitario', 'valor_total', 'status', 'responsavel', 'data_lancamento', 'data_aprovacao'],
       measurementRows.map((row) => [
-        project.name,
+        projectName,
         row.towerLabel,
         row.apartmentNumber,
         row.service,
@@ -506,7 +517,7 @@ export default function GeneralReportScreen() {
       'relatorio-visitas-residencial-cagliari.csv',
       ['obra', 'torre', 'apartamento', 'data_visita', 'responsavel', 'percentual_antes', 'percentual_depois', 'evolucao_ou_regressao', 'status_apos_visita', 'fotos_adicionadas', 'pendencias'],
       visitRows.map((row) => [
-        project.name,
+        projectName,
         row.towerLabel,
         row.apartmentNumber,
         row.date,
@@ -539,7 +550,7 @@ export default function GeneralReportScreen() {
       [
         ...apartmentRows.map((row) => [
           'apartamento',
-          project.name,
+          projectName,
           row.towerLabel,
           row.apartment.number,
           row.floor,
@@ -564,7 +575,7 @@ export default function GeneralReportScreen() {
         ]),
         ...pendingRows.map((row) => [
           'pendencia',
-          project.name,
+          projectName,
           row.towerLabel,
           row.apartmentNumber,
           emptyValue,
@@ -589,7 +600,7 @@ export default function GeneralReportScreen() {
         ]),
         ...blockedRows.map((row) => [
           'servico_travado',
-          project.name,
+          projectName,
           row.towerLabel,
           row.apartmentNumber,
           emptyValue,
@@ -614,7 +625,7 @@ export default function GeneralReportScreen() {
         ]),
         ...scheduleRows.map((row) => [
           'cronograma',
-          project.name,
+          projectName,
           row.towerLabel,
           row.apartmentNumber,
           emptyValue,
@@ -639,7 +650,7 @@ export default function GeneralReportScreen() {
         ]),
         ...measurementRows.map((row) => [
           'medicao',
-          project.name,
+          projectName,
           row.towerLabel,
           row.apartmentNumber,
           emptyValue,
@@ -664,7 +675,7 @@ export default function GeneralReportScreen() {
         ]),
         ...visitRows.map((row) => [
           'visita',
-          project.name,
+          projectName,
           row.towerLabel,
           row.apartmentNumber,
           emptyValue,

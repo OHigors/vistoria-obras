@@ -1,9 +1,11 @@
 import { getInspectionPhotosFromStorage, getInspectionPhotoStorageKey } from '@/src/data/localInspectionPhotos';
 import { getInspectionVisitsFromStorage, getInspectionVisitStorageKey, localResponsible } from '@/src/data/localInspectionVisits';
 import { formatCurrency, loadAllMeasurements, parseBrDateForMeasurement } from '@/src/data/localMeasurements';
-import { apartments, getTowerById, project } from '@/src/data/mockObras';
+import { getActiveProject } from '@/src/data/localProjects';
+import { getConfiguredApartments, getTowerById, project } from '@/src/data/mockObras';
 import { getScheduleRows, getScheduledChecklistForApartment } from '@/src/data/schedule';
 import { getBlockedServiceGroups } from '@/src/data/serviceBlockers';
+import { isCriticalStageForStatus } from '@/src/data/serviceStages';
 import { statusConfig } from '@/src/ui/status';
 
 export type ReportKind = 'daily' | 'tower' | 'apartment' | 'service' | 'contractor';
@@ -80,6 +82,22 @@ export const validateReportFilters = (kind: ReportKind, filters: ReportFilters) 
 const emptyValue = 'não informado';
 const emptyBlockValue = 'não bloqueado';
 
+type ServiceLikeRecord = {
+  etapaNome?: string;
+  nome?: string;
+  service?: string;
+  serviceName?: string;
+  servicoNome?: string;
+};
+
+export const getNomeServicoOuEtapa = (record: ServiceLikeRecord) =>
+  record.etapaNome?.trim() ||
+  record.servicoNome?.trim() ||
+  record.serviceName?.trim() ||
+  record.service?.trim() ||
+  record.nome?.trim() ||
+  emptyValue;
+
 const calculateProgress = (items: ReturnType<typeof getScheduledChecklistForApartment>) => {
   const score = items.reduce((total, item) => {
     if (item.state === 'ok' || item.state === 'notApplicable') {
@@ -99,8 +117,13 @@ const calculateProgress = (items: ReturnType<typeof getScheduledChecklistForApar
 const calculateStatus = (items: ReturnType<typeof getScheduledChecklistForApartment>, progress: number) => {
   const pendingCount = items.filter((item) => item.state === 'pending').length;
   const partialCount = items.filter((item) => item.state === 'partial').length;
+  const hasCriticalStage = items.some(
+    (item) =>
+      (item.state === 'pending' || item.state === 'partial') &&
+      isCriticalStageForStatus(item.label),
+  );
 
-  if (progress < 50 || pendingCount >= Math.max(3, Math.ceil(items.length * 0.35))) {
+  if (progress < 50 || hasCriticalStage || pendingCount >= Math.max(3, Math.ceil(items.length * 0.35))) {
     return 'critical';
   }
 
@@ -212,16 +235,23 @@ export const createGeneratedReport = (
 ): GeneratedReport => {
   const validationMessage = validateReportFilters(kind, filters);
   const isValid = !validationMessage;
+  const activeProject = getActiveProject();
+  const projectName = activeProject.nome || project.name;
+  const apartments = getConfiguredApartments();
   const measurements = loadAllMeasurements(apartments.map((apartment) => apartment.id));
   const apartmentFilter = normalizeApartmentFilter(filters.apartment);
   const selectedApartments = isValid ? apartments.filter((apartment) => {
     const tower = getTowerById(apartment.towerId);
+    const apartmentChecklist = getScheduledChecklistForApartment(apartment);
     const apartmentMatches = kind === 'apartment'
       ? normalizeApartmentFilter(apartment.number) === apartmentFilter
       : matchesText(apartment.number, filters.apartment);
     const serviceMatches = kind !== 'service' || (
-      apartment.checklist.some((item) => matchesText(item.label, filters.service)) ||
-      measurements.some((measurement) => measurement.apartmentId === apartment.id && matchesText(measurement.service, filters.service))
+      apartmentChecklist.some((item) => matchesText(item.label, filters.service)) ||
+      measurements.some((measurement) =>
+        measurement.apartmentId === apartment.id &&
+        matchesText(getNomeServicoOuEtapa(measurement), filters.service),
+      )
     );
 
     return (
@@ -235,7 +265,7 @@ export const createGeneratedReport = (
 
   const textLines = [
     'RELATÓRIO DE OBRA',
-    `Obra: ${project.name}`,
+    `Obra: ${projectName}`,
     `Data: ${filters.date || getToday()}`,
     `Tipo: ${getReportTitle(kind)}`,
     `Responsável: ${localResponsible}`,
@@ -264,7 +294,7 @@ export const createGeneratedReport = (
     const delayedRows = scheduleRows.filter((row) => row.delayDays > 0);
     const apartmentMeasurements = measurements.filter((measurement) =>
       measurement.apartmentId === apartment.id &&
-      matchesText(measurement.service, filters.service) &&
+      matchesText(getNomeServicoOuEtapa(measurement), filters.service) &&
       matchesText(measurement.contractor, filters.contractor) &&
       isInPeriod(measurement.periodStart, filters.periodStart, filters.periodEnd),
     );
@@ -282,46 +312,46 @@ export const createGeneratedReport = (
       textLines.push(`Atrasos: ${delayedRows.length}`);
       textLines.push(`Medições: ${formatCurrency(apartmentMeasurements.reduce((total, measurement) => total + measurement.totalValue, 0))}`);
       textLines.push('');
-      csvRows.push(['resumo', project.name, towerLabel, apartment.number, emptyValue, status.label, emptyValue, emptyValue, emptyBlockValue, Math.max(0, ...scheduleRows.map((row) => row.delayDays)), emptyValue, emptyValue, emptyValue, emptyValue, apartmentMeasurements.reduce((total, measurement) => total + measurement.totalValue, 0), filters.date || getToday()]);
+      csvRows.push(['resumo', projectName, towerLabel, apartment.number, emptyValue, status.label, emptyValue, emptyValue, emptyBlockValue, Math.max(0, ...scheduleRows.map((row) => row.delayDays)), emptyValue, emptyValue, emptyValue, emptyValue, apartmentMeasurements.reduce((total, measurement) => total + measurement.totalValue, 0), filters.date || getToday()]);
     }
 
     if (options.includeChecklist) {
       checklist.forEach((item) => {
-        csvRows.push(['checklist', project.name, towerLabel, apartment.number, item.label, item.state, emptyValue, item.comment ?? emptyValue, emptyBlockValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, filters.date || getToday()]);
+        csvRows.push(['checklist', projectName, towerLabel, apartment.number, item.label, item.state, emptyValue, item.comment ?? emptyValue, emptyBlockValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, filters.date || getToday()]);
       });
     }
 
     if (options.includeIssues) {
       pendingItems.forEach((item) => {
-        csvRows.push(['pendencia', project.name, towerLabel, apartment.number, item.label, item.state === 'pending' ? 'Pendente' : 'Parcial', 'Média', item.comment ?? 'Pendência de vistoria', (getBlockedServiceGroups([item])[0]?.blockedServices ?? []).join(', ') || emptyBlockValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, filters.date || getToday()]);
+        csvRows.push(['pendencia', projectName, towerLabel, apartment.number, item.label, item.state === 'pending' ? 'Pendente' : 'Parcial', 'Média', item.comment ?? 'Pendência de vistoria', (getBlockedServiceGroups([item])[0]?.blockedServices ?? []).join(', ') || emptyBlockValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, filters.date || getToday()]);
       });
     }
 
     if (options.includeBlocked) {
       blockedGroups.forEach((group) => {
-        csvRows.push(['servico_travado', project.name, towerLabel, apartment.number, group.pendingService, group.currentStatus, emptyValue, emptyValue, group.pendingService, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, filters.date || getToday()]);
+        csvRows.push(['servico_travado', projectName, towerLabel, apartment.number, group.pendingService, group.currentStatus, emptyValue, emptyValue, group.pendingService, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, filters.date || getToday()]);
       });
     }
 
     if (options.includeSchedule) {
       scheduleRows.forEach((row) => {
-        csvRows.push(['cronograma', project.name, towerLabel, apartment.number, row.service, row.scheduleStatus, emptyValue, emptyValue, row.blockedServices.join(', ') || emptyBlockValue, row.delayDays, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, row.plannedEnd || filters.date || getToday()]);
+        csvRows.push(['cronograma', projectName, towerLabel, apartment.number, row.service, row.scheduleStatus, emptyValue, emptyValue, row.blockedServices.join(', ') || emptyBlockValue, row.delayDays, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, row.plannedEnd || filters.date || getToday()]);
       });
     }
 
     if (options.includeMeasurements) {
       apartmentMeasurements.forEach((measurement) => {
-        csvRows.push(['medicao', project.name, towerLabel, apartment.number, measurement.service, measurement.status, emptyValue, emptyValue, emptyBlockValue, emptyValue, measurement.contractor, measurement.quantity, measurement.unit, measurement.unitPrice, measurement.totalValue, measurement.periodStart]);
+        csvRows.push(['medicao', projectName, towerLabel, apartment.number, getNomeServicoOuEtapa(measurement), measurement.status, emptyValue, emptyValue, emptyBlockValue, emptyValue, measurement.contractor || emptyValue, measurement.quantity, measurement.unit || measurement.unidadeMedicao || emptyValue, measurement.unitPrice, measurement.totalValue, measurement.periodStart || measurement.periodoInicio || filters.date || getToday()]);
       });
     }
 
     if (options.includeHistory && latestVisit) {
-      csvRows.push(['visita', project.name, towerLabel, apartment.number, emptyValue, statusConfig[latestVisit.statusAfter].label, emptyValue, getVisitVariationLabel(latestVisit.evolution), emptyBlockValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, formatReportDateTime(latestVisit.date)]);
+      csvRows.push(['visita', projectName, towerLabel, apartment.number, emptyValue, statusConfig[latestVisit.statusAfter].label, emptyValue, getVisitVariationLabel(latestVisit.evolution), emptyBlockValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, formatReportDateTime(latestVisit.date)]);
     }
 
     if (options.includePhotos) {
       photos.slice(0, 6).forEach((photo) => {
-        csvRows.push(['foto', project.name, towerLabel, apartment.number, photo.service, 'Anexada', emptyValue, photo.comment || emptyValue, emptyBlockValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, formatReportDateTime(photo.dataHora ?? photo.createdAt)]);
+        csvRows.push(['foto', projectName, towerLabel, apartment.number, photo.service, 'Anexada', emptyValue, photo.comment || emptyValue, emptyBlockValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, formatReportDateTime(photo.dataHora ?? photo.createdAt)]);
       });
     }
 
@@ -353,11 +383,11 @@ export const createGeneratedReport = (
       row.blockedServices.length ? `Trava: ${row.blockedServices.join(', ')}` : emptyValue,
     ]);
     const measurementTableRows = apartmentMeasurements.map((measurement) => [
-      measurement.service,
-      measurement.contractor,
-      `${measurement.periodStart} até ${measurement.periodEnd}`,
+      getNomeServicoOuEtapa(measurement),
+      measurement.contractor || emptyValue,
+      `${measurement.periodStart || measurement.periodoInicio || emptyValue} até ${measurement.periodEnd || measurement.periodoFim || emptyValue}`,
       measurement.quantity,
-      measurement.unit,
+      measurement.unit || measurement.unidadeMedicao || emptyValue,
       formatCurrency(measurement.totalValue),
       measurement.status,
     ]);
@@ -437,6 +467,10 @@ export const createGeneratedReport = (
 
   const csvText = createCsvText(csvRows);
   const generatedAtText = formatReportDateTime(new Date().toISOString());
+  if (isValid && selectedApartments.length === 0) {
+    textLines.push('Nenhum dado encontrado para os filtros selecionados.');
+    htmlSections.push('<section class="unit-section"><p class="empty">Nenhum dado encontrado para os filtros selecionados.</p></section>');
+  }
   const html = `
     <!doctype html>
     <html lang="pt-BR">
@@ -493,7 +527,7 @@ export const createGeneratedReport = (
           <header class="report-header">
             <h1>${escapeHtml(getReportTitle(kind))}</h1>
             <div class="header-grid">
-              <span><strong>Obra:</strong> ${escapeHtml(project.name)}</span>
+              <span><strong>Obra:</strong> ${escapeHtml(projectName)}</span>
               <span><strong>Data:</strong> ${escapeHtml(filters.date || getToday())}</span>
               <span><strong>Gerado em:</strong> ${escapeHtml(generatedAtText)}</span>
               <span><strong>Responsável:</strong> ${escapeHtml(localResponsible)}</span>

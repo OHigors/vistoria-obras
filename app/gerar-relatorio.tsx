@@ -9,7 +9,8 @@ import {
   type ReportFilters,
   type ReportKind,
 } from '@/src/data/generatedReports';
-import { project, towers } from '@/src/data/mockObras';
+import { getActiveProject } from '@/src/data/localProjects';
+import { getConfiguredTowers, project } from '@/src/data/mockObras';
 import { isValidBrDate, maskDateBr } from '@/src/data/schedule';
 
 const csvSeparator = ';';
@@ -116,6 +117,8 @@ const downloadCsv = (rows: (string | number)[][]) => {
 };
 
 export default function GenerateReportScreen() {
+  const towers = getConfiguredTowers();
+  const activeProject = getActiveProject();
   const [kind, setKind] = useState<ReportKind>('daily');
   const [filters, setFilters] = useState<ReportFilters>(defaultFilters);
   const [options, setOptions] = useState<ReportContentOptions>(defaultOptions);
@@ -231,7 +234,7 @@ export default function GenerateReportScreen() {
         <View style={styles.inputGrid}>
           <View style={styles.fieldGroup}>
             <Text style={styles.fieldLabel}>Obra</Text>
-            <TextInput editable={false} style={[styles.input, styles.disabledInput]} value={project.name} />
+              <TextInput editable={false} style={[styles.input, styles.disabledInput]} value={activeProject.nome || project.name} />
           </View>
           <View style={styles.fullWidthGroup}>
             <Text style={styles.fieldLabel}>Torre</Text>

@@ -1,4 +1,4 @@
-import { useLocalSearchParams } from 'expo-router';
+import { Link, useLocalSearchParams } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
@@ -38,23 +38,40 @@ import { getApartmentById, getTowerById, project } from '@/src/data/mockObras';
 import type { ScheduleFields } from '@/src/data/schedule';
 import { formatDateBr, getScheduleRows, isValidBrDate, maskDateBr, normalizeDateForDisplay } from '@/src/data/schedule';
 import { getBlockedServiceGroups } from '@/src/data/serviceBlockers';
-import { isServiceActiveForFeature } from '@/src/data/serviceStages';
+import {
+  getChecklistItemsForFeature,
+  getEtapasChecklist,
+  getEtapasMedicao,
+  getServiceStageByName,
+  isCriticalStageForStatus,
+} from '@/src/data/serviceStages';
 import { checklistConfig, statusConfig } from '@/src/ui/status';
 
 const checklistOptions: ChecklistState[] = ['ok', 'pending', 'partial', 'notApplicable'];
+const checklistFilterOptions = [
+  'Todos',
+  'OK',
+  'Pendente',
+  'Parcial',
+  'Não se aplica',
+  'Não vistoriado',
+  'Crítico',
+] as const;
 const criticalityOptions = ['Baixa', 'Média', 'Alta', 'Crítica'] as const;
 const detailTabs = [
   'Resumo',
   'Checklist',
   'Pendências',
   'Fotos',
-  'Serviços',
+  'Serviços travados',
   'Cronograma',
   'Medições',
   'Histórico',
+  'Relatório',
 ] as const;
 
 type DetailTab = (typeof detailTabs)[number];
+type ChecklistFilter = (typeof checklistFilterOptions)[number];
 type IssueCriticality = (typeof criticalityOptions)[number];
 
 const scheduleStatusStyles = {
@@ -67,6 +84,10 @@ type EditableChecklistItem = ChecklistItem & {
   comment: string;
   issueCriticality?: IssueCriticality;
   issueComment?: string;
+  categoria?: string;
+  unidadeMedicao?: string;
+  etapaCritica?: boolean;
+  travaLiberacao?: boolean;
 } & ScheduleFields;
 
 const isChecklistState = (state: unknown): state is ChecklistState =>
@@ -75,8 +96,43 @@ const isChecklistState = (state: unknown): state is ChecklistState =>
 const isIssueCriticality = (criticality: unknown): criticality is IssueCriticality =>
   criticalityOptions.includes(criticality as IssueCriticality);
 
-const getInitialChecklist = (items?: ChecklistItem[]): EditableChecklistItem[] =>
-  (items ?? []).filter((item) => isServiceActiveForFeature(item.label, 'checklist')).map((item) => ({
+const normalizeServiceKey = (value: string) =>
+  value
+    .trim()
+    .toLocaleLowerCase('pt-BR')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+
+const getMeasurementItems = (): EditableChecklistItem[] => {
+  const seen = new Set<string>();
+
+  return getEtapasMedicao().flatMap((stage) => {
+    const key = stage.id || normalizeServiceKey(stage.nome);
+
+    if (seen.has(key) || seen.has(normalizeServiceKey(stage.nome))) {
+      return [];
+    }
+
+    seen.add(key);
+    seen.add(normalizeServiceKey(stage.nome));
+
+    return [{
+      id: stage.id,
+      label: stage.nome,
+      state: 'ok' as const,
+      comment: '',
+      categoria: stage.categoria,
+      unidadeMedicao: stage.unidadeMedicao,
+      etapaCritica: stage.etapaCritica,
+      travaLiberacao: stage.travaLiberacao,
+    }];
+  });
+};
+
+const getInitialChecklist = (apartment?: NonNullable<ReturnType<typeof getApartmentById>>): EditableChecklistItem[] =>
+  (apartment ? getChecklistItemsForFeature(apartment, 'checklist') : []).map((item) => ({
     ...item,
     comment: item.comment ?? '',
     issueCriticality: item.state === 'pending' || item.state === 'partial' ? 'Média' : undefined,
@@ -161,9 +217,10 @@ const getChecklistFromStorage = (
 
     const storedItems = JSON.parse(storedValue) as Partial<EditableChecklistItem>[];
     const storedItemsById = new Map(storedItems.map((item) => [item.id, item]));
+    const storedItemsByLabel = new Map(storedItems.map((item) => [item.label, item]));
 
     return fallbackItems.map((item) => {
-      const storedItem = storedItemsById.get(item.id);
+      const storedItem = storedItemsById.get(item.id) ?? storedItemsByLabel.get(item.label);
 
       if (!storedItem) {
         return item;
@@ -238,8 +295,14 @@ const calculateApartmentStatus = (items: EditableChecklistItem[], progress: numb
   const pendingCount = items.filter((item) => item.state === 'pending').length;
   const partialCount = items.filter((item) => item.state === 'partial').length;
   const manyPending = pendingCount >= Math.max(3, Math.ceil(items.length * 0.35));
+  const hasCriticalConfiguredStage = items.some((item) => {
+    return (
+      (item.state === 'pending' || item.state === 'partial') &&
+      isCriticalStageForStatus(item.label)
+    );
+  });
 
-  if (progress < 50 || manyPending) {
+  if (progress < 50 || manyPending || hasCriticalConfiguredStage) {
     return 'critical';
   }
 
@@ -268,8 +331,8 @@ export default function ApartmentDetailScreen() {
   const visitStorageKey = getInspectionVisitStorageKey(apartment?.id);
 
   const initialChecklist = useMemo(
-    () => getInitialChecklist(apartment?.checklist),
-    [apartment?.checklist],
+    () => getInitialChecklist(apartment),
+    [apartment],
   );
   const [checklist, setChecklist] = useState<EditableChecklistItem[]>(initialChecklist);
   const [loadedStorageKey, setLoadedStorageKey] = useState<string>();
@@ -285,6 +348,8 @@ export default function ApartmentDetailScreen() {
   const [selectedPhoto, setSelectedPhoto] = useState<InspectionPhoto>();
   const [selectedMeasurementEvidence, setSelectedMeasurementEvidence] = useState<Measurement>();
   const [activeTab, setActiveTab] = useState<DetailTab>('Resumo');
+  const [checklistFilter, setChecklistFilter] = useState<ChecklistFilter>('Todos');
+  const [checklistSearch, setChecklistSearch] = useState('');
   const [visits, setVisits] = useState<InspectionVisit[]>([]);
   const [loadedVisitStorageKey, setLoadedVisitStorageKey] = useState<string>();
   const [selectedVisit, setSelectedVisit] = useState<InspectionVisit>();
@@ -358,9 +423,7 @@ export default function ApartmentDetailScreen() {
   const okCount = checklist.filter((item) => item.state === 'ok' || item.state === 'notApplicable').length;
   const currentStatusKey = calculateApartmentStatus(checklist, progress);
   const status = statusConfig[currentStatusKey];
-  const measurableItems = checklist.filter(
-    (item) => item.state === 'ok' && isServiceActiveForFeature(item.label, 'medicao'),
-  );
+  const measurableItems = getMeasurementItems();
   const blockedServiceGroups = getBlockedServiceGroups(checklist);
   const scheduleRows = getScheduleRows(checklist);
   const totalBlockedServices = blockedServiceGroups.reduce(
@@ -386,6 +449,79 @@ export default function ApartmentDetailScreen() {
     groups[photo.serviceId] = [...(groups[photo.serviceId] ?? []), photo];
     return groups;
   }, {});
+  const checklistCounts = getChecklistCounts(checklist);
+  const criticalPendingItems = pendingItems.filter(
+    (item) => item.issueCriticality === 'Crítica' || isCriticalStageForStatus(item.label),
+  );
+  const delayedRows = scheduleRows.filter((row) => row.delayDays > 0);
+  const maxDelayDays = delayedRows.reduce((maxDelay, row) => Math.max(maxDelay, row.delayDays), 0);
+  const retainedOrRejectedMeasurements = measurements.filter(
+    (measurement) => measurement.status === 'Retido' || measurement.status === 'Reprovado',
+  );
+  const checklistStageMap = new Map(
+    getEtapasChecklist().map((stage) => [
+      stage.id,
+      {
+        categoria: stage.categoria,
+        fase: stage.fase,
+        nome: stage.nome,
+      },
+    ]),
+  );
+  getEtapasChecklist().forEach((stage) => {
+    checklistStageMap.set(stage.nome, {
+      categoria: stage.categoria,
+      fase: stage.fase,
+      nome: stage.nome,
+    });
+  });
+  const normalizedChecklistSearch = checklistSearch
+    .trim()
+    .toLocaleLowerCase('pt-BR')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  const filteredChecklist = checklist.filter((item) => {
+    const itemStage = checklistStageMap.get(item.id) ?? checklistStageMap.get(item.label);
+    const searchableText = `${item.label} ${itemStage?.fase ?? ''} ${itemStage?.categoria ?? ''}`
+      .toLocaleLowerCase('pt-BR')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '');
+    const matchesSearch = !normalizedChecklistSearch || searchableText.includes(normalizedChecklistSearch);
+    const matchesFilter =
+      checklistFilter === 'Todos' ||
+      (checklistFilter === 'OK' && item.state === 'ok') ||
+      (checklistFilter === 'Pendente' && item.state === 'pending') ||
+      (checklistFilter === 'Parcial' && item.state === 'partial') ||
+      (checklistFilter === 'Não se aplica' && item.state === 'notApplicable') ||
+      (checklistFilter === 'Não vistoriado' && item.state === 'pending' && !item.comment) ||
+      (checklistFilter === 'Crítico' &&
+        (item.issueCriticality === 'Crítica' || isCriticalStageForStatus(item.label)));
+
+    return matchesSearch && matchesFilter;
+  });
+  const groupedChecklist = filteredChecklist.reduce<
+    Record<string, { etapa: string; fase: string; items: EditableChecklistItem[] }>
+  >((groups, item) => {
+    const itemStage = checklistStageMap.get(item.id) ?? checklistStageMap.get(item.label);
+    const fase = itemStage?.fase ?? 'Sem fase';
+    const etapa = itemStage?.categoria ?? 'Checklist';
+    const key = `${fase}-${etapa}`;
+
+    groups[key] = groups[key] ?? { etapa, fase, items: [] };
+    groups[key].items.push(item);
+    return groups;
+  }, {});
+  const primaryRisks = [
+    ...criticalPendingItems.map((item) => `Pendência crítica: ${item.label}`),
+    ...blockedServiceGroups.map((group) => `Trava: ${group.pendingService}`),
+    ...(delayedRows[0] ? [`Maior atraso: ${delayedRows[0].service} (${delayedRows[0].delayDays} dia(s))`] : []),
+    ...pendingItems
+      .filter((item) => isCriticalStageForStatus(item.label))
+      .map((item) => `Trava liberação: ${item.label}`),
+    ...retainedOrRejectedMeasurements.map(
+      (measurement) => `Medição ${measurement.status.toLowerCase()}: ${measurement.service}`,
+    ),
+  ].slice(0, 5);
 
   const registerVisitUpdate = ({
     addedPhotoId,
@@ -786,8 +922,15 @@ export default function ApartmentDetailScreen() {
     });
   };
 
-  const getMeasurementDraft = (itemId: string) =>
-    measurementDrafts[itemId] ?? createEmptyMeasurementDraft();
+  const getMeasurementDraft = (item: EditableChecklistItem) => {
+    const stage = getServiceStageByName(item.label);
+    const draft = measurementDrafts[item.id] ?? createEmptyMeasurementDraft();
+
+    return {
+      ...draft,
+      unit: draft.unit || stage?.unidadeMedicao || 'un',
+    };
+  };
 
   const updateMeasurementDraft = (
     itemId: string,
@@ -845,8 +988,9 @@ export default function ApartmentDetailScreen() {
       return;
     }
 
-    const draft = getMeasurementDraft(item.id);
+    const draft = getMeasurementDraft(item);
     const contractor = draft.contractor.trim();
+    const stage = getServiceStageByName(item.label);
 
     if (!contractor) {
       setMeasurementAlert('Empreiteiro é obrigatório.');
@@ -922,15 +1066,25 @@ export default function ApartmentDetailScreen() {
         towerId: tower.id,
         apartmentId: apartment.id,
         serviceId: item.id,
+        etapaId: stage?.id ?? item.id,
         contractorId,
         service: item.label,
+        serviceName: item.label,
+        servicoNome: item.label,
+        etapaNome: stage?.nome ?? item.label,
+        categoria: stage?.categoria,
+        unidadeMedicao: stage?.unidadeMedicao ?? (draft.unit.trim() || 'un'),
         contractor,
         quantity,
-        unit: draft.unit.trim() || 'un',
+        unit: draft.unit.trim() || stage?.unidadeMedicao || 'un',
         unitPrice,
+        valorUnitario: unitPrice,
         totalValue,
+        valorTotal: totalValue,
         periodStart,
         periodEnd,
+        periodoInicio: periodStart,
+        periodoFim: periodEnd,
         status: draft.status,
         comment: draft.comment.trim(),
         measurementType: draft.measurementType,
@@ -945,7 +1099,10 @@ export default function ApartmentDetailScreen() {
 
     setMeasurementDrafts((currentDrafts) => ({
       ...currentDrafts,
-      [item.id]: createEmptyMeasurementDraft(),
+      [item.id]: {
+        ...createEmptyMeasurementDraft(),
+        unit: stage?.unidadeMedicao ?? '',
+      },
     }));
   };
 
@@ -1038,27 +1195,66 @@ export default function ApartmentDetailScreen() {
         })}
       </View>
 
-      {activeTab === 'Resumo' ? (
+{activeTab === 'Resumo' ? (
       <>
         <View style={styles.sectionPanel}>
-          <Text style={styles.sectionTitle}>Resumo do apartamento</Text>
+          <View style={styles.measurementHeader}>
+            <View>
+              <Text style={styles.sectionTitle}>Status da unidade</Text>
+              <Text style={styles.sectionHint}>
+                Última visita: {latestVisit ? formatPhotoDateTime(latestVisit.date) : 'sem visita registrada'}
+              </Text>
+            </View>
+            <View style={[styles.statusBadge, { backgroundColor: status.background }]}>
+              <Text style={[styles.statusText, { color: status.color }]}>{status.label}</Text>
+            </View>
+          </View>
           <View style={styles.measurementSummary}>
             <View>
-              <Text style={styles.metaValue}>{pendingItems.length}</Text>
-              <Text style={styles.metaLabel}>pendência(s)</Text>
+              <Text style={styles.metaValue}>{progress}%</Text>
+              <Text style={styles.metaLabel}>vistoriado</Text>
             </View>
             <View>
-              <Text style={styles.metaValue}>{totalBlockedServices}</Text>
-              <Text style={styles.metaLabel}>serviço(s) travado(s)</Text>
+              <Text style={styles.metaValue}>{latestVisit?.responsible ?? localResponsible}</Text>
+              <Text style={styles.metaLabel}>responsável</Text>
             </View>
             <View>
-              <Text style={styles.metaValue}>{photos.length}</Text>
-              <Text style={styles.metaLabel}>foto(s)</Text>
+              <Text style={styles.metaValue}>{latestVisit ? formatPhotoDateTime(latestVisit.date) : '-'}</Text>
+              <Text style={styles.metaLabel}>última visita</Text>
             </View>
             <View>
-              <Text style={styles.metaValue}>{measurements.length}</Text>
-              <Text style={styles.metaLabel}>medição(ões)</Text>
+              <Text style={styles.metaValue}>{status.label}</Text>
+              <Text style={styles.metaLabel}>status após visita</Text>
             </View>
+          </View>
+        </View>
+        <View style={styles.sectionPanel}>
+          <Text style={styles.sectionTitle}>Checklist</Text>
+          <View style={styles.checklistChart}>
+            <View style={[styles.chartSegment, { backgroundColor: checklistConfig.ok.color, flex: checklistCounts.ok || 0.001 }]} />
+            <View style={[styles.chartSegment, { backgroundColor: checklistConfig.pending.color, flex: checklistCounts.pending || 0.001 }]} />
+            <View style={[styles.chartSegment, { backgroundColor: checklistConfig.partial.color, flex: checklistCounts.partial || 0.001 }]} />
+            <View style={[styles.chartSegment, { backgroundColor: checklistConfig.notApplicable.color, flex: checklistCounts.notApplicable || 0.001 }]} />
+          </View>
+          <View style={styles.metricGrid}>
+            <Text style={styles.metric}>OK: {checklistCounts.ok}</Text>
+            <Text style={styles.metric}>Pendente: {checklistCounts.pending}</Text>
+            <Text style={styles.metric}>Parcial: {checklistCounts.partial}</Text>
+            <Text style={styles.metric}>Não se aplica: {checklistCounts.notApplicable}</Text>
+            <Text style={styles.metric}>Não vistoriado: {checklistCounts.pending}</Text>
+          </View>
+        </View>
+        <View style={styles.sectionPanel}>
+          <Text style={styles.sectionTitle}>Indicadores</Text>
+          <View style={styles.measurementSummary}>
+            <Indicator label="pendências abertas" value={pendingItems.length} />
+            <Indicator label="pendências críticas" value={criticalPendingItems.length} />
+            <Indicator label="serviços travados" value={totalBlockedServices} />
+            <Indicator label="dias de atraso" value={maxDelayDays} />
+            <Indicator label="fotos" value={photos.length} />
+            <Indicator label="medições" value={measurements.length} />
+            <Indicator label="valor medido" value={formatCurrency(totalMeasuredValue)} />
+            <Indicator label="última atualização" value={formatPhotoDateTime(new Date().toISOString())} />
           </View>
         </View>
         <View style={styles.sectionPanel}>
@@ -1081,6 +1277,27 @@ export default function ApartmentDetailScreen() {
             <Text style={styles.metric}>
               Última visita: {latestVisit ? formatPhotoDateTime(latestVisit.date) : 'sem registro'}
             </Text>
+          </View>
+        </View>
+        <View style={styles.sectionPanel}>
+          <Text style={styles.sectionTitle}>Principais riscos</Text>
+          {primaryRisks.length === 0 ? (
+            <Text style={styles.emptyPanelText}>Nenhum risco principal identificado.</Text>
+          ) : (
+            primaryRisks.map((risk) => (
+              <Text key={risk} style={styles.riskItem}>{risk}</Text>
+            ))
+          )}
+        </View>
+        <View style={styles.sectionPanel}>
+          <Text style={styles.sectionTitle}>Ações rápidas</Text>
+          <View style={styles.optionRow}>
+            <QuickTabButton label="Abrir checklist" onPress={() => setActiveTab('Checklist')} />
+            <QuickTabButton label="Ver pendências" onPress={() => setActiveTab('Pendências')} />
+            <QuickTabButton label="Adicionar foto" onPress={() => setActiveTab('Checklist')} />
+            <QuickTabButton label="Nova visita" onPress={startNewVisit} />
+            <QuickTabButton label="Gerar relatório do apartamento" onPress={() => setActiveTab('Relatório')} />
+            <QuickTabButton label="Nova medição" onPress={() => setActiveTab('Medições')} />
           </View>
         </View>
         <View style={styles.sectionPanel}>
@@ -1117,7 +1334,7 @@ export default function ApartmentDetailScreen() {
       </>
       ) : null}
 
-      {activeTab === 'Serviços' ? (
+      {activeTab === 'Serviços travados' ? (
         <View style={styles.sectionPanel}>
           <Text style={styles.sectionTitle}>Serviços do apartamento</Text>
           {checklist.map((item) => {
@@ -1155,7 +1372,43 @@ export default function ApartmentDetailScreen() {
         </Pressable>
       </View>
 
-      {checklist.map((item) => {
+      <View style={styles.sectionPanel}>
+        <TextInput
+          onChangeText={setChecklistSearch}
+          placeholder="Buscar etapa ou subetapa"
+          placeholderTextColor="#94A3B8"
+          style={styles.input}
+          value={checklistSearch}
+        />
+        <View style={styles.optionRow}>
+          {checklistFilterOptions.map((filterOption) => {
+            const isSelected = checklistFilter === filterOption;
+
+            return (
+              <Pressable
+                key={filterOption}
+                onPress={() => setChecklistFilter(filterOption)}
+                style={[styles.optionButton, isSelected && styles.optionButtonSelected]}>
+                <Text style={[styles.optionText, isSelected && styles.optionTextSelected]}>
+                  {filterOption}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      </View>
+
+      {Object.values(groupedChecklist).length === 0 ? (
+        <View style={styles.emptyPanel}>
+          <Text style={styles.emptyPanelText}>Nenhum item encontrado com os filtros aplicados.</Text>
+        </View>
+      ) : null}
+
+      {Object.values(groupedChecklist).map((group) => (
+        <View key={`${group.fase}-${group.etapa}`} style={styles.checklistGroup}>
+          <Text style={styles.groupPhase}>Fase: {group.fase}</Text>
+          <Text style={styles.groupStage}>Etapa: {group.etapa}</Text>
+          {group.items.map((item) => {
         const itemStatus = checklistConfig[item.state];
         const itemPhotos = photosByServiceId[item.id] ?? [];
 
@@ -1299,6 +1552,8 @@ export default function ApartmentDetailScreen() {
           </View>
         );
       })}
+        </View>
+      ))}
       </>
       ) : null}
 
@@ -1376,6 +1631,20 @@ export default function ApartmentDetailScreen() {
               </View>
             ))
           )}
+        </View>
+      ) : null}
+
+      {activeTab === 'Relatório' ? (
+        <View style={styles.sectionPanel}>
+          <Text style={styles.sectionTitle}>Relatório do apartamento</Text>
+          <Text style={styles.sectionHint}>
+            Gere o relatório filtrando por apartamento na tela de relatórios. Esta aba mantém o detalhe leve e evita carregar PDF/CSV junto com a vistoria.
+          </Text>
+          <Link href="/gerar-relatorio" asChild>
+            <Pressable style={styles.primaryButton}>
+              <Text style={styles.primaryButtonText}>Abrir gerador de relatório</Text>
+            </Pressable>
+          </Link>
         </View>
       ) : null}
 
@@ -1635,12 +1904,12 @@ export default function ApartmentDetailScreen() {
       {measurableItems.length === 0 ? (
         <View style={styles.emptyPanel}>
           <Text style={styles.emptyPanelText}>
-            Marque um item do checklist como OK para gerar uma medição.
+            Cadastre uma etapa ativa com Medição = sim em Serviços e etapas.
           </Text>
         </View>
       ) : (
         measurableItems.map((item) => {
-          const draft = getMeasurementDraft(item.id);
+          const draft = getMeasurementDraft(item);
           const draftTotalValue = toNumber(draft.quantity) * toNumber(draft.unitPrice);
           const hasMeasurementForContractor =
             Boolean(draft.contractor.trim()) &&
@@ -1671,7 +1940,7 @@ export default function ApartmentDetailScreen() {
               <View style={styles.measurementHeader}>
                 <View>
                   <Text style={styles.measurementService}>{item.label}</Text>
-                  <Text style={styles.sectionHint}>Disponível porque o serviço está OK</Text>
+                  <Text style={styles.sectionHint}>Etapa ativa configurada para medição</Text>
                 </View>
                 <Text style={styles.measurementTotal}>{formatCurrency(draftTotalValue)}</Text>
               </View>
@@ -2072,6 +2341,23 @@ export default function ApartmentDetailScreen() {
   );
 }
 
+function Indicator({ label, value }: { label: string; value: number | string }) {
+  return (
+    <View>
+      <Text style={styles.metaValue}>{value}</Text>
+      <Text style={styles.metaLabel}>{label}</Text>
+    </View>
+  );
+}
+
+function QuickTabButton({ label, onPress }: { label: string; onPress: () => void }) {
+  return (
+    <Pressable onPress={onPress} style={styles.clearButton}>
+      <Text style={styles.clearButtonText}>{label}</Text>
+    </Pressable>
+  );
+}
+
 const styles = StyleSheet.create({
   container: {
     padding: 20,
@@ -2197,6 +2483,16 @@ const styles = StyleSheet.create({
     gap: 12,
     padding: 14,
   },
+  checklistChart: {
+    backgroundColor: '#E2E8F0',
+    borderRadius: 999,
+    flexDirection: 'row',
+    height: 12,
+    overflow: 'hidden',
+  },
+  chartSegment: {
+    height: '100%',
+  },
   metricGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -2303,10 +2599,40 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 7,
   },
+  optionButtonSelected: {
+    backgroundColor: '#DBEAFE',
+    borderColor: '#2563EB',
+  },
   optionText: {
     color: '#475569',
     fontSize: 12,
     fontWeight: '800',
+  },
+  optionTextSelected: {
+    color: '#2563EB',
+  },
+  checklistGroup: {
+    gap: 10,
+  },
+  groupPhase: {
+    color: '#0F172A',
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  groupStage: {
+    color: '#64748B',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  riskItem: {
+    backgroundColor: '#FFF7ED',
+    borderColor: '#FDBA74',
+    borderRadius: 8,
+    borderWidth: 1,
+    color: '#9A3412',
+    fontSize: 13,
+    fontWeight: '800',
+    padding: 10,
   },
   disabledOptionButton: {
     backgroundColor: '#F1F5F9',

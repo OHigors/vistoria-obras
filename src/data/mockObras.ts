@@ -16,10 +16,23 @@ export type Apartment = {
   floor: string;
   towerId: string;
   status: ApartmentStatus;
+  statusVisual?: 'Sem dados';
+  percentualVistoriado?: number;
+  itensConcluidos?: number;
+  totalItens?: number;
+  pendencias?: number;
+  servicosTravados?: number;
+  medicoes?: number;
+  fotos?: number;
+  visitas?: number;
   progress: number;
   notes: string;
   lastInspection: string;
   checklist: ChecklistItem[];
+  block?: string;
+  position?: string;
+  nomeNoForms?: string;
+  ativo?: boolean;
 };
 
 export type Tower = {
@@ -29,6 +42,9 @@ export type Tower = {
   block: string;
   position: string;
   description: string;
+  torreOficial?: string;
+  nomeNoForms?: string;
+  ativo?: boolean;
 };
 
 export const checklistLabels = [
@@ -164,10 +180,135 @@ export const project = {
   summary: 'MVP para vistoria e acompanhamento visual de apartamentos.',
 };
 
-export const getTowerById = (towerId: string) => towers.find((tower) => tower.id === towerId);
+export const importedTowersStorageKey = 'apartamentos-importados-torres';
+export const importedApartmentsStorageKey = 'apartamentos-importados-unidades';
+const activeProjectStorageKey = 'obra-ativa-id';
+
+const canUseLocalStorage = () => typeof window !== 'undefined' && Boolean(window.localStorage);
+
+const readImportedTowers = (): Tower[] => {
+  if (!canUseLocalStorage()) {
+    return [];
+  }
+
+  try {
+    const storedValue = window.localStorage.getItem(importedTowersStorageKey);
+    const parsedValue = storedValue ? JSON.parse(storedValue) : [];
+    return Array.isArray(parsedValue) ? parsedValue : [];
+  } catch {
+    return [];
+  }
+};
+
+const readImportedApartments = (): Apartment[] => {
+  if (!canUseLocalStorage()) {
+    return [];
+  }
+
+  try {
+    const storedValue = window.localStorage.getItem(importedApartmentsStorageKey);
+    const parsedValue = storedValue ? JSON.parse(storedValue) : [];
+    return Array.isArray(parsedValue) ? parsedValue : [];
+  } catch {
+    return [];
+  }
+};
+
+const mergeById = <T extends { id: string; ativo?: boolean }>(baseItems: T[], importedItems: T[]) => {
+  const itemsById = new Map<string, T>();
+
+  baseItems.forEach((item) => itemsById.set(item.id, item));
+  importedItems.forEach((item) => {
+    if (item.ativo === false) {
+      itemsById.delete(item.id);
+      return;
+    }
+
+    itemsById.set(item.id, item);
+  });
+
+  return [...itemsById.values()];
+};
+
+const getActiveObraId = () => {
+  if (!canUseLocalStorage()) {
+    return project.id;
+  }
+
+  const storedProjects = window.localStorage.getItem('obras-cadastradas');
+  if (storedProjects) {
+    try {
+      const parsedProjects = JSON.parse(storedProjects) as { id: string; active?: boolean }[];
+      if (Array.isArray(parsedProjects) && parsedProjects.length === 0) {
+        return '';
+      }
+
+      const activeProject =
+        parsedProjects.find((storedProject) => storedProject.active) ?? parsedProjects[0];
+      return window.localStorage.getItem(activeProjectStorageKey) ?? activeProject?.id ?? '';
+    } catch {
+      return window.localStorage.getItem(activeProjectStorageKey) ?? project.id;
+    }
+  }
+
+  return window.localStorage.getItem(activeProjectStorageKey) ?? project.id;
+};
+
+export const getConfiguredTowers = () => {
+  const activeObraId = getActiveObraId();
+  const importedTowers = readImportedTowers().filter((tower) => tower.obraId === activeObraId);
+
+  if (activeObraId !== project.id) {
+    return importedTowers;
+  }
+
+  return mergeById(towers, importedTowers);
+};
+
+export const getConfiguredApartments = () => {
+  const activeObraId = getActiveObraId();
+  const importedApartments = readImportedApartments().filter(
+    (apartment) => apartment.obraId === activeObraId,
+  );
+
+  if (activeObraId !== project.id) {
+    return importedApartments;
+  }
+
+  if (importedApartments.length === 0) {
+    return apartments;
+  }
+
+  const importedKeys = new Set(
+    importedApartments.map((apartment) => `${apartment.towerId}-${apartment.number}`),
+  );
+  const baseWithoutImportedDuplicates = apartments.filter(
+    (apartment) => !importedKeys.has(`${apartment.towerId}-${apartment.number}`),
+  );
+
+  return mergeById(baseWithoutImportedDuplicates, importedApartments);
+};
+
+export const saveImportedBuildingData = (nextTowers: Tower[], nextApartments: Apartment[]) => {
+  if (!canUseLocalStorage()) {
+    return;
+  }
+
+  window.localStorage.setItem(importedTowersStorageKey, JSON.stringify(nextTowers));
+  window.localStorage.setItem(importedApartmentsStorageKey, JSON.stringify(nextApartments));
+};
+
+export const getImportedBuildingData = () => ({
+  apartments: readImportedApartments(),
+  towers: readImportedTowers(),
+});
+
+export const getTowerById = (towerId: string) =>
+  getConfiguredTowers().find((tower) => tower.id === towerId);
 
 export const getApartmentById = (apartmentId: string) =>
+  getConfiguredApartments().find((apartment) => apartment.id === apartmentId) ??
   apartments.find((apartment) => apartment.id === apartmentId);
 
 export const getApartmentsByTower = (towerId: string) =>
-  apartments.filter((apartment) => apartment.towerId === towerId);
+  getConfiguredApartments().filter((apartment) => apartment.towerId === towerId);
