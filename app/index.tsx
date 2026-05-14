@@ -35,10 +35,14 @@ const StatCard = ({
   backgroundColor = '#EFF6FF',
 }: StatCardProps) => (
   <View style={[styles.statCard, { backgroundColor }]}>
-    <MaterialCommunityIcons name={iconName as any} size={32} color={iconColor} />
-    <Text style={styles.statLabel}>{label}</Text>
-    <Text style={styles.statValue}>{value}</Text>
-    {trend && <Text style={[styles.statTrend, { color: trendColor }]}>{trend}</Text>}
+    <View style={styles.statLeft}>
+      <MaterialCommunityIcons name={iconName as any} size={28} color={iconColor} />
+      <Text style={styles.statLabel}>{label}</Text>
+    </View>
+    <View style={styles.statRight}>
+      <Text style={styles.statValue}>{value}</Text>
+      {trend && <Text style={[styles.statTrend, { color: trendColor }]}>{trend}</Text>}
+    </View>
   </View>
 );
 
@@ -102,27 +106,45 @@ export default function DashboardScreen() {
     };
   }, [measurements]);
 
-  const tabs: Array<{ id: TabName; label: string }> = [
-    { id: 'overview', label: 'Visão Geral' },
-    { id: 'financial', label: 'Financeiro' },
-    { id: 'schedule', label: 'Cronograma' },
-    { id: 'blockers', label: 'Gargalos' },
+  const tabs: Array<{ id: TabName; label: string; icon: string }> = [
+    { id: 'overview', label: 'Visão Geral', icon: 'view-dashboard-outline' },
+    { id: 'financial', label: 'Financeiro', icon: 'currency-usd' },
+    { id: 'schedule', label: 'Cronograma', icon: 'calendar-month-outline' },
+    { id: 'blockers', label: 'Gargalos', icon: 'alert-circle-outline' },
   ];
 
   return (
     <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
+
       {/* Header */}
       <View style={styles.header}>
-        <View>
-          <Text style={styles.headerSubtitle}>Bem-vindo de volta</Text>
+        <View style={styles.headerTop}>
+          <Pressable style={styles.headerIcon}>
+            <MaterialCommunityIcons
+              name="account-circle"
+              size={64}
+              color="#000000"
+            />
+          </Pressable>
+
+          <Link href="/servicos-etapas" asChild>
+            <Pressable style={styles.settingsButton}>
+              <MaterialCommunityIcons
+                name="cog-outline"
+                size={24}
+                color="#6B7280"
+              />
+            </Pressable>
+          </Link>
+        </View>
+
+        <View style={styles.headerText}>
+          <Text style={styles.headerSubtitle}>Bem-vindo,</Text>
           <Text style={styles.headerTitle}>{project.name}</Text>
         </View>
-        <View style={styles.headerIcons}>
-          <Pressable style={styles.headerIcon}>
-            <MaterialCommunityIcons name="bell-outline" size={20} color="#6B7280" />
-          </Pressable>
-        </View>
       </View>
+
+
 
       {/* Main Stats Grid - 2x2 */}
       <View style={styles.statsGrid}>
@@ -167,6 +189,11 @@ export default function DashboardScreen() {
             key={tab.id}
             onPress={() => setActiveTab(tab.id)}
             style={[styles.tabButton, activeTab === tab.id && styles.tabButtonActive]}>
+            <MaterialCommunityIcons
+              name={tab.icon as any}
+              size={18}
+              color={activeTab === tab.id ? '#3B82F6' : '#9CA3AF'}
+            />
             <Text style={[styles.tabLabel, activeTab === tab.id && styles.tabLabelActive]}>
               {tab.label}
             </Text>
@@ -457,12 +484,7 @@ export default function DashboardScreen() {
             <Text style={styles.footerLinkText}>Diagnóstico</Text>
           </Pressable>
         </Link>
-        <Link href="/servicos-etapas" asChild>
-          <Pressable style={styles.footerLink}>
-            <MaterialCommunityIcons name="cog-outline" size={24} color="#6B7280" />
-            <Text style={styles.footerLinkText}>Configuração</Text>
-          </Pressable>
-        </Link>
+
       </View>
     </ScrollView>
   );
@@ -473,22 +495,41 @@ const styles = StyleSheet.create({
     paddingBottom: 100,
   },
   header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
     paddingHorizontal: 16,
     paddingTop: 16,
     paddingBottom: 24,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: '#e9e9e9',
     borderBottomColor: '#F3F4F6',
     borderBottomWidth: 1,
   },
+
+  headerTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
+
+  headerIcon: {
+    marginBottom: 8,
+  },
+
+  headerText: {
+    marginTop: 4,
+  },
+
+  settingsButton: {
+    padding: 8,
+    borderRadius: 999,
+    backgroundColor: '#F9FAFB',
+  },
+
   headerSubtitle: {
     color: '#6B7280',
     fontSize: 13,
     fontWeight: '600',
     marginBottom: 4,
   },
+
   headerTitle: {
     color: '#111827',
     fontSize: 24,
@@ -497,17 +538,9 @@ const styles = StyleSheet.create({
   headerIcons: {
     flexDirection: 'row',
     gap: 12,
+    
   },
-  headerIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 10,
-    backgroundColor: '#F9FAFB',
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderColor: '#E5E7EB',
-    borderWidth: 1,
-  },
+
   statsGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -520,9 +553,21 @@ const styles = StyleSheet.create({
     minWidth: 160,
     padding: 14,
     borderRadius: 12,
-    alignItems: 'center',
-    gap: 6,
+    flexDirection: 'row',          
+    justifyContent: 'space-between',
+
+    alignItems: 'flex-start',
+    gap: 12,
   },
+  statLeft: {
+  flex: 1,
+  gap: 6,
+},
+
+statRight: {
+  alignItems: 'flex-end',
+  justifyContent: 'space-between',
+},
   statLabel: {
     color: '#6B7280',
     fontSize: 12,
@@ -546,11 +591,13 @@ const styles = StyleSheet.create({
   tabButton: {
     flex: 1,
     paddingVertical: 10,
-    paddingHorizontal: 12,
+    paddingHorizontal: 8,
     borderRadius: 10,
     backgroundColor: '#F3F4F6',
     borderColor: '#E5E7EB',
     borderWidth: 1,
+    alignItems: 'center',      // ← adiciona
+    gap: 4,                    // ← espaço entre ícone e texto
   },
   tabButtonActive: {
     backgroundColor: '#DBEAFE',
