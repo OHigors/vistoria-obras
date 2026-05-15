@@ -1,4 +1,4 @@
-import { useFocusEffect } from '@react-navigation/native';
+﻿import { useFocusEffect } from '@react-navigation/native';
 import { Link, useLocalSearchParams } from 'expo-router';
 import { useCallback, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
@@ -14,9 +14,9 @@ const filterOptions = [
   'Todos',
   'Excelente',
   'Bom',
-  'Atenção',
-  'Crítico',
-  'Com pendência',
+  'AtenÃ§Ã£o',
+  'CrÃ­tico',
+  'Com pendÃªncia',
   'Com atraso',
   'Travado',
 ] as const;
@@ -126,7 +126,7 @@ export default function TowerApartmentsScreen() {
     const matchesFilter =
       filter === 'Todos' ||
       statusLabel === filter ||
-      (filter === 'Com pendência' && summary.pendingCount > 0) ||
+      (filter === 'Com pendÃªncia' && summary.pendingCount > 0) ||
       (filter === 'Com atraso' && summary.maxDelayDays > 0) ||
       (filter === 'Travado' && summary.blockedCount > 0);
 
@@ -147,10 +147,10 @@ export default function TowerApartmentsScreen() {
   if (!tower) {
     return (
       <View style={styles.empty}>
-        <Text style={styles.emptyTitle}>Torre não encontrada</Text>
+        <Text style={styles.emptyTitle}>Torre nÃ£o encontrada</Text>
         <Link href="/" asChild>
           <Pressable style={styles.homeButton}>
-            <Text style={styles.homeButtonText}>Voltar para início</Text>
+            <Text style={styles.homeButtonText}>Voltar para inÃ­cio</Text>
           </Pressable>
         </Link>
       </View>
@@ -226,7 +226,7 @@ export default function TowerApartmentsScreen() {
               <Link
                 key={apartment.id}
                 href={{
-                  pathname: '/apartamentos/[apartamentoId]',
+                  pathname: '/visao-geral/apartamentos/[apartamentoId]',
                   params: { apartamentoId: apartment.id },
                 }}
                 asChild>
@@ -258,9 +258,9 @@ export default function TowerApartmentsScreen() {
                   </View>
 
                   <View style={styles.cardMetrics}>
-                    <Text style={styles.metricText}>{summary.pendingCount} pendência(s)</Text>
+                    <Text style={styles.metricText}>{summary.pendingCount} pendÃªncia(s)</Text>
                     <Text style={styles.metricText}>
-                      {summary.blockedCount} serviço(s) travado(s)
+                      {summary.blockedCount} serviÃ§o(s) travado(s)
                     </Text>
                     <Text style={styles.metricText}>
                       {summary.maxDelayDays} dia(s) de atraso
@@ -280,8 +280,8 @@ export default function TowerApartmentsScreen() {
           <View style={styles.legendRow}>
             <Text style={styles.legendItem}>Verde = Excelente</Text>
             <Text style={styles.legendItem}>Azul = Bom</Text>
-            <Text style={styles.legendItem}>Amarelo = Atenção</Text>
-            <Text style={styles.legendItem}>Vermelho = Crítico</Text>
+            <Text style={styles.legendItem}>Amarelo = AtenÃ§Ã£o</Text>
+            <Text style={styles.legendItem}>Vermelho = CrÃ­tico</Text>
             <Text style={styles.legendItem}>Cinza = Sem dados</Text>
           </View>
 
@@ -296,7 +296,7 @@ export default function TowerApartmentsScreen() {
                     <Link
                       key={`compact-${summary.apartment.id}`}
                       href={{
-                        pathname: '/apartamentos/[apartamentoId]',
+                        pathname: '/visao-geral/apartamentos/[apartamentoId]',
                         params: { apartamentoId: summary.apartment.id },
                       }}
                       asChild>
@@ -561,3 +561,4 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
 });
+

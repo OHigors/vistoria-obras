@@ -1,33 +1,48 @@
 import { Tabs } from 'expo-router';
-import React from 'react';
 
 import { HapticTab } from '@/components/haptic-tab';
 import { IconSymbol } from '@/components/ui/icon-symbol';
-import { Colors } from '@/constants/theme';
-import { useColorScheme } from '@/hooks/use-color-scheme';
 
 export default function TabLayout() {
-  const colorScheme = useColorScheme();
-
   return (
     <Tabs
       screenOptions={{
-        tabBarActiveTintColor: Colors[colorScheme ?? 'light'].tint,
+        tabBarActiveTintColor: '#2563EB',
+        tabBarInactiveTintColor: '#94A3B8',
         headerShown: false,
         tabBarButton: HapticTab,
+        tabBarStyle: {
+          backgroundColor: '#FFFFFF',
+          borderTopColor: '#E2E8F0',
+          borderTopWidth: 1,
+          paddingBottom: 4,
+          height: 60,
+        },
+        tabBarLabelStyle: {
+          fontSize: 11,
+          fontWeight: '700',
+          marginBottom: 4,
+        },
       }}>
       <Tabs.Screen
         name="index"
         options={{
-          title: 'Home',
-          tabBarIcon: ({ color }) => <IconSymbol size={28} name="house.fill" color={color} />,
+          title: 'Início',
+          tabBarIcon: ({ color }) => <IconSymbol size={24} name="house.fill" color={color} />,
         }}
       />
       <Tabs.Screen
-        name="explore"
+        name="visao-geral"
         options={{
-          title: 'Explore',
-          tabBarIcon: ({ color }) => <IconSymbol size={28} name="paperplane.fill" color={color} />,
+          title: 'Visão Geral',
+          tabBarIcon: ({ color }) => <IconSymbol size={24} name="building.2.fill" color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="cronograma"
+        options={{
+          title: 'Cronograma',
+          tabBarIcon: ({ color }) => <IconSymbol size={24} name="calendar.badge.clock" color={color} />,
         }}
       />
     </Tabs>

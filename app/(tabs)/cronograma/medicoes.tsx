@@ -54,7 +54,7 @@ const getEnrichedMeasurements = (): EnrichedMeasurement[] =>
   });
 
 const csvSeparator = ';';
-const csvBom = '\uFEFF';
+const csvBom = '﻿';
 
 const escapeCsvValue = (value: string | number) => {
   const text = String(value);
@@ -781,6 +781,7 @@ const styles = StyleSheet.create({
   container: {
     gap: 14,
     padding: 20,
+    backgroundColor: '#F8FAFC',
   },
   header: {
     alignItems: 'flex-start',

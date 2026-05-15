@@ -10,23 +10,9 @@ export default function RootLayout() {
 
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <Stack
-        screenOptions={{
-          headerShown: false,
-          headerStyle: { backgroundColor: '#0F172A' },
-          headerTintColor: '#FFFFFF',
-          headerTitleStyle: { fontWeight: '700' },
-          contentStyle: { backgroundColor: '#F4F7FB' },
-        }}>
-        <Stack.Screen name="index" options={{ title: 'Residencial Cagliari' }} />
-        <Stack.Screen name="torres" options={{ title: 'Selecionar torre' }} />
-        <Stack.Screen name="torres/[torreId]" options={{ title: 'Apartamentos' }} />
-        <Stack.Screen name="apartamentos/[apartamentoId]" options={{ title: 'Vistoria' }} />
-        <Stack.Screen name="medicoes" options={{ title: 'Medições' }} />
-        <Stack.Screen name="relatorio-geral" options={{ title: 'Relatório geral' }} />
-        <Stack.Screen name="gerar-relatorio" options={{ title: 'Gerar relatório' }} />
-        <Stack.Screen name="servicos-etapas" options={{ title: 'Serviços e etapas' }} />
-        <Stack.Screen name="diagnostico" options={{ title: 'Diagnóstico do MVP' }} />
+      <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: '#F8FAFC' } }}>
+        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
       </Stack>
       <StatusBar style="auto" />
     </ThemeProvider>
