@@ -4,21 +4,22 @@ import { useCallback, useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
-import { apartments, project, towers } from '@/src/data/mockObras';
 import type { Measurement } from '@/src/data/localMeasurements';
-import { formatCurrency, loadAllMeasurements } from '@/src/data/localMeasurements';
+import { formatCurrency } from '@/src/data/localMeasurements';
+import { useObras } from '@/src/data/ObrasContext';
+import * as db from '@/src/data/db';
 import { statusConfig } from '@/src/ui/status';
 import { getChecklistForApartment } from '@/src/data/serviceBlockers';
 
 export default function VisaoGeralScreen() {
+  const { apartments, towers, refreshData } = useObras();
   const [measurements, setMeasurements] = useState<Measurement[]>([]);
-  const [, setRefreshKey] = useState(0);
 
   useFocusEffect(
     useCallback(() => {
-      setMeasurements(loadAllMeasurements(apartments.map((a) => a.id)));
-      setRefreshKey((k) => k + 1);
-    }, []),
+      refreshData();
+      db.loadAllMeasurements().then(setMeasurements);
+    }, [refreshData]),
   );
 
   const statusCounts = useMemo(

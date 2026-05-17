@@ -2,13 +2,9 @@ import { useFocusEffect } from '@react-navigation/native';
 import { useCallback, useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import {
-  createEmptyServiceStage,
-  defaultServiceStages,
-  getServiceStagesFromStorage,
-  saveServiceStagesToStorage,
-} from '@/src/data/serviceStages';
+import { createEmptyServiceStage, defaultServiceStages } from '@/src/data/serviceStages';
 import type { ServiceStage } from '@/src/data/serviceStages';
+import * as db from '@/src/data/db';
 
 const booleanFields = [
   ['apareceNoChecklist', 'Checklist'],
@@ -26,10 +22,11 @@ export default function ServiceStagesScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      const loadedStages = getServiceStagesFromStorage();
-      setStages(loadedStages);
-      setDraft(createEmptyServiceStage(loadedStages.length + 1));
-      setEditingId(undefined);
+      db.loadServiceStages().then((loadedStages) => {
+        setStages(loadedStages);
+        setDraft(createEmptyServiceStage(loadedStages.length + 1));
+        setEditingId(undefined);
+      });
     }, []),
   );
 
@@ -44,7 +41,7 @@ export default function ServiceStagesScreen() {
       .sort((first, second) => first.ordemExecucao - second.ordemExecucao);
 
     setStages(orderedStages);
-    saveServiceStagesToStorage(orderedStages);
+    db.saveServiceStages(orderedStages);
   };
 
   const updateDraft = <Field extends keyof ServiceStage>(field: Field, value: ServiceStage[Field]) => {

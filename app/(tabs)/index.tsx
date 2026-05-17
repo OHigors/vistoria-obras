@@ -2,11 +2,13 @@ import { Link } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { useCallback, useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
-import { apartments, project, towers } from '@/src/data/mockObras';
 import type { Measurement } from '@/src/data/localMeasurements';
-import { formatCurrency, loadAllMeasurements } from '@/src/data/localMeasurements';
+import { formatCurrency } from '@/src/data/localMeasurements';
+import { useObras } from '@/src/data/ObrasContext';
+import * as db from '@/src/data/db';
 import type { BottleneckSummary } from '@/src/data/serviceBlockers';
 import { summarizeBottlenecks } from '@/src/data/serviceBlockers';
 import type { ScheduleSummary } from '@/src/data/schedule';
@@ -14,6 +16,8 @@ import { summarizeSchedule } from '@/src/data/schedule';
 import { statusConfig } from '@/src/ui/status';
 
 export default function DashboardScreen() {
+  const insets = useSafeAreaInsets();
+  const { apartments, towers, project, refreshData } = useObras();
   const [measurements, setMeasurements] = useState<Measurement[]>([]);
   const [bottleneckSummary, setBottleneckSummary] = useState<BottleneckSummary>({
     mostBlockedServices: [],
@@ -24,7 +28,8 @@ export default function DashboardScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      setMeasurements(loadAllMeasurements(apartments.map((apartment) => apartment.id)));
+      refreshData();
+      db.loadAllMeasurements().then(setMeasurements);
       setBottleneckSummary(summarizeBottlenecks(apartments));
       setScheduleSummary(
         summarizeSchedule(
@@ -32,7 +37,7 @@ export default function DashboardScreen() {
           (towerId) => towers.find((tower) => tower.id === towerId)?.name ?? towerId,
         ),
       );
-    }, []),
+    }, [apartments, towers, refreshData]),
   );
 
   const completedAverage = Math.round(
@@ -57,7 +62,7 @@ export default function DashboardScreen() {
   return (
     <ScrollView style={styles.scrollView} contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
       {/* Header */}
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + 12 }]}>
         <View style={styles.headerTop}>
           {/* Left: user icon stacked above text */}
           <View style={styles.headerLeft}>
@@ -191,7 +196,6 @@ const styles = StyleSheet.create({
     borderBottomColor: '#E2E8F0',
     borderBottomWidth: 1,
     paddingHorizontal: 20,
-    paddingTop: 20,
     paddingBottom: 16,
   },
   headerTop: {

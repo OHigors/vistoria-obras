@@ -4,18 +4,8 @@ import { Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View 
 
 import type { ApartmentStatus, ChecklistItem, ChecklistState } from '@/src/data/mockObras';
 import type { InspectionPhoto } from '@/src/data/localInspectionPhotos';
-import {
-  getInspectionPhotosFromStorage,
-  getInspectionPhotoStorageKey,
-  saveInspectionPhotosToStorage,
-} from '@/src/data/localInspectionPhotos';
 import type { InspectionVisit, VisitChecklistCounts } from '@/src/data/localInspectionVisits';
-import {
-  getInspectionVisitsFromStorage,
-  getInspectionVisitStorageKey,
-  localResponsible,
-  saveInspectionVisitsToStorage,
-} from '@/src/data/localInspectionVisits';
+import { localResponsible } from '@/src/data/localInspectionVisits';
 import type { Measurement, MeasurementDraft } from '@/src/data/localMeasurements';
 import {
   createEmptyMeasurementDraft,
@@ -23,18 +13,16 @@ import {
   getContractorId,
   getMeasurementDuplicateKey,
   getMeasurementTypeLabel,
-  getMeasurementStorageKey,
-  getMeasurementsFromStorage,
   isMeasurementPeriodValid,
   measurementBlocksDuplicate,
   measurementDuplicateMessage,
   normalizeMeasurementPeriod,
   measurementStatusOptions,
   measurementTypeOptions,
-  saveMeasurementsToStorage,
   toNumber,
 } from '@/src/data/localMeasurements';
-import { getApartmentById, getTowerById, project } from '@/src/data/mockObras';
+import { useObras } from '@/src/data/ObrasContext';
+import * as dbApi from '@/src/data/db';
 import type { ScheduleFields } from '@/src/data/schedule';
 import { formatDateBr, getScheduleRows, isValidBrDate, maskDateBr, normalizeDateForDisplay } from '@/src/data/schedule';
 import { getBlockedServiceGroups } from '@/src/data/serviceBlockers';
@@ -83,7 +71,6 @@ const getInitialChecklist = (items?: ChecklistItem[]): EditableChecklistItem[] =
     issueComment: '',
   }));
 
-const getStorageKey = (apartmentId?: string) => (apartmentId ? `vistoria-${apartmentId}` : undefined);
 
 const formatPhotoDateTime = (value: string) =>
   new Intl.DateTimeFormat('pt-BR', {
@@ -144,75 +131,6 @@ const getLastVisitVariationText = (variation: number) => {
   return 'Sem variação desde a visita anterior';
 };
 
-const getChecklistFromStorage = (
-  storageKey: string | undefined,
-  fallbackItems: EditableChecklistItem[],
-) => {
-  if (!storageKey || typeof window === 'undefined') {
-    return fallbackItems;
-  }
-
-  try {
-    const storedValue = window.localStorage.getItem(storageKey);
-
-    if (!storedValue) {
-      return fallbackItems;
-    }
-
-    const storedItems = JSON.parse(storedValue) as Partial<EditableChecklistItem>[];
-    const storedItemsById = new Map(storedItems.map((item) => [item.id, item]));
-
-    return fallbackItems.map((item) => {
-      const storedItem = storedItemsById.get(item.id);
-
-      if (!storedItem) {
-        return item;
-      }
-
-      return {
-        ...item,
-        state: isChecklistState(storedItem.state) ? storedItem.state : item.state,
-        comment: typeof storedItem.comment === 'string' ? storedItem.comment : item.comment,
-        issueCriticality: isIssueCriticality(storedItem.issueCriticality)
-          ? storedItem.issueCriticality
-          : item.issueCriticality,
-        issueComment:
-          typeof storedItem.issueComment === 'string'
-            ? storedItem.issueComment
-            : item.issueComment,
-        plannedStart:
-          typeof storedItem.plannedStart === 'string'
-            ? normalizeDateForDisplay(storedItem.plannedStart)
-            : undefined,
-        plannedEnd:
-          typeof storedItem.plannedEnd === 'string'
-            ? normalizeDateForDisplay(storedItem.plannedEnd)
-            : undefined,
-        actualStart:
-          typeof storedItem.actualStart === 'string'
-            ? normalizeDateForDisplay(storedItem.actualStart)
-            : undefined,
-        actualEnd:
-          typeof storedItem.actualEnd === 'string'
-            ? normalizeDateForDisplay(storedItem.actualEnd)
-            : undefined,
-      };
-    });
-  } catch {
-    return fallbackItems;
-  }
-};
-
-const saveChecklistToStorage = (
-  storageKey: string | undefined,
-  checklist: EditableChecklistItem[],
-) => {
-  if (!storageKey || typeof window === 'undefined') {
-    return;
-  }
-
-  window.localStorage.setItem(storageKey, JSON.stringify(checklist));
-};
 
 const calculateProgress = (items: EditableChecklistItem[]) => {
   if (items.length === 0) {
@@ -260,91 +178,38 @@ const calculateApartmentStatus = (items: EditableChecklistItem[], progress: numb
 
 export default function ApartmentDetailScreen() {
   const { apartamentoId } = useLocalSearchParams<{ apartamentoId: string }>();
+  const { getApartmentById, getTowerById, updateApartmentLocal, project } = useObras();
   const apartment = getApartmentById(apartamentoId);
   const tower = apartment ? getTowerById(apartment.towerId) : undefined;
-  const storageKey = getStorageKey(apartment?.id);
-  const measurementStorageKey = getMeasurementStorageKey(apartment?.id);
-  const photoStorageKey = getInspectionPhotoStorageKey(apartment?.id);
-  const visitStorageKey = getInspectionVisitStorageKey(apartment?.id);
 
   const initialChecklist = useMemo(
     () => getInitialChecklist(apartment?.checklist),
     [apartment?.checklist],
   );
   const [checklist, setChecklist] = useState<EditableChecklistItem[]>(initialChecklist);
-  const [loadedStorageKey, setLoadedStorageKey] = useState<string>();
-  const skipNextSaveKey = useRef<string | undefined>(undefined);
   const [measurements, setMeasurements] = useState<Measurement[]>([]);
-  const [loadedMeasurementStorageKey, setLoadedMeasurementStorageKey] = useState<string>();
   const [measurementDrafts, setMeasurementDrafts] = useState<Record<string, MeasurementDraft>>({});
   const [measurementAlert, setMeasurementAlert] = useState('');
   const [scheduleAlert, setScheduleAlert] = useState('');
-  const skipNextMeasurementSaveKey = useRef<string | undefined>(undefined);
   const [photos, setPhotos] = useState<InspectionPhoto[]>([]);
-  const [loadedPhotoStorageKey, setLoadedPhotoStorageKey] = useState<string>();
   const [selectedPhoto, setSelectedPhoto] = useState<InspectionPhoto>();
   const [selectedMeasurementEvidence, setSelectedMeasurementEvidence] = useState<Measurement>();
   const [activeTab, setActiveTab] = useState<DetailTab>('Resumo');
   const [visits, setVisits] = useState<InspectionVisit[]>([]);
-  const [loadedVisitStorageKey, setLoadedVisitStorageKey] = useState<string>();
   const [selectedVisit, setSelectedVisit] = useState<InspectionVisit>();
 
+  // Load all data from Supabase when apartment changes
   useEffect(() => {
-    setChecklist(getChecklistFromStorage(storageKey, initialChecklist));
-    setLoadedStorageKey(storageKey);
-  }, [initialChecklist, storageKey]);
-
-  useEffect(() => {
-    if (storageKey && loadedStorageKey === storageKey) {
-      if (skipNextSaveKey.current === storageKey) {
-        skipNextSaveKey.current = undefined;
-        return;
-      }
-
-      saveChecklistToStorage(storageKey, checklist);
-    }
-  }, [checklist, loadedStorageKey, storageKey]);
-
-  useEffect(() => {
-    setMeasurements(getMeasurementsFromStorage(measurementStorageKey));
+    if (!apartamentoId) return;
+    setChecklist(getInitialChecklist(apartment?.checklist));
     setMeasurementDrafts({});
     setMeasurementAlert('');
-    setLoadedMeasurementStorageKey(measurementStorageKey);
-  }, [measurementStorageKey]);
-
-  useEffect(() => {
-    if (measurementStorageKey && loadedMeasurementStorageKey === measurementStorageKey) {
-      if (skipNextMeasurementSaveKey.current === measurementStorageKey) {
-        skipNextMeasurementSaveKey.current = undefined;
-        return;
-      }
-
-      saveMeasurementsToStorage(measurementStorageKey, measurements);
-    }
-  }, [loadedMeasurementStorageKey, measurementStorageKey, measurements]);
-
-  useEffect(() => {
-    setPhotos(getInspectionPhotosFromStorage(photoStorageKey));
-    setLoadedPhotoStorageKey(photoStorageKey);
-  }, [photoStorageKey]);
-
-  useEffect(() => {
-    if (photoStorageKey && loadedPhotoStorageKey === photoStorageKey) {
-      saveInspectionPhotosToStorage(photoStorageKey, photos);
-    }
-  }, [loadedPhotoStorageKey, photoStorageKey, photos]);
-
-  useEffect(() => {
-    setVisits(getInspectionVisitsFromStorage(visitStorageKey));
-    setLoadedVisitStorageKey(visitStorageKey);
     setSelectedVisit(undefined);
-  }, [visitStorageKey]);
 
-  useEffect(() => {
-    if (visitStorageKey && loadedVisitStorageKey === visitStorageKey) {
-      saveInspectionVisitsToStorage(visitStorageKey, visits);
-    }
-  }, [loadedVisitStorageKey, visitStorageKey, visits]);
+    dbApi.loadMeasurements(apartamentoId).then(setMeasurements);
+    dbApi.loadPhotos(apartamentoId).then(setPhotos);
+    dbApi.loadVisits(apartamentoId).then(setVisits);
+  }, [apartamentoId, apartment?.checklist]);
 
   if (!apartment || !tower) {
     return (
@@ -456,6 +321,7 @@ export default function ApartmentDetailScreen() {
         finalized: false,
       };
 
+      dbApi.saveVisit(updatedVisit);
       return currentVisits.map((visit) => (visit.id === visitId ? updatedVisit : visit));
     });
   };
@@ -478,6 +344,15 @@ export default function ApartmentDetailScreen() {
           : item,
       );
 
+        const changed = nextItems.find((i) => i.id === itemId);
+        if (changed && apartamentoId) {
+          dbApi.upsertChecklistItem({ ...changed, apartmentId: apartamentoId });
+          const np = calculateProgress(nextItems);
+          const ns = calculateApartmentStatus(nextItems, np);
+          dbApi.updateApartmentStats(apartamentoId, np, ns);
+          updateApartmentLocal(apartamentoId, np, ns);
+        }
+
         registerVisitUpdate({
           changedItemId: itemId,
           nextChecklist: nextItems,
@@ -491,22 +366,22 @@ export default function ApartmentDetailScreen() {
   };
 
   const updateItemComment = (itemId: string, comment: string) => {
-    setChecklist((currentItems) =>
-      {
-        const nextItems = currentItems.map((item) =>
-          item.id === itemId ? { ...item, comment } : item,
-        );
-
-        registerVisitUpdate({
-          changedItemId: itemId,
-          nextChecklist: nextItems,
-          nextPhotos: photos,
-          progressBeforeFallback: calculateProgress(currentItems),
-        });
-
-        return nextItems;
-      },
-    );
+    setChecklist((currentItems) => {
+      const nextItems = currentItems.map((item) =>
+        item.id === itemId ? { ...item, comment } : item,
+      );
+      const changed = nextItems.find((i) => i.id === itemId);
+      if (changed && apartamentoId) {
+        dbApi.upsertChecklistItem({ ...changed, apartmentId: apartamentoId });
+      }
+      registerVisitUpdate({
+        changedItemId: itemId,
+        nextChecklist: nextItems,
+        nextPhotos: photos,
+        progressBeforeFallback: calculateProgress(currentItems),
+      });
+      return nextItems;
+    });
   };
 
   const updateItemIssue = (
@@ -547,19 +422,20 @@ export default function ApartmentDetailScreen() {
       setScheduleAlert('');
     }
 
-    setChecklist((currentItems) =>
-      currentItems.map((item) => (item.id === itemId ? { ...item, [field]: maskedValue } : item)),
-    );
+    setChecklist((currentItems) => {
+      const nextItems = currentItems.map((item) =>
+        item.id === itemId ? { ...item, [field]: maskedValue } : item,
+      );
+      const changed = nextItems.find((i) => i.id === itemId);
+      if (changed && apartamentoId && maskedValue.length === 10) {
+        dbApi.upsertChecklistItem({ ...changed, apartmentId: apartamentoId });
+      }
+      return nextItems;
+    });
   };
 
   const clearApartmentData = () => {
-    if (storageKey && typeof window !== 'undefined') {
-      window.localStorage.removeItem(storageKey);
-      skipNextSaveKey.current = storageKey;
-    }
-
     setChecklist(initialChecklist);
-    setLoadedStorageKey(storageKey);
   };
 
   const addPhotoToItem = (item: EditableChecklistItem) => {
@@ -590,26 +466,26 @@ export default function ApartmentDetailScreen() {
         const photoId = `${apartment.id}-${item.id}-${Date.now()}`;
         const visitId = openVisit?.id;
 
-        setPhotos((currentPhotos) => {
-          const nextPhotos = [
-            ...currentPhotos,
-            {
-            id: photoId,
-            towerId: tower.id,
-            apartmentId: apartment.id,
-            itemId: item.id,
-            serviceId: item.id,
-            service: item.label,
-            uri,
-            fileName: file.name,
-            createdAt,
-            dataHora: createdAt,
-            comment: '',
-            comentarioFoto: '',
-            visitId,
-          },
-          ];
+        const newPhoto = {
+          id: photoId,
+          towerId: tower.id,
+          apartmentId: apartment.id,
+          itemId: item.id,
+          serviceId: item.id,
+          service: item.label,
+          uri,
+          fileName: file.name,
+          createdAt,
+          dataHora: createdAt,
+          comment: '',
+          comentarioFoto: '',
+          visitId,
+        };
 
+        dbApi.savePhoto(newPhoto);
+
+        setPhotos((currentPhotos) => {
+          const nextPhotos = [...currentPhotos, newPhoto];
           registerVisitUpdate({
             addedPhotoId: photoId,
             changedItemId: item.id,
@@ -617,7 +493,6 @@ export default function ApartmentDetailScreen() {
             nextPhotos,
             progressBeforeFallback: progress,
           });
-
           return nextPhotos;
         });
       };
@@ -629,30 +504,28 @@ export default function ApartmentDetailScreen() {
   };
 
   const updatePhotoComment = (photoId: string, comment: string) => {
-    setPhotos((currentPhotos) =>
-      {
-        const targetPhoto = currentPhotos.find((photo) => photo.id === photoId);
-        const nextPhotos = currentPhotos.map((photo) =>
-          photo.id === photoId ? { ...photo, comment, comentarioFoto: comment } : photo,
-        );
-
-        registerVisitUpdate({
-          changedItemId: targetPhoto?.serviceId,
-          nextChecklist: checklist,
-          nextPhotos,
-          progressBeforeFallback: progress,
-        });
-
-        return nextPhotos;
-      },
-    );
+    setPhotos((currentPhotos) => {
+      const targetPhoto = currentPhotos.find((photo) => photo.id === photoId);
+      const nextPhotos = currentPhotos.map((photo) =>
+        photo.id === photoId ? { ...photo, comment, comentarioFoto: comment } : photo,
+      );
+      const updated = nextPhotos.find((p) => p.id === photoId);
+      if (updated) dbApi.savePhoto(updated);
+      registerVisitUpdate({
+        changedItemId: targetPhoto?.serviceId,
+        nextChecklist: checklist,
+        nextPhotos,
+        progressBeforeFallback: progress,
+      });
+      return nextPhotos;
+    });
   };
 
   const removePhoto = (photoId: string) => {
+    dbApi.deletePhoto(photoId);
     setPhotos((currentPhotos) => {
       const targetPhoto = currentPhotos.find((photo) => photo.id === photoId);
       const nextPhotos = currentPhotos.filter((photo) => photo.id !== photoId);
-
       registerVisitUpdate({
         changedItemId: targetPhoto?.serviceId,
         nextChecklist: checklist,
@@ -701,38 +574,42 @@ export default function ApartmentDetailScreen() {
       const counts = getChecklistCounts(checklist);
       const statusAfter = calculateApartmentStatus(checklist, progress);
 
+      const finalizedVisit = {
+        ...currentOpenVisit,
+        apartmentId: apartment.id,
+        apartamentoId: apartment.id,
+        date: now,
+        startedAt: currentOpenVisit.startedAt ?? currentOpenVisit.date ?? now,
+        dataInicio: currentOpenVisit.dataInicio ?? currentOpenVisit.startedAt ?? currentOpenVisit.date ?? now,
+        finalized: true,
+        finalizedAt: now,
+        responsible: currentOpenVisit.responsible || localResponsible,
+        responsavel: currentOpenVisit.responsavel || currentOpenVisit.responsible || localResponsible,
+        progressBefore,
+        percentualAntes: progressBefore,
+        progressAfter: progress,
+        percentualDepois: progress,
+        evolution: progress - progressBefore,
+        evolucao: progress - progressBefore,
+        counts,
+        photosAdded: addedPhotoIds.length,
+        quantidadeFotos: addedPhotoIds.length,
+        quantidadePendencias: issueItemIds.length,
+        statusAfter,
+        statusFinal: statusAfter,
+        generalNote: currentOpenVisit.generalNote ?? '',
+        observacaoGeral: currentOpenVisit.observacaoGeral ?? currentOpenVisit.generalNote ?? '',
+        changedItemIds,
+        addedPhotoIds,
+        issueItemIds,
+      };
+
+      dbApi.saveVisit(finalizedVisit);
+      dbApi.updateApartmentStats(apartment.id, progress, statusAfter);
+      updateApartmentLocal(apartment.id, progress, statusAfter);
+
       return currentVisits.map((visit) =>
-        visit.id === currentOpenVisit.id
-          ? {
-              ...visit,
-              apartmentId: apartment.id,
-              apartamentoId: apartment.id,
-              date: now,
-              startedAt: visit.startedAt ?? visit.date ?? now,
-              dataInicio: visit.dataInicio ?? visit.startedAt ?? visit.date ?? now,
-              finalized: true,
-              finalizedAt: now,
-              responsible: visit.responsible || localResponsible,
-              responsavel: visit.responsavel || visit.responsible || localResponsible,
-              progressBefore,
-              percentualAntes: progressBefore,
-              progressAfter: progress,
-              percentualDepois: progress,
-              evolution: progress - progressBefore,
-              evolucao: progress - progressBefore,
-              counts,
-              photosAdded: addedPhotoIds.length,
-              quantidadeFotos: addedPhotoIds.length,
-              quantidadePendencias: issueItemIds.length,
-              statusAfter,
-              statusFinal: statusAfter,
-              generalNote: visit.generalNote ?? '',
-              observacaoGeral: visit.observacaoGeral ?? visit.generalNote ?? '',
-              changedItemIds,
-              addedPhotoIds,
-              issueItemIds,
-            }
-          : visit,
+        visit.id === currentOpenVisit.id ? finalizedVisit : visit,
       );
     });
   };
@@ -752,9 +629,7 @@ export default function ApartmentDetailScreen() {
       const statusAfter = calculateApartmentStatus(checklist, progress);
       const issueItemIds = pendingItems.map((item) => item.id);
 
-      return [
-        ...currentVisits,
-        {
+      const newVisit = {
           id: `${apartment.id}-visita-${Date.now()}`,
           apartmentId: apartment.id,
           apartamentoId: apartment.id,
@@ -781,8 +656,10 @@ export default function ApartmentDetailScreen() {
           addedPhotoIds: [],
           issueItemIds,
           finalized: false,
-        },
-      ];
+        };
+
+      dbApi.saveVisit(newVisit);
+      return [...currentVisits, newVisit];
     });
   };
 
@@ -858,10 +735,10 @@ export default function ApartmentDetailScreen() {
       apartmentId: apartment.id,
       contractor,
       contractorId,
-      obraId: project.id,
+      obraId: apartment.obraId,
       service: item.label,
       serviceId: item.id,
-      towerId: tower.id,
+      towerId: tower?.id,
     });
     const hasDuplicate = measurements.some((measurement) => {
       const measurementKey = getMeasurementDuplicateKey({
@@ -888,13 +765,7 @@ export default function ApartmentDetailScreen() {
     const periodStart = normalizeMeasurementPeriod(draft.periodStart);
     const periodEnd = normalizeMeasurementPeriod(draft.periodEnd);
 
-    if (
-      !project.id ||
-      !tower.id ||
-      !apartment.id ||
-      !item.id ||
-      !contractorId
-    ) {
+    if (!apartment.obraId || !tower?.id || !apartment.id || !item.id || !contractorId) {
       setMeasurementAlert('Não foi possível criar medição: chave obrigatória incompleta.');
       return;
     }
@@ -914,13 +785,11 @@ export default function ApartmentDetailScreen() {
       return;
     }
 
-    setMeasurements((currentMeasurements) => [
-      ...currentMeasurements,
-      {
-        id: `${apartment.id}-${item.id}-${Date.now()}`,
-        obraId: project.id,
-        towerId: tower.id,
-        apartmentId: apartment.id,
+    const newMeasurement = {
+      id: `${apartment.id}-${item.id}-${Date.now()}`,
+      obraId: apartment.obraId,
+      towerId: tower?.id,
+      apartmentId: apartment.id,
         serviceId: item.id,
         contractorId,
         service: item.label,
@@ -939,10 +808,11 @@ export default function ApartmentDetailScreen() {
         responsible: localResponsible,
         launchedAt: new Date().toISOString(),
         approvedAt: draft.status === 'Aprovado para pagamento' ? new Date().toISOString() : undefined,
-      },
-    ]);
-    setMeasurementAlert('');
+    };
 
+    dbApi.saveMeasurement(newMeasurement);
+    setMeasurements((prev) => [...prev, newMeasurement]);
+    setMeasurementAlert('');
     setMeasurementDrafts((currentDrafts) => ({
       ...currentDrafts,
       [item.id]: createEmptyMeasurementDraft(),
@@ -950,15 +820,10 @@ export default function ApartmentDetailScreen() {
   };
 
   const clearApartmentMeasurements = () => {
-    if (measurementStorageKey && typeof window !== 'undefined') {
-      window.localStorage.removeItem(measurementStorageKey);
-      skipNextMeasurementSaveKey.current = measurementStorageKey;
-    }
-
+    measurements.forEach((m) => dbApi.deleteMeasurement(m.id));
     setMeasurements([]);
     setMeasurementDrafts({});
     setMeasurementAlert('');
-    setLoadedMeasurementStorageKey(measurementStorageKey);
   };
 
   return (
@@ -1657,7 +1522,7 @@ export default function ApartmentDetailScreen() {
               const draftKey = getMeasurementDuplicateKey({
                 apartmentId: apartment.id,
                 contractor: draft.contractor,
-                obraId: project.id,
+                obraId: apartment.obraId,
                 service: item.label,
                 serviceId: item.id,
                 towerId: tower.id,
@@ -1856,7 +1721,7 @@ export default function ApartmentDetailScreen() {
                   <Pressable onPress={() => setSelectedMeasurementEvidence({
                     id: 'draft',
                     apartmentId: apartment.id,
-                    obraId: project.id,
+                    obraId: apartment.obraId,
                     towerId: tower.id,
                     serviceId: item.id,
                     contractorId: getContractorId(draft.contractor || 'rascunho'),

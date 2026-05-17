@@ -3,12 +3,13 @@ import { useFocusEffect } from '@react-navigation/native';
 import { useCallback, useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { getInspectionPhotosFromStorage, getInspectionPhotoStorageKey } from '@/src/data/localInspectionPhotos';
-import { getInspectionVisitsFromStorage, getInspectionVisitStorageKey } from '@/src/data/localInspectionVisits';
+import type { InspectionPhoto } from '@/src/data/localInspectionPhotos';
+import type { InspectionVisit } from '@/src/data/localInspectionVisits';
 import type { Measurement, MeasurementStatus } from '@/src/data/localMeasurements';
-import { formatCurrency, loadAllMeasurements, measurementStatusOptions, parseBrDateForMeasurement } from '@/src/data/localMeasurements';
+import { formatCurrency, measurementStatusOptions, parseBrDateForMeasurement } from '@/src/data/localMeasurements';
 import type { Apartment, ApartmentStatus, ChecklistItem } from '@/src/data/mockObras';
-import { apartments, getApartmentById, getTowerById, project, towers } from '@/src/data/mockObras';
+import { useObras } from '@/src/data/ObrasContext';
+import * as db from '@/src/data/db';
 import { consolidatedReportHeader } from '@/src/data/reportExports';
 import { getScheduleRows, getScheduledChecklistForApartment } from '@/src/data/schedule';
 import { getBlockedServiceGroups } from '@/src/data/serviceBlockers';
@@ -204,13 +205,17 @@ const isInPeriod = (value: string, periodStart: string, periodEnd: string) => {
   return (!start || date.getTime() >= start.getTime()) && (!end || date.getTime() <= end.getTime());
 };
 
-const getTowerLabel = (towerId: string) => {
-  const tower = getTowerById(towerId);
-  return tower ? `${tower.name} / ${tower.block} / ${tower.position}` : towerId;
-};
-
 export default function GeneralReportScreen() {
+  const { apartments, towers, project, getApartmentById } = useObras();
   const [refreshToken, setRefreshToken] = useState(0);
+  const [allMeasurements, setAllMeasurements] = useState<Measurement[]>([]);
+  const [visitsByApt, setVisitsByApt] = useState<Record<string, InspectionVisit[]>>({});
+  const [photosByApt, setPhotosByApt] = useState<Record<string, InspectionPhoto[]>>({});
+
+  const getTowerLabel = (towerId: string) => {
+    const tower = towers.find((t) => t.id === towerId);
+    return tower ? `${tower.name} / ${tower.block} / ${tower.position}` : towerId;
+  };
   const [towerFilter, setTowerFilter] = useState(allFilter);
   const [apartmentFilter, setApartmentFilter] = useState('');
   const [serviceFilter, setServiceFilter] = useState('');
@@ -232,23 +237,38 @@ export default function GeneralReportScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      setRefreshToken((current) => current + 1);
-    }, []),
+      const load = async () => {
+        const measurements = await db.loadAllMeasurements();
+        setAllMeasurements(measurements);
+
+        const visitEntries = await Promise.all(
+          apartments.map(async (apt) => [apt.id, await db.loadVisits(apt.id)] as const),
+        );
+        setVisitsByApt(Object.fromEntries(visitEntries));
+
+        const photoEntries = await Promise.all(
+          apartments.map(async (apt) => [apt.id, await db.loadPhotos(apt.id)] as const),
+        );
+        setPhotosByApt(Object.fromEntries(photoEntries));
+
+        setRefreshToken((current) => current + 1);
+      };
+      load();
+    }, [apartments]),
   );
 
   const reportData = useMemo(() => {
     void refreshToken;
 
-    const measurements: MeasurementReportRow[] = loadAllMeasurements(apartments.map((apartment) => apartment.id))
-      .map((measurement) => {
-        const apartment = getApartmentById(measurement.apartmentId);
-        return {
-          ...measurement,
-          apartmentNumber: apartment?.number ?? measurement.apartmentId.replace('ap-', ''),
-          towerId: measurement.towerId ?? apartment?.towerId ?? '',
-          towerLabel: getTowerLabel(measurement.towerId ?? apartment?.towerId ?? ''),
-        };
-      });
+    const measurements: MeasurementReportRow[] = allMeasurements.map((measurement) => {
+      const apartment = getApartmentById(measurement.apartmentId);
+      return {
+        ...measurement,
+        apartmentNumber: apartment?.number ?? measurement.apartmentId.replace('ap-', ''),
+        towerId: measurement.towerId ?? apartment?.towerId ?? '',
+        towerLabel: getTowerLabel(measurement.towerId ?? apartment?.towerId ?? ''),
+      };
+    });
 
     const apartmentRows: ApartmentReportRow[] = apartments.map((apartment) => {
       const checklist = getStoredChecklist(apartment);
@@ -256,7 +276,7 @@ export default function GeneralReportScreen() {
       const status = calculateStatus(checklist, progress);
       const blockedGroups = getBlockedServiceGroups(checklist);
       const scheduleRows = getScheduleRows(checklist);
-      const visits = getInspectionVisitsFromStorage(getInspectionVisitStorageKey(apartment.id));
+      const visits = visitsByApt[apartment.id] ?? [];
       const latestVisit = [...visits].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0];
 
       return {
@@ -275,7 +295,7 @@ export default function GeneralReportScreen() {
 
     const pendingRows: PendingReportRow[] = apartments.flatMap((apartment) => {
       const checklist = getStoredChecklist(apartment);
-      const photos = getInspectionPhotosFromStorage(getInspectionPhotoStorageKey(apartment.id));
+      const photos = photosByApt[apartment.id] ?? [];
 
       return checklist
         .filter((item) => item.state === 'pending' || item.state === 'partial')
@@ -305,7 +325,7 @@ export default function GeneralReportScreen() {
         originService: group.pendingService,
         impactedServices: group.blockedServices.join(', '),
         blockType: group.currentStatus,
-        scheduleImpact: group.impact === 'CrÃ­tico' || group.impact === 'Alto' ? 'Alto impacto' : 'Em risco',
+        scheduleImpact: group.impact === 'Crítico' || group.impact === 'Alto' ? 'Alto impacto' : 'Em risco',
         releaseImpact: group.blockedServices.some((service) => service.includes('entrega') || service.includes('liberaÃ§Ã£o'))
           ? 'Impacta liberaÃ§Ã£o'
           : 'NÃ£o impacta liberaÃ§Ã£o final',
@@ -336,7 +356,7 @@ export default function GeneralReportScreen() {
     );
 
     const visitRows: VisitReportRow[] = apartments.flatMap((apartment) =>
-      getInspectionVisitsFromStorage(getInspectionVisitStorageKey(apartment.id)).map((visit) => ({
+      (visitsByApt[apartment.id] ?? []).map((visit) => ({
         apartmentId: apartment.id,
         apartmentNumber: apartment.number,
         towerId: apartment.towerId,
@@ -353,7 +373,7 @@ export default function GeneralReportScreen() {
     );
 
     return { apartmentRows, blockedRows, measurements, pendingRows, scheduleRows, visitRows };
-  }, [refreshToken]);
+  }, [refreshToken, apartments, towers, allMeasurements, visitsByApt, photosByApt, getApartmentById, getTowerLabel]);
 
   const filterCommon = <T extends { apartmentNumber: string; service?: string; status?: string; towerId: string }>(row: T) => {
     const matchesTower = towerFilter === allFilter || row.towerId === towerFilter;

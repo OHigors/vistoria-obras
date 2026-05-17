@@ -52,44 +52,10 @@ const classifyImpact = (blockedServices: string[]): BlockImpact => {
   return 'Baixo';
 };
 
-export const getChecklistForApartment = (apartment: Apartment): ChecklistItem[] => {
-  if (typeof window === 'undefined') {
-    return apartment.checklist;
-  }
-
-  try {
-    const storedValue = window.localStorage.getItem(getStorageKey(apartment.id));
-
-    if (!storedValue) {
-      return apartment.checklist;
-    }
-
-    const storedItems = JSON.parse(storedValue) as Partial<ChecklistItem>[];
-    const storedItemsById = new Map(storedItems.map((item) => [item.id, item]));
-
-    return apartment.checklist.map((item) => {
-      const storedItem = storedItemsById.get(item.id);
-
-      if (
-        !storedItem ||
-        (storedItem.state !== 'ok' &&
-          storedItem.state !== 'pending' &&
-          storedItem.state !== 'partial' &&
-          storedItem.state !== 'notApplicable')
-      ) {
-        return item;
-      }
-
-      return {
-        ...item,
-        state: storedItem.state,
-        comment: typeof storedItem.comment === 'string' ? storedItem.comment : item.comment,
-      };
-    });
-  } catch {
-    return apartment.checklist;
-  }
-};
+// Checklist state is now the source of truth in Supabase.
+// Apartments are loaded from DB with current state already applied.
+export const getChecklistForApartment = (apartment: Apartment): ChecklistItem[] =>
+  apartment.checklist;
 
 export const getBlockedServiceGroups = (checklist: ChecklistItem[]): BlockedServiceGroup[] =>
   checklist

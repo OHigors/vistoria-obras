@@ -4,7 +4,7 @@ import { useCallback, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import type { Apartment, ApartmentStatus, ChecklistItem } from '@/src/data/mockObras';
-import { getApartmentsByTower, getTowerById } from '@/src/data/mockObras';
+import { useObras } from '@/src/data/ObrasContext';
 import { summarizeApartmentSchedule } from '@/src/data/schedule';
 import { getBlockedServiceGroups, getChecklistForApartment } from '@/src/data/serviceBlockers';
 import { statusConfig } from '@/src/ui/status';
@@ -81,17 +81,17 @@ const getFloorOrder = (floor: string) => {
 
 export default function TowerApartmentsScreen() {
   const { torreId } = useLocalSearchParams<{ torreId: string }>();
+  const { getTowerById, getApartmentsByTower, refreshData } = useObras();
   const tower = getTowerById(torreId);
   const towerApartments = getApartmentsByTower(torreId);
-  const [, setRefreshKey] = useState(0);
   const [viewMode, setViewMode] = useState<ViewMode>('Lista detalhada');
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<FilterOption>('Todos');
 
   useFocusEffect(
     useCallback(() => {
-      setRefreshKey((currentKey) => currentKey + 1);
-    }, []),
+      refreshData();
+    }, [refreshData]),
   );
 
   const apartmentSummaries: ApartmentSummary[] = towerApartments.map((apartment) => {

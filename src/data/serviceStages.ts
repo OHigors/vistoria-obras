@@ -126,36 +126,10 @@ const normalizeStage = (stage: Partial<ServiceStage>, index: number): ServiceSta
   };
 };
 
-export const getServiceStagesFromStorage = (): ServiceStage[] => {
-  if (typeof window === 'undefined') {
-    return defaultServiceStages;
-  }
-
-  try {
-    const storedValue = window.localStorage.getItem(serviceStagesStorageKey);
-
-    if (!storedValue) {
-      return defaultServiceStages;
-    }
-
-    const storedStages = JSON.parse(storedValue) as Partial<ServiceStage>[];
-    const normalizedStages = storedStages
-      .map(normalizeStage)
-      .filter((stage): stage is ServiceStage => Boolean(stage));
-
-    return normalizedStages.length ? normalizedStages.sort((first, second) => first.ordemExecucao - second.ordemExecucao) : defaultServiceStages;
-  } catch {
-    return defaultServiceStages;
-  }
-};
-
-export const saveServiceStagesToStorage = (stages: ServiceStage[]) => {
-  if (typeof window === 'undefined') {
-    return;
-  }
-
-  window.localStorage.setItem(serviceStagesStorageKey, JSON.stringify(stages));
-};
+// These sync shims are kept for backward compat with non-async callers (diagnostics.ts).
+// Real loading/saving goes through src/data/db.ts (loadServiceStages / saveServiceStages).
+export const getServiceStagesFromStorage = (): ServiceStage[] => defaultServiceStages;
+export const saveServiceStagesToStorage = (_stages: ServiceStage[]) => {};
 
 export const createEmptyServiceStage = (order: number): ServiceStage => ({
   id: `etapa-${Date.now()}`,

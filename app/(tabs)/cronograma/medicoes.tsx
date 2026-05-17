@@ -6,17 +6,15 @@ import type { Measurement, MeasurementStatus, MeasurementType } from '@/src/data
 import {
   formatCurrency,
   getAllowedMeasurementTransitions,
-  getMeasurementStorageKey,
   getMeasurementTypeLabel,
   isMeasurementPeriodValid,
-  loadAllMeasurements,
   measurementStatusOptions,
   measurementTypeOptions,
   parseBrDateForMeasurement,
-  saveMeasurementsToStorage,
   toNumber,
 } from '@/src/data/localMeasurements';
-import { apartments, getApartmentById, getTowerById, project, towers } from '@/src/data/mockObras';
+import { useObras } from '@/src/data/ObrasContext';
+import * as db from '@/src/data/db';
 
 type EnrichedMeasurement = Measurement & {
   apartmentNumber: string;
@@ -40,18 +38,6 @@ type EditDraft = {
 
 const allFilter = 'Todos';
 
-const getEnrichedMeasurements = (): EnrichedMeasurement[] =>
-  loadAllMeasurements(apartments.map((apartment) => apartment.id)).map((measurement) => {
-    const apartment = getApartmentById(measurement.apartmentId);
-    const tower = apartment ? getTowerById(apartment.towerId) : undefined;
-
-    return {
-      ...measurement,
-      apartmentNumber: apartment?.number ?? measurement.apartmentId.replace('ap-', ''),
-      towerId: tower?.id ?? '',
-      towerLabel: tower ? `${tower.name} / ${tower.block} / ${tower.position}` : 'Torre não encontrada',
-    };
-  });
 
 const csvSeparator = ';';
 const csvBom = '﻿';
@@ -66,7 +52,7 @@ const escapeCsvValue = (value: string | number) => {
   return text;
 };
 
-const downloadCsv = (measurements: EnrichedMeasurement[]) => {
+const downloadCsv = (measurements: EnrichedMeasurement[], projectName: string) => {
   if (typeof document === 'undefined') {
     return;
   }
@@ -90,7 +76,7 @@ const downloadCsv = (measurements: EnrichedMeasurement[]) => {
     'Comentário',
   ];
   const rows = measurements.map((measurement) => [
-    project.name,
+    projectName,
     measurement.towerLabel,
     `Apartamento ${measurement.apartmentNumber}`,
     measurement.service,
@@ -134,28 +120,9 @@ const createEditDraft = (measurement: Measurement): EditDraft => ({
   evidenceFileName: measurement.evidenceFileName ?? '',
 });
 
-const persistMeasurementsForApartment = (
-  apartmentId: string,
-  allMeasurements: EnrichedMeasurement[],
-) => {
-  const measurementsForApartment = allMeasurements
-    .filter((measurement) => measurement.apartmentId === apartmentId)
-    .map(
-      ({
-        apartmentNumber: _apartmentNumber,
-        towerId: _towerId,
-        towerLabel: _towerLabel,
-        ...measurement
-      }) => measurement,
-    );
-
-  saveMeasurementsToStorage(
-    getMeasurementStorageKey(apartmentId),
-    measurementsForApartment,
-  );
-};
 
 export default function MeasurementsScreen() {
+  const { towers, project, getApartmentById, getTowerById } = useObras();
   const [measurements, setMeasurements] = useState<EnrichedMeasurement[]>([]);
   const [towerFilter, setTowerFilter] = useState(allFilter);
   const [apartmentFilter, setApartmentFilter] = useState('');
@@ -170,8 +137,22 @@ export default function MeasurementsScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      setMeasurements(getEnrichedMeasurements());
-    }, []),
+      db.loadAllMeasurements().then((raw) => {
+        const enriched = raw.map((measurement) => {
+          const apartment = getApartmentById(measurement.apartmentId);
+          const tower = apartment ? getTowerById(apartment.towerId) : undefined;
+          return {
+            ...measurement,
+            apartmentNumber: apartment?.number ?? measurement.apartmentId.replace('ap-', ''),
+            towerId: tower?.id ?? '',
+            towerLabel: tower
+              ? `${tower.name} / ${tower.block} / ${tower.position}`
+              : 'Torre não encontrada',
+          };
+        });
+        setMeasurements(enriched);
+      });
+    }, [getApartmentById, getTowerById]),
   );
 
   const filteredMeasurements = useMemo(
@@ -296,36 +277,28 @@ export default function MeasurementsScreen() {
         : currentMeasurement,
     );
 
+    const { apartmentNumber: _an, towerId: _ti, towerLabel: _tl, ...base } = updatedMeasurements.find(
+      (m) => m.id === measurement.id,
+    )!;
     setMeasurements(updatedMeasurements);
-    persistMeasurementsForApartment(measurement.apartmentId, updatedMeasurements);
+    db.saveMeasurement(base);
     cancelEditingMeasurement();
   };
 
   const updateMeasurementStatus = (measurement: EnrichedMeasurement, status: MeasurementStatus) => {
-    const updatedMeasurements = measurements.map((currentMeasurement) =>
-      currentMeasurement.id === measurement.id
-        ? {
-            ...currentMeasurement,
-            status,
-            approvedAt:
-              status === 'Aprovado para pagamento' && currentMeasurement.status !== 'Aprovado para pagamento'
-                ? new Date().toISOString()
-                : currentMeasurement.approvedAt,
-          }
-        : currentMeasurement,
-    );
-
-    setMeasurements(updatedMeasurements);
-    persistMeasurementsForApartment(measurement.apartmentId, updatedMeasurements);
+    const approvedAt =
+      status === 'Aprovado para pagamento' && measurement.status !== 'Aprovado para pagamento'
+        ? new Date().toISOString()
+        : measurement.approvedAt;
+    const updated = { ...measurement, status, approvedAt };
+    setMeasurements((prev) => prev.map((m) => (m.id === measurement.id ? updated : m)));
+    const { apartmentNumber: _an, towerId: _ti, towerLabel: _tl, ...base } = updated;
+    db.saveMeasurement(base);
   };
 
   const deleteMeasurement = (measurement: EnrichedMeasurement) => {
-    const updatedMeasurements = measurements.filter(
-      (currentMeasurement) => currentMeasurement.id !== measurement.id,
-    );
-
-    setMeasurements(updatedMeasurements);
-    persistMeasurementsForApartment(measurement.apartmentId, updatedMeasurements);
+    setMeasurements((prev) => prev.filter((m) => m.id !== measurement.id));
+    db.deleteMeasurement(measurement.id);
     cancelEditingMeasurement();
   };
 
@@ -337,7 +310,7 @@ export default function MeasurementsScreen() {
           <Text style={styles.subtitle}>Lista local das medições registradas no navegador.</Text>
         </View>
         <Pressable
-          onPress={() => downloadCsv(filteredMeasurements)}
+          onPress={() => downloadCsv(filteredMeasurements, project.name)}
           style={styles.exportButton}
           testID="export-measurements-csv">
           <Text style={styles.exportButtonText}>Exportar CSV</Text>
@@ -728,7 +701,7 @@ export default function MeasurementsScreen() {
                         </Text>
                       </Pressable>
                     ))}
-                    <Pressable onPress={() => downloadCsv([measurement])} style={styles.neutralButton}>
+                    <Pressable onPress={() => downloadCsv([measurement], project.name)} style={styles.neutralButton}>
                       <Text style={styles.neutralButtonText}>Exportar medição</Text>
                     </Pressable>
                   </View>
