@@ -1,26 +1,15 @@
 import { Link } from 'expo-router';
-import { useFocusEffect } from '@react-navigation/native';
-import { useCallback, useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
-import type { Measurement } from '@/src/data/localMeasurements';
 import { formatCurrency } from '@/src/data/localMeasurements';
 import { useObras } from '@/src/data/ObrasContext';
-import * as db from '@/src/data/db';
 import { statusConfig } from '@/src/ui/status';
 import { getChecklistForApartment } from '@/src/data/serviceBlockers';
 
 export default function VisaoGeralScreen() {
-  const { apartments, towers, refreshData } = useObras();
-  const [measurements, setMeasurements] = useState<Measurement[]>([]);
-
-  useFocusEffect(
-    useCallback(() => {
-      refreshData();
-      db.loadAllMeasurements().then(setMeasurements);
-    }, [refreshData]),
-  );
+  const { apartments, towers, measurements } = useObras();
 
   const statusCounts = useMemo(
     () => ({
@@ -29,7 +18,7 @@ export default function VisaoGeralScreen() {
       attention: apartments.filter((a) => a.status === 'attention').length,
       critical: apartments.filter((a) => a.status === 'critical').length,
     }),
-    [],
+    [apartments],
   );
 
   const completedAverage = Math.round(

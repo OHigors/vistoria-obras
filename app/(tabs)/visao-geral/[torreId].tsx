@@ -1,6 +1,5 @@
-﻿import { useFocusEffect } from '@react-navigation/native';
-import { Link, useLocalSearchParams } from 'expo-router';
-import { useCallback, useState } from 'react';
+﻿import { Link, useLocalSearchParams } from 'expo-router';
+import { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import type { Apartment, ApartmentStatus, ChecklistItem } from '@/src/data/mockObras';
@@ -14,9 +13,9 @@ const filterOptions = [
   'Todos',
   'Excelente',
   'Bom',
-  'AtenÃ§Ã£o',
-  'CrÃ­tico',
-  'Com pendÃªncia',
+  'Atenção',
+  'Crítico',
+  'Com pendência',
   'Com atraso',
   'Travado',
 ] as const;
@@ -81,18 +80,12 @@ const getFloorOrder = (floor: string) => {
 
 export default function TowerApartmentsScreen() {
   const { torreId } = useLocalSearchParams<{ torreId: string }>();
-  const { getTowerById, getApartmentsByTower, refreshData } = useObras();
+  const { getTowerById, getApartmentsByTower } = useObras();
   const tower = getTowerById(torreId);
   const towerApartments = getApartmentsByTower(torreId);
   const [viewMode, setViewMode] = useState<ViewMode>('Lista detalhada');
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<FilterOption>('Todos');
-
-  useFocusEffect(
-    useCallback(() => {
-      refreshData();
-    }, [refreshData]),
-  );
 
   const apartmentSummaries: ApartmentSummary[] = towerApartments.map((apartment) => {
     const checklist = getChecklistForApartment(apartment);
@@ -126,7 +119,7 @@ export default function TowerApartmentsScreen() {
     const matchesFilter =
       filter === 'Todos' ||
       statusLabel === filter ||
-      (filter === 'Com pendÃªncia' && summary.pendingCount > 0) ||
+      (filter === 'Com pendência' && summary.pendingCount > 0) ||
       (filter === 'Com atraso' && summary.maxDelayDays > 0) ||
       (filter === 'Travado' && summary.blockedCount > 0);
 
@@ -147,10 +140,10 @@ export default function TowerApartmentsScreen() {
   if (!tower) {
     return (
       <View style={styles.empty}>
-        <Text style={styles.emptyTitle}>Torre nÃ£o encontrada</Text>
+        <Text style={styles.emptyTitle}>Torre não encontrada</Text>
         <Link href="/" asChild>
           <Pressable style={styles.homeButton}>
-            <Text style={styles.homeButtonText}>Voltar para inÃ­cio</Text>
+            <Text style={styles.homeButtonText}>Voltar para início</Text>
           </Pressable>
         </Link>
       </View>
@@ -258,9 +251,9 @@ export default function TowerApartmentsScreen() {
                   </View>
 
                   <View style={styles.cardMetrics}>
-                    <Text style={styles.metricText}>{summary.pendingCount} pendÃªncia(s)</Text>
+                    <Text style={styles.metricText}>{summary.pendingCount} pendência(s)</Text>
                     <Text style={styles.metricText}>
-                      {summary.blockedCount} serviÃ§o(s) travado(s)
+                      {summary.blockedCount} serviço(s) travado(s)
                     </Text>
                     <Text style={styles.metricText}>
                       {summary.maxDelayDays} dia(s) de atraso
@@ -280,8 +273,8 @@ export default function TowerApartmentsScreen() {
           <View style={styles.legendRow}>
             <Text style={styles.legendItem}>Verde = Excelente</Text>
             <Text style={styles.legendItem}>Azul = Bom</Text>
-            <Text style={styles.legendItem}>Amarelo = AtenÃ§Ã£o</Text>
-            <Text style={styles.legendItem}>Vermelho = CrÃ­tico</Text>
+            <Text style={styles.legendItem}>Amarelo = Atenção</Text>
+            <Text style={styles.legendItem}>Vermelho = Crítico</Text>
             <Text style={styles.legendItem}>Cinza = Sem dados</Text>
           </View>
 

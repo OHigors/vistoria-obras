@@ -1,35 +1,19 @@
-import { useFocusEffect } from '@react-navigation/native';
 import { Link } from 'expo-router';
-import { useCallback, useState } from 'react';
+import { useMemo } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { useObras } from '@/src/data/ObrasContext';
-import type { BottleneckSummary } from '@/src/data/serviceBlockers';
 import { summarizeBottlenecks } from '@/src/data/serviceBlockers';
-import type { ScheduleSummary } from '@/src/data/schedule';
 import { summarizeSchedule } from '@/src/data/schedule';
 
 export default function CronogramaScreen() {
-  const { apartments, towers, refreshData } = useObras();
-  const [bottleneckSummary, setBottleneckSummary] = useState<BottleneckSummary>({
-    mostBlockedServices: [],
-  });
-  const [scheduleSummary, setScheduleSummary] = useState<ScheduleSummary>({
-    delayedApartments: 0,
-  });
+  const { apartments, towers } = useObras();
 
-  useFocusEffect(
-    useCallback(() => {
-      refreshData();
-      setBottleneckSummary(summarizeBottlenecks(apartments));
-      setScheduleSummary(
-        summarizeSchedule(
-          apartments,
-          (towerId) => towers.find((t) => t.id === towerId)?.name ?? towerId,
-        ),
-      );
-    }, [apartments, towers, refreshData]),
+  const bottleneckSummary = useMemo(() => summarizeBottlenecks(apartments), [apartments]);
+  const scheduleSummary = useMemo(
+    () => summarizeSchedule(apartments, (towerId) => towers.find((t) => t.id === towerId)?.name ?? towerId),
+    [apartments, towers],
   );
 
   const hasIssues =
