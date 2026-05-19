@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native'
+import { Text } from '@/src/ui/Text';
 
 import {
   createGeneratedReport,
@@ -165,6 +166,33 @@ export default function GenerateReportScreen() {
     if (typeof window === 'undefined') {
       setMessage('PDF não disponível neste ambiente.');
       return;
+    }
+
+    if (typeof document !== 'undefined') {
+      const printFrame = document.createElement('iframe');
+      printFrame.style.height = '0';
+      printFrame.style.left = '-9999px';
+      printFrame.style.position = 'fixed';
+      printFrame.style.top = '0';
+      printFrame.style.width = '0';
+      document.body.appendChild(printFrame);
+
+      const frameDocument = printFrame.contentWindow?.document;
+
+      if (frameDocument) {
+        frameDocument.open();
+        frameDocument.write(report.html);
+        frameDocument.close();
+        printFrame.contentWindow?.focus();
+        printFrame.contentWindow?.print();
+        setMessage('PDF gerado. Use “Salvar como PDF” na janela de impressão.');
+        window.setTimeout(() => {
+          printFrame.remove();
+        }, 1000);
+        return;
+      }
+
+      printFrame.remove();
     }
 
     const reportWindow = window.open('', '_blank');

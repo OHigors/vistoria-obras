@@ -1,14 +1,17 @@
-﻿import { Link, useLocalSearchParams } from 'expo-router';
-import { useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Link, useLocalSearchParams, useRouter } from 'expo-router';
+import { useMemo, useState } from 'react';
+import { Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native'
+import { Text } from '@/src/ui/Text';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import type { Apartment, ApartmentStatus, ChecklistItem } from '@/src/data/mockObras';
 import { useObras } from '@/src/data/ObrasContext';
 import { summarizeApartmentSchedule } from '@/src/data/schedule';
 import { getBlockedServiceGroups, getChecklistForApartment } from '@/src/data/serviceBlockers';
+import { isCriticalStageForStatus } from '@/src/data/serviceStages';
 import { statusConfig } from '@/src/ui/status';
 
-const viewModes = ['Lista detalhada', 'Mapa compacto'] as const;
+const viewModes = ['Lista', 'Mapa'] as const;
 const filterOptions = [
   'Todos',
   'Excelente',
@@ -36,41 +39,27 @@ type ApartmentSummary = {
 
 const calculateProgress = (items: ChecklistItem[]) => {
   const score = items.reduce((total, item) => {
-    if (item.state === 'ok' || item.state === 'notApplicable') {
-      return total + 1;
-    }
-
-    if (item.state === 'partial') {
-      return total + 0.5;
-    }
-
+    if (item.state === 'ok' || item.state === 'notApplicable') return total + 1;
+    if (item.state === 'partial') return total + 0.5;
     return total;
   }, 0);
-
   return items.length ? Math.round((score / items.length) * 100) : 0;
 };
 
 const calculateStatus = (items: ChecklistItem[], progress: number): ApartmentStatus => {
-  const pendingCount = items.filter((item) => item.state === 'pending').length;
-  const partialCount = items.filter((item) => item.state === 'partial').length;
+  const pendingCount = items.filter((i) => i.state === 'pending').length;
+  const partialCount = items.filter((i) => i.state === 'partial').length;
   const manyPending = pendingCount >= Math.max(3, Math.ceil(items.length * 0.35));
-
-  if (progress < 50 || manyPending) {
-    return 'critical';
-  }
-
-  if ((progress >= 50 && progress <= 74) || partialCount > 0) {
-    return 'attention';
-  }
-
-  if (progress >= 90 && pendingCount === 0) {
-    return 'excellent';
-  }
-
+  const hasCritical = items.some(
+    (i) => (i.state === 'pending' || i.state === 'partial') && isCriticalStageForStatus(i.label),
+  );
+  if (progress < 50 || manyPending || hasCritical) return 'critical';
+  if ((progress >= 50 && progress <= 74) || partialCount > 0) return 'attention';
+  if (progress >= 90 && pendingCount === 0) return 'excellent';
   return 'good';
 };
 
-const normalizeApartmentSearch = (value: string) =>
+const normalizeSearch = (value: string) =>
   value.toLocaleLowerCase('pt-BR').replace(/apartamento|ap|\s/g, '');
 
 const getFloorOrder = (floor: string) => {
@@ -78,234 +67,308 @@ const getFloorOrder = (floor: string) => {
   return match ? Number(match[0]) : 0;
 };
 
+const STATUS_FILTER_MAP: Record<FilterOption, (s: ApartmentSummary) => boolean> = {
+  Todos: () => true,
+  Excelente: (s) => statusConfig[s.statusKey].label === 'Excelente',
+  Bom: (s) => statusConfig[s.statusKey].label === 'Bom',
+  Atenção: (s) => statusConfig[s.statusKey].label === 'Atenção',
+  Crítico: (s) => statusConfig[s.statusKey].label === 'Crítico',
+  'Com pendência': (s) => s.pendingCount > 0,
+  'Com atraso': (s) => s.maxDelayDays > 0,
+  Travado: (s) => s.blockedCount > 0,
+};
+
 export default function TowerApartmentsScreen() {
   const { torreId } = useLocalSearchParams<{ torreId: string }>();
+  const router = useRouter();
   const { getTowerById, getApartmentsByTower } = useObras();
   const tower = getTowerById(torreId);
   const towerApartments = getApartmentsByTower(torreId);
-  const [viewMode, setViewMode] = useState<ViewMode>('Lista detalhada');
+  const [viewMode, setViewMode] = useState<ViewMode>('Lista');
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<FilterOption>('Todos');
 
-  const apartmentSummaries: ApartmentSummary[] = towerApartments.map((apartment) => {
-    const checklist = getChecklistForApartment(apartment);
-    const pendingCount = checklist.filter(
-      (item) => item.state === 'pending' || item.state === 'partial',
-    ).length;
-    const blockedCount = getBlockedServiceGroups(checklist).reduce(
-      (total, group) => total + group.blockedServices.length,
-      0,
-    );
-    const scheduleSummary = summarizeApartmentSchedule(apartment);
-    const progress = calculateProgress(checklist);
-
-    return {
-      apartment,
-      blockedCount,
-      checklist,
-      maxDelayDays: scheduleSummary.maxDelayDays,
-      mostDelayedService: scheduleSummary.mostDelayedService,
-      pendingCount,
-      progress,
-      statusKey: calculateStatus(checklist, progress),
-    };
-  });
-
-  const filteredSummaries = apartmentSummaries.filter((summary) => {
-    const normalizedSearch = normalizeApartmentSearch(search);
-    const matchesSearch =
-      !normalizedSearch || summary.apartment.number.includes(normalizedSearch);
-    const statusLabel = statusConfig[summary.statusKey].label;
-    const matchesFilter =
-      filter === 'Todos' ||
-      statusLabel === filter ||
-      (filter === 'Com pendência' && summary.pendingCount > 0) ||
-      (filter === 'Com atraso' && summary.maxDelayDays > 0) ||
-      (filter === 'Travado' && summary.blockedCount > 0);
-
-    return matchesSearch && matchesFilter;
-  });
-
-  const summariesByFloor = filteredSummaries.reduce<Record<string, ApartmentSummary[]>>(
-    (groups, summary) => {
-      groups[summary.apartment.floor] = [...(groups[summary.apartment.floor] ?? []), summary];
-      return groups;
-    },
-    {},
+  const apartmentSummaries: ApartmentSummary[] = useMemo(
+    () =>
+      towerApartments.map((apartment) => {
+        const checklist = getChecklistForApartment(apartment);
+        const pendingCount = checklist.filter((i) => i.state === 'pending' || i.state === 'partial').length;
+        const blockedCount = getBlockedServiceGroups(checklist).reduce((t, g) => t + g.blockedServices.length, 0);
+        const scheduleSummary = summarizeApartmentSchedule(apartment);
+        const progress = calculateProgress(checklist);
+        return {
+          apartment,
+          blockedCount,
+          checklist,
+          maxDelayDays: scheduleSummary.maxDelayDays,
+          mostDelayedService: scheduleSummary.mostDelayedService,
+          pendingCount,
+          progress,
+          statusKey: calculateStatus(checklist, progress),
+        };
+      }),
+    [towerApartments],
   );
-  const orderedFloors = Object.keys(summariesByFloor).sort(
-    (a, b) => getFloorOrder(b) - getFloorOrder(a),
+
+  const filteredSummaries = useMemo(() => {
+    const normalized = normalizeSearch(search);
+    return apartmentSummaries.filter((s) => {
+      const matchesSearch = !normalized || s.apartment.number.includes(normalized);
+      return matchesSearch && STATUS_FILTER_MAP[filter](s);
+    });
+  }, [apartmentSummaries, search, filter]);
+
+  const summariesByFloor = useMemo(
+    () =>
+      filteredSummaries.reduce<Record<string, ApartmentSummary[]>>((groups, s) => {
+        groups[s.apartment.floor] = [...(groups[s.apartment.floor] ?? []), s];
+        return groups;
+      }, {}),
+    [filteredSummaries],
   );
+
+  const orderedFloors = useMemo(
+    () => Object.keys(summariesByFloor).sort((a, b) => getFloorOrder(b) - getFloorOrder(a)),
+    [summariesByFloor],
+  );
+
+  // Tower-level KPIs
+  const towerStats = useMemo(() => {
+    const avgProgress = apartmentSummaries.length
+      ? Math.round(apartmentSummaries.reduce((t, s) => t + s.progress, 0) / apartmentSummaries.length)
+      : 0;
+    const criticalCount = apartmentSummaries.filter((s) => s.statusKey === 'critical').length;
+    const totalPending = apartmentSummaries.reduce((t, s) => t + s.pendingCount, 0);
+    const totalBlocked = apartmentSummaries.reduce((t, s) => t + s.blockedCount, 0);
+    return { avgProgress, criticalCount, totalPending, totalBlocked };
+  }, [apartmentSummaries]);
 
   if (!tower) {
     return (
-      <View style={styles.empty}>
-        <Text style={styles.emptyTitle}>Torre não encontrada</Text>
-        <Link href="/" asChild>
-          <Pressable style={styles.homeButton}>
-            <Text style={styles.homeButtonText}>Voltar para início</Text>
-          </Pressable>
+      <View style={s.empty}>
+        <MaterialCommunityIcons name="office-building-remove-outline" size={48} color="#CBD5E1" />
+        <Text style={s.emptyTitle}>Torre não encontrada</Text>
+        <Link href="/visao-geral" asChild>
+          <Pressable style={s.emptyBtn}><Text style={s.emptyBtnText}>Voltar</Text></Pressable>
         </Link>
       </View>
     );
   }
 
   return (
-    <ScrollView contentContainerStyle={styles.container}>
-      <View style={styles.header}>
-        <Text style={styles.title}>{tower.name}</Text>
-        <Text style={styles.subtitle}>
-          {tower.block} / {tower.position}
-        </Text>
+    <ScrollView contentContainerStyle={s.container} showsVerticalScrollIndicator={false}>
+
+      {/* HEADER */}
+      <View style={s.header}>
+        <View style={s.headerTop}>
+          <MaterialCommunityIcons name="office-building" size={32} color="#2563EB" />
+          <View style={s.headerInfo}>
+            <Text style={s.headerTitle}>{tower.name}</Text>
+            <Text style={s.headerSub}>{tower.block} · {tower.position}</Text>
+          </View>
+          <View style={s.headerCount}>
+            <Text style={s.headerCountValue}>{towerApartments.length}</Text>
+            <Text style={s.headerCountLabel}>unid.</Text>
+          </View>
+        </View>
+        {tower.description ? (
+          <Text style={s.headerDesc}>{tower.description}</Text>
+        ) : null}
+        <View style={s.headerBar}>
+          <View style={[s.headerBarFill, { width: `${towerStats.avgProgress}%` as `${number}%` }]} />
+        </View>
+        <Text style={s.headerBarLabel}>{towerStats.avgProgress}% de avanço médio</Text>
       </View>
 
-      <View style={styles.controlsPanel}>
-        <TextInput
-          onChangeText={setSearch}
-          placeholder="Pesquisar apartamento"
-          placeholderTextColor="#94A3B8"
-          style={styles.searchInput}
-          value={search}
-        />
+      {/* KPI ROW */}
+      <View style={s.kpiRow}>
+        {[
+          { icon: 'check-circle-outline', value: `${towerStats.avgProgress}%`, label: 'Avanço', color: '#2563EB', bg: '#EFF6FF' },
+          { icon: 'close-circle-outline', value: towerStats.criticalCount, label: 'Críticos', color: towerStats.criticalCount > 0 ? '#B91C1C' : '#047857', bg: towerStats.criticalCount > 0 ? '#FEE2E2' : '#D1FAE5' },
+          { icon: 'alert-outline', value: towerStats.totalPending, label: 'Pendências', color: towerStats.totalPending > 0 ? '#B45309' : '#047857', bg: towerStats.totalPending > 0 ? '#FEF3C7' : '#D1FAE5' },
+          { icon: 'lock-outline', value: towerStats.totalBlocked, label: 'Travados', color: towerStats.totalBlocked > 0 ? '#7C3AED' : '#047857', bg: towerStats.totalBlocked > 0 ? '#EDE9FE' : '#D1FAE5' },
+        ].map((k) => (
+          <View key={k.label} style={[s.kpiCard, { backgroundColor: k.bg }]}>
+            <MaterialCommunityIcons name={k.icon as any} size={18} color={k.color} />
+            <Text style={[s.kpiValue, { color: k.color }]}>{k.value}</Text>
+            <Text style={[s.kpiLabel, { color: k.color }]}>{k.label}</Text>
+          </View>
+        ))}
+      </View>
 
-        <View style={styles.optionRow}>
+      {/* CONTROLS */}
+      <View style={s.controls}>
+        {/* Search */}
+        <View style={s.searchRow}>
+          <MaterialCommunityIcons name="magnify" size={18} color="#94A3B8" style={s.searchIcon} />
+          <TextInput
+            onChangeText={setSearch}
+            placeholder="Pesquisar apartamento..."
+            placeholderTextColor="#94A3B8"
+            style={s.searchInput}
+            value={search}
+          />
+          {search.length > 0 && (
+            <Pressable onPress={() => setSearch('')} style={s.searchClear}>
+              <MaterialCommunityIcons name="close-circle" size={16} color="#94A3B8" />
+            </Pressable>
+          )}
+        </View>
+
+        {/* View mode toggle */}
+        <View style={s.viewToggle}>
           {viewModes.map((mode) => {
-            const isSelected = viewMode === mode;
-
+            const active = viewMode === mode;
+            const icon = mode === 'Lista' ? 'view-list' : 'grid';
             return (
-              <Pressable
-                key={mode}
-                onPress={() => setViewMode(mode)}
-                style={[styles.optionButton, isSelected && styles.optionButtonSelected]}>
-                <Text style={[styles.optionText, isSelected && styles.optionTextSelected]}>
-                  {mode}
-                </Text>
+              <Pressable key={mode} onPress={() => setViewMode(mode)} style={[s.viewBtn, active && s.viewBtnActive]}>
+                <MaterialCommunityIcons name={icon as any} size={16} color={active ? '#2563EB' : '#94A3B8'} />
+                <Text style={[s.viewBtnText, active && s.viewBtnTextActive]}>{mode}</Text>
               </Pressable>
             );
           })}
         </View>
 
-        <View style={styles.optionRow}>
+        {/* Filter chips */}
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.filterRow}>
           {filterOptions.map((option) => {
-            const isSelected = filter === option;
-
+            const active = filter === option;
             return (
-              <Pressable
-                key={option}
-                onPress={() => setFilter(option)}
-                style={[styles.filterButton, isSelected && styles.optionButtonSelected]}>
-                <Text style={[styles.optionText, isSelected && styles.optionTextSelected]}>
-                  {option}
-                </Text>
+              <Pressable key={option} onPress={() => setFilter(option)} style={[s.filterChip, active && s.filterChipActive]}>
+                <Text style={[s.filterChipText, active && s.filterChipTextActive]}>{option}</Text>
               </Pressable>
             );
           })}
-        </View>
+        </ScrollView>
       </View>
 
+      {/* RESULTS COUNT */}
+      {filter !== 'Todos' || search ? (
+        <Text style={s.resultsCount}>
+          {filteredSummaries.length} de {apartmentSummaries.length} apartamento(s)
+        </Text>
+      ) : null}
+
+      {/* EMPTY */}
       {filteredSummaries.length === 0 ? (
-        <View style={styles.emptyPanel}>
-          <Text style={styles.emptyPanelText}>
-            Nenhum apartamento encontrado com os filtros aplicados.
-          </Text>
+        <View style={s.emptyPanel}>
+          <MaterialCommunityIcons name="filter-remove-outline" size={36} color="#CBD5E1" />
+          <Text style={s.emptyPanelTitle}>Nenhum resultado</Text>
+          <Text style={s.emptyPanelSub}>Tente ajustar os filtros ou a busca</Text>
         </View>
-      ) : viewMode === 'Lista detalhada' ? (
-        <View style={styles.grid}>
+      ) : viewMode === 'Lista' ? (
+
+        /* LIST VIEW */
+        <View style={s.list}>
           {filteredSummaries.map((summary) => {
-            const status = statusConfig[summary.statusKey];
+            const st = statusConfig[summary.statusKey];
             const { apartment } = summary;
-
             return (
-              <Link
+              <Pressable
                 key={apartment.id}
-                href={{
-                  pathname: '/visao-geral/apartamentos/[apartamentoId]',
-                  params: { apartamentoId: apartment.id },
-                }}
-                asChild>
-                <Pressable style={StyleSheet.flatten([styles.card, { borderColor: status.border }])}>
-                  <View style={styles.cardHeader}>
-                    <View>
-                      <Text style={styles.apartmentNumber}>Apartamento {apartment.number}</Text>
-                      <Text style={styles.floor}>{apartment.floor}</Text>
+                onPress={() => router.push({ pathname: '/visao-geral/apartamentos/[apartamentoId]', params: { apartamentoId: apartment.id } })}
+                style={s.aptCard}>
+                  <View style={[s.aptCardStripe, { backgroundColor: st.color }]} />
+                  <View style={s.aptCardInner}>
+                    <View style={s.aptCardTop}>
+                      <View style={s.aptCardLeft}>
+                        <Text style={s.aptNumber}>Apto {apartment.number}</Text>
+                        <Text style={s.aptFloor}>{apartment.floor}</Text>
+                      </View>
+                      <View style={s.aptCardRight}>
+                        <View style={[s.statusBadge, { backgroundColor: st.background }]}>
+                          <Text style={[s.statusBadgeText, { color: st.color }]}>{st.label}</Text>
+                        </View>
+                        <Text style={s.aptProgress}>{summary.progress}%</Text>
+                      </View>
                     </View>
-                    <View style={[styles.badge, { backgroundColor: status.background }]}>
-                      <Text style={[styles.badgeText, { color: status.color }]}>
-                        {status.label}
+
+                    <View style={s.aptBar}>
+                      <View style={[s.aptBarFill, { backgroundColor: st.color, width: `${summary.progress}%` as `${number}%` }]} />
+                    </View>
+
+                    <View style={s.aptMetrics}>
+                      {summary.pendingCount > 0 && (
+                        <View style={s.metricPill}>
+                          <MaterialCommunityIcons name="alert-circle-outline" size={11} color="#B45309" />
+                          <Text style={[s.metricPillText, { color: '#B45309' }]}>{summary.pendingCount} pendência(s)</Text>
+                        </View>
+                      )}
+                      {summary.blockedCount > 0 && (
+                        <View style={s.metricPill}>
+                          <MaterialCommunityIcons name="lock-outline" size={11} color="#7C3AED" />
+                          <Text style={[s.metricPillText, { color: '#7C3AED' }]}>{summary.blockedCount} travado(s)</Text>
+                        </View>
+                      )}
+                      {summary.maxDelayDays > 0 && (
+                        <View style={s.metricPill}>
+                          <MaterialCommunityIcons name="clock-alert-outline" size={11} color="#B91C1C" />
+                          <Text style={[s.metricPillText, { color: '#B91C1C' }]}>{summary.maxDelayDays}d atraso</Text>
+                        </View>
+                      )}
+                      {summary.pendingCount === 0 && summary.blockedCount === 0 && summary.maxDelayDays === 0 && (
+                        <View style={s.metricPill}>
+                          <MaterialCommunityIcons name="check-circle-outline" size={11} color="#047857" />
+                          <Text style={[s.metricPillText, { color: '#047857' }]}>Sem pendências</Text>
+                        </View>
+                      )}
+                    </View>
+
+                    <View style={s.aptCardFooter}>
+                      <Text style={s.aptLastInspection}>
+                        {apartment.lastInspection ? `Última vistoria: ${apartment.lastInspection}` : 'Sem vistoria registrada'}
                       </Text>
+                      <View style={s.openBtn}>
+                        <Text style={s.openBtnText}>Abrir</Text>
+                        <MaterialCommunityIcons name="chevron-right" size={14} color="#2563EB" />
+                      </View>
                     </View>
                   </View>
-
-                  <View style={styles.progressTrack}>
-                    <View
-                      style={[
-                        styles.progressFill,
-                        { backgroundColor: status.color, width: `${summary.progress}%` },
-                      ]}
-                    />
-                  </View>
-
-                  <View style={styles.cardFooter}>
-                    <Text style={styles.progressText}>{summary.progress}% vistoriado</Text>
-                    <Text style={styles.openText}>Abrir</Text>
-                  </View>
-
-                  <View style={styles.cardMetrics}>
-                    <Text style={styles.metricText}>{summary.pendingCount} pendência(s)</Text>
-                    <Text style={styles.metricText}>
-                      {summary.blockedCount} serviço(s) travado(s)
-                    </Text>
-                    <Text style={styles.metricText}>
-                      {summary.maxDelayDays} dia(s) de atraso
-                    </Text>
-                    <Text style={styles.metricText}>
-                      Mais atrasado: {summary.mostDelayedService ?? 'nenhum'}
-                    </Text>
-                    <Text style={styles.metricText}>Status geral: {status.label}</Text>
-                  </View>
-                </Pressable>
-              </Link>
+              </Pressable>
             );
           })}
         </View>
+
       ) : (
-        <View style={styles.mapPanel}>
-          <View style={styles.legendRow}>
-            <Text style={styles.legendItem}>Verde = Excelente</Text>
-            <Text style={styles.legendItem}>Azul = Bom</Text>
-            <Text style={styles.legendItem}>Amarelo = Atenção</Text>
-            <Text style={styles.legendItem}>Vermelho = Crítico</Text>
-            <Text style={styles.legendItem}>Cinza = Sem dados</Text>
+
+        /* MAP VIEW */
+        <View style={s.mapPanel}>
+          {/* Legend */}
+          <View style={s.legend}>
+            {(['excellent', 'good', 'attention', 'critical'] as ApartmentStatus[]).map((key) => {
+              const st = statusConfig[key];
+              return (
+                <View key={key} style={s.legendItem}>
+                  <View style={[s.legendDot, { backgroundColor: st.color }]} />
+                  <Text style={s.legendText}>{st.label}</Text>
+                </View>
+              );
+            })}
           </View>
 
+          {/* Floors */}
           {orderedFloors.map((floor) => (
-            <View key={floor} style={styles.floorGroup}>
-              <Text style={styles.floorTitle}>{floor}</Text>
-              <View style={styles.compactGrid}>
+            <View key={floor} style={s.floorGroup}>
+              <View style={s.floorHeader}>
+                <MaterialCommunityIcons name="stairs" size={14} color="#64748B" />
+                <Text style={s.floorTitle}>{floor}</Text>
+                <Text style={s.floorCount}>{summariesByFloor[floor].length} un.</Text>
+              </View>
+              <View style={s.compactGrid}>
                 {summariesByFloor[floor].map((summary) => {
-                  const status = statusConfig[summary.statusKey];
-
+                  const st = statusConfig[summary.statusKey];
                   return (
-                    <Link
-                      key={`compact-${summary.apartment.id}`}
-                      href={{
-                        pathname: '/visao-geral/apartamentos/[apartamentoId]',
-                        params: { apartamentoId: summary.apartment.id },
-                      }}
-                      asChild>
-                      <Pressable
-                        style={StyleSheet.flatten([
-                          styles.compactUnit,
-                          { backgroundColor: status.background, borderColor: status.color },
-                        ])}>
-                        <Text style={[styles.compactUnitNumber, { color: status.color }]}>
-                          {summary.apartment.number}
-                        </Text>
-                        <Text style={[styles.compactUnitProgress, { color: status.color }]}>
-                          {summary.progress}%
-                        </Text>
-                      </Pressable>
-                    </Link>
+                    <Pressable
+                      key={`map-${summary.apartment.id}`}
+                      onPress={() => router.push({ pathname: '/visao-geral/apartamentos/[apartamentoId]', params: { apartamentoId: summary.apartment.id } })}
+                      style={[s.mapUnit, { backgroundColor: st.background, borderColor: st.color }]}>
+                      <Text style={[s.mapUnitNumber, { color: st.color }]}>{summary.apartment.number}</Text>
+                      <Text style={[s.mapUnitProgress, { color: st.color }]}>{summary.progress}%</Text>
+                      {summary.pendingCount > 0 && (
+                        <View style={[s.mapUnitDot, { backgroundColor: st.color }]} />
+                      )}
+                      {summary.pendingCount === 0 && <View style={s.mapUnitDot} />}
+                    </Pressable>
                   );
                 })}
               </View>
@@ -313,245 +376,101 @@ export default function TowerApartmentsScreen() {
           ))}
         </View>
       )}
+
     </ScrollView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    padding: 20,
-    gap: 16,
-  },
-  header: {
-    backgroundColor: '#FFFFFF',
-    borderColor: '#E2E8F0',
-    borderRadius: 8,
-    borderWidth: 1,
-    padding: 18,
-  },
-  title: {
-    color: '#0F172A',
-    fontSize: 28,
-    fontWeight: '900',
-  },
-  subtitle: {
-    color: '#2563EB',
-    fontSize: 15,
-    fontWeight: '800',
-    marginTop: 6,
-  },
-  controlsPanel: {
-    backgroundColor: '#FFFFFF',
-    borderColor: '#E2E8F0',
-    borderRadius: 8,
-    borderWidth: 1,
-    gap: 12,
-    padding: 14,
-  },
-  searchInput: {
-    backgroundColor: '#F8FAFC',
-    borderColor: '#CBD5E1',
-    borderRadius: 8,
-    borderWidth: 1,
-    color: '#0F172A',
-    fontSize: 14,
-    minHeight: 44,
-    paddingHorizontal: 12,
-  },
-  optionRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  optionButton: {
-    borderColor: '#CBD5E1',
-    borderRadius: 999,
-    borderWidth: 1,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-  },
-  filterButton: {
-    borderColor: '#CBD5E1',
-    borderRadius: 999,
-    borderWidth: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-  },
-  optionButtonSelected: {
-    backgroundColor: '#DBEAFE',
-    borderColor: '#2563EB',
-  },
-  optionText: {
-    color: '#475569',
-    fontSize: 12,
-    fontWeight: '900',
-  },
-  optionTextSelected: {
-    color: '#2563EB',
-  },
-  grid: {
-    gap: 12,
-  },
-  card: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 8,
-    borderWidth: 1,
-    padding: 16,
-    gap: 14,
-  },
-  cardHeader: {
-    alignItems: 'flex-start',
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-    justifyContent: 'space-between',
-  },
-  apartmentNumber: {
-    color: '#0F172A',
-    fontSize: 22,
-    fontWeight: '900',
-  },
-  floor: {
-    color: '#64748B',
-    fontSize: 13,
-    marginTop: 2,
-  },
-  badge: {
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  badgeText: {
-    fontSize: 12,
-    fontWeight: '900',
-  },
-  progressTrack: {
-    backgroundColor: '#E2E8F0',
-    borderRadius: 999,
-    height: 8,
-    overflow: 'hidden',
-  },
-  progressFill: {
-    height: '100%',
-  },
-  cardFooter: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  progressText: {
-    color: '#475569',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  openText: {
-    color: '#2563EB',
-    fontSize: 13,
-    fontWeight: '900',
-  },
-  cardMetrics: {
-    borderTopColor: '#E2E8F0',
-    borderTopWidth: 1,
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    paddingTop: 10,
-  },
-  metricText: {
-    backgroundColor: '#F8FAFC',
-    borderColor: '#E2E8F0',
-    borderRadius: 999,
-    borderWidth: 1,
-    color: '#475569',
-    fontSize: 12,
-    fontWeight: '800',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  mapPanel: {
-    backgroundColor: '#FFFFFF',
-    borderColor: '#E2E8F0',
-    borderRadius: 8,
-    borderWidth: 1,
-    gap: 16,
-    padding: 14,
-  },
-  legendRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  legendItem: {
-    color: '#475569',
-    fontSize: 12,
-    fontWeight: '800',
-  },
-  floorGroup: {
-    gap: 8,
-  },
-  floorTitle: {
-    color: '#0F172A',
-    fontSize: 15,
-    fontWeight: '900',
-  },
-  compactGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  compactUnit: {
-    alignItems: 'center',
-    aspectRatio: 1,
-    borderRadius: 8,
-    borderWidth: 1,
-    justifyContent: 'center',
-    minWidth: 64,
-    padding: 6,
-  },
-  compactUnitNumber: {
-    fontSize: 13,
-    fontWeight: '900',
-  },
-  compactUnitProgress: {
-    fontSize: 10,
-    fontWeight: '900',
-    marginTop: 2,
-  },
-  emptyPanel: {
-    backgroundColor: '#FFFFFF',
-    borderColor: '#E2E8F0',
-    borderRadius: 8,
-    borderWidth: 1,
-    padding: 14,
-  },
-  emptyPanelText: {
-    color: '#64748B',
-    fontSize: 14,
-  },
-  empty: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 14,
-    padding: 24,
-  },
-  emptyTitle: {
-    color: '#0F172A',
-    fontSize: 20,
-    fontWeight: '800',
-  },
-  homeButton: {
-    alignItems: 'center',
-    backgroundColor: '#2563EB',
-    borderRadius: 8,
-    minHeight: 48,
-    justifyContent: 'center',
-    paddingHorizontal: 18,
-  },
-  homeButtonText: {
-    color: '#FFFFFF',
-    fontSize: 15,
-    fontWeight: '800',
-  },
-});
+const s = StyleSheet.create({
+  container: { gap: 12, paddingBottom: 32, paddingTop: 4 },
 
+  // empty
+  empty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12, padding: 32 },
+  emptyTitle: { color: '#0F172A', fontSize: 18, fontWeight: '700' },
+  emptyBtn: { backgroundColor: '#2563EB', borderRadius: 10, paddingHorizontal: 20, paddingVertical: 10 },
+  emptyBtnText: { color: '#FFFFFF', fontSize: 14, fontWeight: '700' },
+
+  // header
+  header: { backgroundColor: '#FFFFFF', borderColor: '#E2E8F0', borderBottomWidth: 1, padding: 16, gap: 12 },
+  headerTop: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  headerInfo: { flex: 1 },
+  headerTitle: { color: '#0F172A', fontSize: 22, fontWeight: '900' },
+  headerSub: { color: '#64748B', fontSize: 13, marginTop: 2 },
+  headerCount: { alignItems: 'center', backgroundColor: '#EFF6FF', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 8 },
+  headerCountValue: { color: '#2563EB', fontSize: 22, fontWeight: '900' },
+  headerCountLabel: { color: '#93C5FD', fontSize: 11, fontWeight: '700' },
+  headerDesc: { color: '#475569', fontSize: 13, lineHeight: 18 },
+  headerBar: { backgroundColor: '#E2E8F0', borderRadius: 999, height: 6, overflow: 'hidden' },
+  headerBarFill: { height: '100%', backgroundColor: '#2563EB', borderRadius: 999 },
+  headerBarLabel: { color: '#64748B', fontSize: 12, fontWeight: '600' },
+
+  // kpi
+  kpiRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 16 },
+  kpiCard: { flex: 1, borderRadius: 12, padding: 10, alignItems: 'center', gap: 3 },
+  kpiValue: { fontSize: 18, fontWeight: '900' },
+  kpiLabel: { fontSize: 10, fontWeight: '700', textAlign: 'center' },
+
+  // controls
+  controls: { backgroundColor: '#FFFFFF', borderColor: '#E2E8F0', borderRadius: 14, borderWidth: 1, gap: 12, marginHorizontal: 16, padding: 14 },
+  searchRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F8FAFC', borderColor: '#E2E8F0', borderRadius: 10, borderWidth: 1, paddingHorizontal: 10, gap: 6 },
+  searchIcon: {},
+  searchInput: { flex: 1, color: '#0F172A', fontSize: 14, minHeight: 42 },
+  searchClear: { padding: 4 },
+  viewToggle: { flexDirection: 'row', backgroundColor: '#F1F5F9', borderRadius: 10, padding: 3, gap: 3 },
+  viewBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, paddingVertical: 8, borderRadius: 8 },
+  viewBtnActive: { backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#E2E8F0' },
+  viewBtnText: { color: '#94A3B8', fontSize: 13, fontWeight: '700' },
+  viewBtnTextActive: { color: '#2563EB' },
+  filterRow: { flexDirection: 'row', gap: 6, paddingBottom: 2 },
+  filterChip: { borderRadius: 999, borderWidth: 1, borderColor: '#E2E8F0', paddingHorizontal: 12, paddingVertical: 7 },
+  filterChipActive: { backgroundColor: '#EFF6FF', borderColor: '#2563EB' },
+  filterChipText: { color: '#64748B', fontSize: 12, fontWeight: '700' },
+  filterChipTextActive: { color: '#2563EB' },
+
+  // results
+  resultsCount: { color: '#94A3B8', fontSize: 12, fontWeight: '600', paddingHorizontal: 16 },
+
+  // empty panel
+  emptyPanel: { alignItems: 'center', backgroundColor: '#FFFFFF', borderColor: '#E2E8F0', borderRadius: 14, borderWidth: 1, gap: 8, marginHorizontal: 16, paddingVertical: 36 },
+  emptyPanelTitle: { color: '#475569', fontSize: 15, fontWeight: '700' },
+  emptyPanelSub: { color: '#94A3B8', fontSize: 13 },
+
+  // list
+  list: { gap: 8, paddingHorizontal: 16 },
+  aptCard: { backgroundColor: '#FFFFFF', borderColor: '#E2E8F0', borderWidth: 1, borderRadius: 14, overflow: 'hidden', flexDirection: 'row' },
+  aptCardStripe: { width: 4 },
+  aptCardInner: { flex: 1, padding: 14, gap: 10 },
+  aptCardTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
+  aptCardLeft: { gap: 2 },
+  aptNumber: { color: '#0F172A', fontSize: 17, fontWeight: '900' },
+  aptFloor: { color: '#64748B', fontSize: 12 },
+  aptCardRight: { alignItems: 'flex-end', gap: 6 },
+  statusBadge: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 4 },
+  statusBadgeText: { fontSize: 11, fontWeight: '900' },
+  aptProgress: { color: '#0F172A', fontSize: 18, fontWeight: '900' },
+  aptBar: { backgroundColor: '#E2E8F0', borderRadius: 999, height: 6, overflow: 'hidden' },
+  aptBarFill: { height: '100%', borderRadius: 999 },
+  aptMetrics: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  metricPill: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: '#F8FAFC', borderColor: '#E2E8F0', borderRadius: 999, borderWidth: 1, paddingHorizontal: 8, paddingVertical: 4 },
+  metricPillText: { fontSize: 11, fontWeight: '700' },
+  aptCardFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderTopWidth: 1, borderTopColor: '#F1F5F9', paddingTop: 8 },
+  aptLastInspection: { color: '#94A3B8', fontSize: 11 },
+  openBtn: { flexDirection: 'row', alignItems: 'center', gap: 2 },
+  openBtnText: { color: '#2563EB', fontSize: 12, fontWeight: '800' },
+
+  // map
+  mapPanel: { backgroundColor: '#FFFFFF', borderColor: '#E2E8F0', borderRadius: 14, borderWidth: 1, marginHorizontal: 16, padding: 14, gap: 16 },
+  legend: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  legendDot: { width: 8, height: 8, borderRadius: 4 },
+  legendText: { color: '#475569', fontSize: 11, fontWeight: '700' },
+  floorGroup: { gap: 8 },
+  floorHeader: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  floorTitle: { color: '#0F172A', fontSize: 13, fontWeight: '800', flex: 1 },
+  floorCount: { color: '#94A3B8', fontSize: 11, fontWeight: '600' },
+  compactGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  mapUnit: { alignItems: 'center', borderRadius: 10, borderWidth: 1, justifyContent: 'center', width: 68, height: 68, gap: 2 },
+  mapUnitNumber: { fontSize: 13, fontWeight: '900' },
+  mapUnitProgress: { fontSize: 10, fontWeight: '700' },
+  mapUnitDot: { width: 6, height: 6, borderRadius: 3 },
+});

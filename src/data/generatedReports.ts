@@ -4,6 +4,7 @@ import { formatCurrency, loadAllMeasurements, parseBrDateForMeasurement } from '
 import { apartments, getTowerById, project } from '@/src/data/mockObras';
 import { getScheduleRows, getScheduledChecklistForApartment } from '@/src/data/schedule';
 import { getBlockedServiceGroups } from '@/src/data/serviceBlockers';
+import { isCriticalStageForStatus } from '@/src/data/serviceStages';
 import { statusConfig } from '@/src/ui/status';
 
 export type ReportKind = 'daily' | 'tower' | 'apartment' | 'service' | 'contractor';
@@ -80,6 +81,22 @@ export const validateReportFilters = (kind: ReportKind, filters: ReportFilters) 
 const emptyValue = 'não informado';
 const emptyBlockValue = 'não bloqueado';
 
+type ServiceLikeRecord = {
+  etapaNome?: string;
+  nome?: string;
+  service?: string;
+  serviceName?: string;
+  servicoNome?: string;
+};
+
+export const getNomeServicoOuEtapa = (record: ServiceLikeRecord) =>
+  record.etapaNome?.trim() ||
+  record.servicoNome?.trim() ||
+  record.serviceName?.trim() ||
+  record.service?.trim() ||
+  record.nome?.trim() ||
+  emptyValue;
+
 const calculateProgress = (items: ReturnType<typeof getScheduledChecklistForApartment>) => {
   const score = items.reduce((total, item) => {
     if (item.state === 'ok' || item.state === 'notApplicable') {
@@ -99,8 +116,13 @@ const calculateProgress = (items: ReturnType<typeof getScheduledChecklistForApar
 const calculateStatus = (items: ReturnType<typeof getScheduledChecklistForApartment>, progress: number) => {
   const pendingCount = items.filter((item) => item.state === 'pending').length;
   const partialCount = items.filter((item) => item.state === 'partial').length;
+  const hasCriticalStage = items.some(
+    (item) =>
+      (item.state === 'pending' || item.state === 'partial') &&
+      isCriticalStageForStatus(item.label),
+  );
 
-  if (progress < 50 || pendingCount >= Math.max(3, Math.ceil(items.length * 0.35))) {
+  if (progress < 50 || hasCriticalStage || pendingCount >= Math.max(3, Math.ceil(items.length * 0.35))) {
     return 'critical';
   }
 
@@ -216,12 +238,16 @@ export const createGeneratedReport = (
   const apartmentFilter = normalizeApartmentFilter(filters.apartment);
   const selectedApartments = isValid ? apartments.filter((apartment) => {
     const tower = getTowerById(apartment.towerId);
+    const apartmentChecklist = getScheduledChecklistForApartment(apartment);
     const apartmentMatches = kind === 'apartment'
       ? normalizeApartmentFilter(apartment.number) === apartmentFilter
       : matchesText(apartment.number, filters.apartment);
     const serviceMatches = kind !== 'service' || (
-      apartment.checklist.some((item) => matchesText(item.label, filters.service)) ||
-      measurements.some((measurement) => measurement.apartmentId === apartment.id && matchesText(measurement.service, filters.service))
+      apartmentChecklist.some((item) => matchesText(item.label, filters.service)) ||
+      measurements.some((measurement) =>
+        measurement.apartmentId === apartment.id &&
+        matchesText(getNomeServicoOuEtapa(measurement), filters.service),
+      )
     );
 
     return (
@@ -264,7 +290,7 @@ export const createGeneratedReport = (
     const delayedRows = scheduleRows.filter((row) => row.delayDays > 0);
     const apartmentMeasurements = measurements.filter((measurement) =>
       measurement.apartmentId === apartment.id &&
-      matchesText(measurement.service, filters.service) &&
+      matchesText(getNomeServicoOuEtapa(measurement), filters.service) &&
       matchesText(measurement.contractor, filters.contractor) &&
       isInPeriod(measurement.periodStart, filters.periodStart, filters.periodEnd),
     );
@@ -311,7 +337,7 @@ export const createGeneratedReport = (
 
     if (options.includeMeasurements) {
       apartmentMeasurements.forEach((measurement) => {
-        csvRows.push(['medicao', project.name, towerLabel, apartment.number, measurement.service, measurement.status, emptyValue, emptyValue, emptyBlockValue, emptyValue, measurement.contractor, measurement.quantity, measurement.unit, measurement.unitPrice, measurement.totalValue, measurement.periodStart]);
+        csvRows.push(['medicao', project.name, towerLabel, apartment.number, getNomeServicoOuEtapa(measurement), measurement.status, emptyValue, emptyValue, emptyBlockValue, emptyValue, measurement.contractor || emptyValue, measurement.quantity, measurement.unit || measurement.unidadeMedicao || emptyValue, measurement.unitPrice, measurement.totalValue, measurement.periodStart || measurement.periodoInicio || filters.date || getToday()]);
       });
     }
 
@@ -353,11 +379,11 @@ export const createGeneratedReport = (
       row.blockedServices.length ? `Trava: ${row.blockedServices.join(', ')}` : emptyValue,
     ]);
     const measurementTableRows = apartmentMeasurements.map((measurement) => [
-      measurement.service,
-      measurement.contractor,
-      `${measurement.periodStart} até ${measurement.periodEnd}`,
+      getNomeServicoOuEtapa(measurement),
+      measurement.contractor || emptyValue,
+      `${measurement.periodStart || measurement.periodoInicio || emptyValue} até ${measurement.periodEnd || measurement.periodoFim || emptyValue}`,
       measurement.quantity,
-      measurement.unit,
+      measurement.unit || measurement.unidadeMedicao || emptyValue,
       formatCurrency(measurement.totalValue),
       measurement.status,
     ]);
@@ -437,6 +463,10 @@ export const createGeneratedReport = (
 
   const csvText = createCsvText(csvRows);
   const generatedAtText = formatReportDateTime(new Date().toISOString());
+  if (isValid && selectedApartments.length === 0) {
+    textLines.push('Nenhum dado encontrado para os filtros selecionados.');
+    htmlSections.push('<section class="unit-section"><p class="empty">Nenhum dado encontrado para os filtros selecionados.</p></section>');
+  }
   const html = `
     <!doctype html>
     <html lang="pt-BR">

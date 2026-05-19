@@ -1,430 +1,178 @@
-import { Link } from 'expo-router';
-import { useMemo } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useRouter } from 'expo-router';
+import { Pressable, ScrollView, StyleSheet, View } from 'react-native'
+import { Text } from '@/src/ui/Text';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { formatCurrency } from '@/src/data/localMeasurements';
 import { useObras } from '@/src/data/ObrasContext';
-import { statusConfig } from '@/src/ui/status';
-import { getChecklistForApartment } from '@/src/data/serviceBlockers';
+import { Skeleton } from '@/src/ui/Skeleton';
 
 export default function VisaoGeralScreen() {
-  const { apartments, towers, measurements } = useObras();
-
-  const statusCounts = useMemo(
-    () => ({
-      excellent: apartments.filter((a) => a.status === 'excellent').length,
-      good: apartments.filter((a) => a.status === 'good').length,
-      attention: apartments.filter((a) => a.status === 'attention').length,
-      critical: apartments.filter((a) => a.status === 'critical').length,
-    }),
-    [apartments],
-  );
-
-  const completedAverage = Math.round(
-    apartments.reduce((total, a) => total + a.progress, 0) / apartments.length,
-  );
+  const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const { apartments, towers, measurements, loading } = useObras();
 
   return (
-    <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
+    <ScrollView
+      style={s.scroll}
+      contentContainerStyle={[s.container, { paddingTop: insets.top + 16 }]}
+      showsVerticalScrollIndicator={false}>
 
-      {/* Status health grid */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Saúde da obra</Text>
-        <View style={styles.healthGrid}>
-          {(
-            [
-              { key: 'excellent', icon: 'check-circle' },
-              { key: 'good', icon: 'thumb-up' },
-              { key: 'attention', icon: 'alert' },
-              { key: 'critical', icon: 'close-circle' },
-            ] as const
-          ).map(({ key, icon }) => {
-            const config = statusConfig[key];
-            return (
-              <View
-                key={key}
-                style={[styles.healthCard, { borderColor: config.color, backgroundColor: config.background }]}>
-                <MaterialCommunityIcons name={icon} size={22} color={config.color} />
-                <Text style={[styles.healthCount, { color: config.color }]}>{statusCounts[key]}</Text>
-                <Text style={styles.healthLabel}>{config.label}</Text>
-              </View>
-            );
-          })}
-        </View>
-      </View>
-
-      {/* Progress overview */}
-      <View style={styles.progressCard}>
-        <View style={styles.progressHeader}>
-          <Text style={styles.sectionTitle}>Progresso geral</Text>
-          <Text style={styles.progressPercent}>{completedAverage}%</Text>
-        </View>
-        <View style={styles.progressTrack}>
-          <View style={[styles.progressFill, { width: `${completedAverage}%` }]} />
-        </View>
-        <Text style={styles.progressSub}>
-          {Math.round(apartments.length * (completedAverage / 100))} de {apartments.length} apartamentos concluídos
-        </Text>
-      </View>
-
-      {/* Towers */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Torres</Text>
-        {towers.map((tower) => {
-          const towerApartments = apartments.filter((a) => a.towerId === tower.id);
-          const avg = Math.round(
-            towerApartments.reduce((total, a) => total + a.progress, 0) / towerApartments.length,
-          );
-          const criticalCount = towerApartments.filter((a) => a.status === 'critical').length;
-
-          return (
-            <Link
-              key={tower.id}
-              href={{ pathname: '/visao-geral/[torreId]', params: { torreId: tower.id } }}
-              asChild>
-              <Pressable style={styles.towerCard}>
-                <View style={styles.towerHeader}>
-                  <View style={styles.towerLeft}>
-                    <MaterialCommunityIcons name="office-building" size={22} color="#2563EB" />
-                    <View>
-                      <Text style={styles.towerName}>{tower.name}</Text>
-                      <Text style={styles.towerMeta}>
-                        {tower.block} · {tower.position}
-                      </Text>
+      {/* TORRES — blue border */}
+      <View style={[s.section, s.sectionBlue]}>
+        <Text style={[s.sectionTitle, { color: '#1D4ED8' }]}>Torres</Text>
+        {loading
+          ? [1, 2].map((i) => <Skeleton key={i} height={100} radius={10} />)
+          : towers.map((tower) => {
+              const apts = apartments.filter((a) => a.towerId === tower.id);
+              const avg = apts.length ? Math.round(apts.reduce((t, a) => t + a.progress, 0) / apts.length) : 0;
+              const criticalCount = apts.filter((a) => a.status === 'critical').length;
+              const attentionCount = apts.filter((a) => a.status === 'attention').length;
+              const barColor = criticalCount > 0 ? '#B91C1C' : attentionCount > 0 ? '#D97706' : '#1D4ED8';
+              return (
+                <Pressable
+                  key={tower.id}
+                  onPress={() => router.push({ pathname: '/visao-geral/[torreId]', params: { torreId: tower.id } })}
+                  style={s.towerCard}>
+                  <View style={s.towerTop}>
+                    <View style={s.towerIconWrap}>
+                      <MaterialCommunityIcons name="office-building" size={20} color="#1D4ED8" />
                     </View>
-                  </View>
-                  <View style={styles.towerRight}>
-                    <Text style={styles.towerCount}>{towerApartments.length}</Text>
-                    <Text style={styles.towerCountLabel}>un.</Text>
-                  </View>
-                </View>
-                {tower.description ? (
-                  <Text style={styles.towerDescription} numberOfLines={2}>
-                    {tower.description}
-                  </Text>
-                ) : null}
-                <View style={styles.towerProgressTrack}>
-                  <View style={[styles.towerProgressFill, { width: `${avg}%` }]} />
-                </View>
-                <View style={styles.towerFooter}>
-                  <Text style={styles.towerProgressText}>{avg}% de avanço médio</Text>
-                  {criticalCount > 0 && (
-                    <View style={styles.criticalBadge}>
-                      <Text style={styles.criticalBadgeText}>{criticalCount} crítico(s)</Text>
+                    <View style={s.towerInfo}>
+                      <Text style={s.towerName}>{tower.name}</Text>
+                      <Text style={s.towerMeta}>{tower.block} · {tower.position} · {apts.length} un.</Text>
                     </View>
-                  )}
-                </View>
-              </Pressable>
-            </Link>
-          );
-        })}
+                    <Text style={[s.towerPct, { color: barColor }]}>{avg}%</Text>
+                  </View>
+                  <View style={s.towerBar}>
+                    <View style={[s.towerBarFill, { width: `${avg}%` as `${number}%`, backgroundColor: barColor }]} />
+                  </View>
+                  <View style={s.towerFooter}>
+                    {criticalCount > 0 && <View style={s.badgeRed}><Text style={s.badgeRedText}>{criticalCount} crítico(s)</Text></View>}
+                    {attentionCount > 0 && <View style={s.badgeAmber}><Text style={s.badgeAmberText}>{attentionCount} atenção</Text></View>}
+                    {criticalCount === 0 && attentionCount === 0 && <View style={s.badgeGreen}><Text style={s.badgeGreenText}>Sem alertas</Text></View>}
+                    <View style={s.spacer} />
+                    <MaterialCommunityIcons name="chevron-right" size={16} color="#94A3B8" />
+                  </View>
+                </Pressable>
+              );
+            })}
       </View>
 
-      {/* Recent measurements */}
-      <View style={styles.section}>
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Atividade recente</Text>
-          <Link href="/cronograma/medicoes" asChild>
-            <Pressable>
-              <Text style={styles.sectionLink}>Ver tudo →</Text>
-            </Pressable>
-          </Link>
+      {/* MEDIÇÕES RECENTES — purple border */}
+      <View style={[s.section, s.sectionPurple]}>
+        <View style={s.sectionHeaderRow}>
+          <Text style={[s.sectionTitle, { color: '#6D28D9' }]}>Medições recentes</Text>
+          <Pressable onPress={() => router.push('/cronograma/medicoes' as any)}>
+            <Text style={[s.sectionLink, { color: '#6D28D9' }]}>Ver tudo →</Text>
+          </Pressable>
         </View>
-        <View style={styles.activityCard}>
-          {measurements.slice(0, 4).length > 0 ? (
-            measurements.slice(0, 4).map((m, index) => (
-              <View key={m.id} style={[styles.activityItem, index > 0 && styles.activityItemBorder]}>
-                <View style={styles.activityIcon}>
-                  <MaterialCommunityIcons name="file-check" size={16} color="#3B82F6" />
+        {loading ? (
+          <>
+            {[1, 2, 3].map((i) => (
+              <View key={i} style={s.activityRow}>
+                <Skeleton width={34} height={34} radius={8} />
+                <View style={{ flex: 1, gap: 6 }}>
+                  <Skeleton height={13} width="70%" radius={6} />
+                  <Skeleton height={11} width="45%" radius={6} />
                 </View>
-                <View style={styles.activityContent}>
-                  <Text style={styles.activityTitle} numberOfLines={1}>{m.service}</Text>
-                  <Text style={styles.activityMeta}>
-                    {m.contractor} · {formatCurrency(m.totalValue)}
-                  </Text>
-                </View>
-                <Text style={styles.activityStatus}>{m.status}</Text>
               </View>
-            ))
-          ) : (
-            <View style={styles.emptyState}>
-              <Text style={styles.emptyText}>Nenhuma medição registrada</Text>
+            ))}
+          </>
+        ) : measurements.slice(0, 4).length > 0 ? (
+          measurements.slice(0, 4).map((m, idx) => (
+            <View key={m.id} style={[s.activityRow, idx > 0 && s.activityBorder]}>
+              <View style={s.activityIcon}>
+                <MaterialCommunityIcons name="file-check" size={16} color="#6D28D9" />
+              </View>
+              <View style={s.activityContent}>
+                <Text style={s.activityTitle} numberOfLines={1}>{m.service}</Text>
+                <Text style={s.activityMeta}>{m.contractor} · {formatCurrency(m.totalValue)}</Text>
+              </View>
+              <Text style={s.activityStatus}>{m.status}</Text>
             </View>
-          )}
-        </View>
+          ))
+        ) : (
+          <View style={s.emptyBox}>
+            <MaterialCommunityIcons name="file-document-outline" size={28} color="#CBD5E1" />
+            <Text style={s.emptyText}>Nenhuma medição registrada</Text>
+          </View>
+        )}
       </View>
-      {/* Reports */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Relatórios</Text>
-        <Link href="/visao-geral/relatorios/relatorio-geral" asChild>
-          <Pressable style={styles.reportCard}>
-            <MaterialCommunityIcons name="table-large" size={22} color="#2563EB" />
-            <View style={styles.reportContent}>
-              <Text style={styles.reportTitle}>Relatório Geral</Text>
-              <Text style={styles.reportDesc}>Tabela completa de apartamentos, pendências, serviços travados, cronograma, medições e visitas.</Text>
+
+      {/* RELATÓRIOS — green border */}
+      <View style={[s.section, s.sectionGreen]}>
+        <Text style={[s.sectionTitle, { color: '#047857' }]}>Relatórios</Text>
+        {[
+          { href: '/visao-geral/relatorios/relatorio-geral', icon: 'table-large', label: 'Relatório Geral', desc: 'Tabela completa: apartamentos, pendências, cronograma, medições e visitas.' },
+          { href: '/visao-geral/relatorios/gerar-relatorio', icon: 'file-export-outline', label: 'Gerar Relatório', desc: 'Escolha tipo, filtros e seções. Exporte em CSV ou PDF.' },
+        ].map((r, i) => (
+          <Pressable key={r.href} onPress={() => router.push(r.href as any)} style={[s.reportCard, i > 0 && s.activityBorder]}>
+            <View style={s.reportIconWrap}>
+              <MaterialCommunityIcons name={r.icon as any} size={22} color="#047857" />
             </View>
-            <MaterialCommunityIcons name="chevron-right" size={20} color="#94A3B8" />
-          </Pressable>
-        </Link>
-        <Link href="/visao-geral/relatorios/gerar-relatorio" asChild>
-          <Pressable style={styles.reportCard}>
-            <MaterialCommunityIcons name="file-export-outline" size={22} color="#059669" />
-            <View style={styles.reportContent}>
-              <Text style={styles.reportTitle}>Gerar Relatório</Text>
-              <Text style={styles.reportDesc}>Escolha tipo, filtros e seções. Exporte em CSV, PDF ou texto para WhatsApp/e-mail.</Text>
+            <View style={s.reportContent}>
+              <Text style={s.reportTitle}>{r.label}</Text>
+              <Text style={s.reportDesc}>{r.desc}</Text>
             </View>
-            <MaterialCommunityIcons name="chevron-right" size={20} color="#94A3B8" />
+            <MaterialCommunityIcons name="chevron-right" size={18} color="#94A3B8" />
           </Pressable>
-        </Link>
+        ))}
       </View>
+
     </ScrollView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    paddingBottom: 32,
-    gap: 16,
-    paddingTop: 12,
-  },
-  section: {
-    paddingHorizontal: 16,
-    gap: 10,
-  },
-  sectionTitle: {
-    color: '#0F172A',
-    fontSize: 15,
-    fontWeight: '800',
-  },
-  sectionHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  sectionLink: {
-    color: '#2563EB',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  healthGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  healthCard: {
-    flex: 1,
-    minWidth: 80,
-    paddingVertical: 12,
-    paddingHorizontal: 8,
-    borderRadius: 12,
-    borderWidth: 1.5,
-    alignItems: 'center',
-    gap: 4,
-  },
-  healthCount: {
-    fontSize: 22,
-    fontWeight: '900',
-  },
-  healthLabel: {
-    color: '#64748B',
-    fontSize: 11,
-    fontWeight: '700',
-    textAlign: 'center',
-  },
-  progressCard: {
-    backgroundColor: '#FFFFFF',
-    borderColor: '#E2E8F0',
-    borderWidth: 1,
-    borderRadius: 14,
-    padding: 16,
-    marginHorizontal: 16,
-    gap: 10,
-  },
-  progressHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  progressPercent: {
-    color: '#2563EB',
-    fontSize: 20,
-    fontWeight: '900',
-  },
-  progressTrack: {
-    height: 10,
-    backgroundColor: '#E2E8F0',
-    borderRadius: 999,
-    overflow: 'hidden',
-  },
-  progressFill: {
-    height: '100%',
-    backgroundColor: '#2563EB',
-    borderRadius: 999,
-  },
-  progressSub: {
-    color: '#94A3B8',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  towerCard: {
-    backgroundColor: '#FFFFFF',
-    borderColor: '#E2E8F0',
-    borderWidth: 1,
-    borderRadius: 14,
-    padding: 16,
-    gap: 10,
-  },
-  towerHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  towerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    flex: 1,
-  },
-  towerName: {
-    color: '#0F172A',
-    fontSize: 16,
-    fontWeight: '900',
-  },
-  towerMeta: {
-    color: '#64748B',
-    fontSize: 12,
-    marginTop: 2,
-  },
-  towerRight: {
-    alignItems: 'center',
-    backgroundColor: '#EFF6FF',
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-  },
-  towerCount: {
-    color: '#2563EB',
-    fontSize: 18,
-    fontWeight: '900',
-  },
-  towerCountLabel: {
-    color: '#93C5FD',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  towerDescription: {
-    color: '#64748B',
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  towerProgressTrack: {
-    height: 8,
-    backgroundColor: '#E2E8F0',
-    borderRadius: 999,
-    overflow: 'hidden',
-  },
-  towerProgressFill: {
-    height: '100%',
-    backgroundColor: '#2563EB',
-    borderRadius: 999,
-  },
-  towerFooter: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  towerProgressText: {
-    color: '#64748B',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  criticalBadge: {
-    backgroundColor: '#FEE2E2',
-    borderRadius: 999,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-  },
-  criticalBadgeText: {
-    color: '#B91C1C',
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  activityCard: {
-    backgroundColor: '#FFFFFF',
-    borderColor: '#E2E8F0',
-    borderWidth: 1,
-    borderRadius: 14,
-    overflow: 'hidden',
-  },
-  activityItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    padding: 12,
-  },
-  activityItemBorder: {
-    borderTopColor: '#F1F5F9',
-    borderTopWidth: 1,
-  },
-  activityIcon: {
-    width: 34,
-    height: 34,
-    borderRadius: 8,
-    backgroundColor: '#DBEAFE',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  activityContent: {
-    flex: 1,
-    gap: 2,
-  },
-  activityTitle: {
-    color: '#0F172A',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  activityMeta: {
-    color: '#64748B',
-    fontSize: 12,
-  },
-  activityStatus: {
-    color: '#94A3B8',
-    fontSize: 11,
-    fontWeight: '600',
-    maxWidth: 80,
-    textAlign: 'right',
-  },
-  emptyState: {
-    padding: 24,
-    alignItems: 'center',
-  },
-  emptyText: {
-    color: '#94A3B8',
-    fontSize: 13,
-  },
-  reportCard: {
-    backgroundColor: '#FFFFFF',
-    borderColor: '#E2E8F0',
-    borderWidth: 1,
-    borderRadius: 14,
-    padding: 14,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  reportContent: {
-    flex: 1,
-    gap: 3,
-  },
-  reportTitle: {
-    color: '#0F172A',
-    fontSize: 14,
-    fontWeight: '800',
-  },
-  reportDesc: {
-    color: '#64748B',
-    fontSize: 12,
-    lineHeight: 17,
-  },
+const s = StyleSheet.create({
+  scroll: { backgroundColor: '#F8FAFC' },
+  container: { paddingBottom: 40, gap: 12, paddingHorizontal: 16 },
+
+  // section containers — border color is the differentiator
+  section: { backgroundColor: '#FFFFFF', borderRadius: 16, padding: 16, gap: 12, borderWidth: 2 },
+  sectionBlue:   { borderColor: '#3B82F6' },
+  sectionPurple: { borderColor: '#8B5CF6' },
+  sectionGreen:  { borderColor: '#10B981' },
+
+  sectionTitle: { fontSize: 15, fontWeight: '900' },
+  sectionHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  sectionLink: { fontSize: 12, fontWeight: '700' },
+  spacer: { flex: 1 },
+
+  // tower
+  towerCard: { backgroundColor: '#F8FAFC', borderRadius: 12, padding: 12, gap: 8 },
+  towerTop: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  towerIconWrap: { width: 36, height: 36, borderRadius: 10, backgroundColor: '#EFF6FF', alignItems: 'center', justifyContent: 'center' },
+  towerInfo: { flex: 1 },
+  towerName: { color: '#0F172A', fontSize: 15, fontWeight: '900' },
+  towerMeta: { color: '#64748B', fontSize: 12, marginTop: 1 },
+  towerPct: { fontSize: 20, fontWeight: '900' },
+  towerBar: { backgroundColor: '#E2E8F0', borderRadius: 999, height: 5, overflow: 'hidden' },
+  towerBarFill: { height: '100%', borderRadius: 999 },
+  towerFooter: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  badgeRed:   { backgroundColor: '#FEE2E2', borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
+  badgeRedText:   { color: '#B91C1C', fontSize: 11, fontWeight: '700' },
+  badgeAmber: { backgroundColor: '#FEF3C7', borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
+  badgeAmberText: { color: '#B45309', fontSize: 11, fontWeight: '700' },
+  badgeGreen: { backgroundColor: '#D1FAE5', borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
+  badgeGreenText: { color: '#047857', fontSize: 11, fontWeight: '700' },
+
+  // activity
+  activityRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 4 },
+  activityBorder: { borderTopWidth: 1, borderTopColor: '#F1F5F9', paddingTop: 12 },
+  activityIcon: { width: 34, height: 34, borderRadius: 8, backgroundColor: '#EDE9FE', alignItems: 'center', justifyContent: 'center' },
+  activityContent: { flex: 1, gap: 2 },
+  activityTitle: { color: '#0F172A', fontSize: 13, fontWeight: '700' },
+  activityMeta: { color: '#64748B', fontSize: 12 },
+  activityStatus: { color: '#94A3B8', fontSize: 11, fontWeight: '600', maxWidth: 80, textAlign: 'right' },
+  emptyBox: { padding: 16, alignItems: 'center', gap: 8 },
+  emptyText: { color: '#94A3B8', fontSize: 13 },
+
+  // reports
+  reportCard: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 4 },
+  reportIconWrap: { width: 40, height: 40, borderRadius: 10, backgroundColor: '#ECFDF5', alignItems: 'center', justifyContent: 'center' },
+  reportContent: { flex: 1, gap: 2 },
+  reportTitle: { color: '#0F172A', fontSize: 14, fontWeight: '800' },
+  reportDesc: { color: '#64748B', fontSize: 12, lineHeight: 17 },
 });

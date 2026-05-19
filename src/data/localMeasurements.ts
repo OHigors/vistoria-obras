@@ -21,15 +21,25 @@ export type Measurement = {
   towerId?: string;
   apartmentId: string;
   serviceId?: string;
+  etapaId?: string;
   contractorId?: string;
   service: string;
+  serviceName?: string;
+  servicoNome?: string;
+  etapaNome?: string;
+  categoria?: string;
+  unidadeMedicao?: string;
   contractor: string;
   quantity: number;
   unit: string;
   unitPrice: number;
+  valorUnitario?: number;
   totalValue: number;
+  valorTotal?: number;
   periodStart: string;
   periodEnd: string;
+  periodoInicio?: string;
+  periodoFim?: string;
   status: MeasurementStatus;
   comment: string;
   measurementType: MeasurementType;
@@ -207,6 +217,14 @@ export const getMeasurementsFromStorage = (storageKey: string | undefined): Meas
         quantity,
         service,
         serviceId,
+        etapaId,
+        serviceName,
+        servicoNome,
+        etapaNome,
+        categoria,
+        unidadeMedicao,
+        valorUnitario,
+        valorTotal,
         status,
         towerId,
         totalValue,
@@ -214,6 +232,8 @@ export const getMeasurementsFromStorage = (storageKey: string | undefined): Meas
         unitPrice,
         periodStart,
         periodEnd,
+        periodoInicio,
+        periodoFim,
         evidenceUri,
         evidenceFileName,
         responsible,
@@ -237,8 +257,8 @@ export const getMeasurementsFromStorage = (storageKey: string | undefined): Meas
       }
 
       const apartment = getApartmentById(apartmentId);
-      const normalizedPeriodStart = normalizeMeasurementPeriod(periodStart);
-      const normalizedPeriodEnd = normalizeMeasurementPeriod(periodEnd);
+      const normalizedPeriodStart = normalizeMeasurementPeriod(periodStart ?? periodoInicio);
+      const normalizedPeriodEnd = normalizeMeasurementPeriod(periodEnd ?? periodoFim);
 
       return [
         {
@@ -247,16 +267,26 @@ export const getMeasurementsFromStorage = (storageKey: string | undefined): Meas
           towerId: typeof towerId === 'string' ? towerId : apartment?.towerId,
           apartmentId,
           serviceId: typeof serviceId === 'string' ? serviceId : service,
+          etapaId: typeof etapaId === 'string' ? etapaId : typeof serviceId === 'string' ? serviceId : service,
           contractorId:
             typeof contractorId === 'string' ? contractorId : getContractorId(contractor),
           service,
+          serviceName: typeof serviceName === 'string' ? serviceName : service,
+          servicoNome: typeof servicoNome === 'string' ? servicoNome : service,
+          etapaNome: typeof etapaNome === 'string' ? etapaNome : service,
+          categoria: typeof categoria === 'string' ? categoria : undefined,
+          unidadeMedicao: typeof unidadeMedicao === 'string' ? unidadeMedicao : unit,
           contractor,
           quantity,
           unit,
           unitPrice,
+          valorUnitario: typeof valorUnitario === 'number' ? valorUnitario : unitPrice,
           totalValue,
+          valorTotal: typeof valorTotal === 'number' ? valorTotal : totalValue,
           periodStart: normalizedPeriodStart,
           periodEnd: normalizedPeriodEnd,
+          periodoInicio: typeof periodoInicio === 'string' ? periodoInicio : normalizedPeriodStart,
+          periodoFim: typeof periodoFim === 'string' ? periodoFim : normalizedPeriodEnd,
           status,
           comment,
           measurementType: isMeasurementType(measurementType) ? measurementType : 'normal',

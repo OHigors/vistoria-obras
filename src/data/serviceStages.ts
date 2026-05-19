@@ -1,3 +1,4 @@
+import type { Apartment, ChecklistItem } from '@/src/data/mockObras';
 import { checklistLabels } from '@/src/data/mockObras';
 
 export type ServiceStage = {
@@ -130,6 +131,44 @@ const normalizeStage = (stage: Partial<ServiceStage>, index: number): ServiceSta
 // Real loading/saving goes through src/data/db.ts (loadServiceStages / saveServiceStages).
 export const getServiceStagesFromStorage = (): ServiceStage[] => defaultServiceStages;
 export const saveServiceStagesToStorage = (_stages: ServiceStage[]) => {};
+
+const sortStagesByExecution = (stages: ServiceStage[]) =>
+  [...stages].sort((a, b) => a.ordemExecucao - b.ordemExecucao);
+
+export const getEtapasConfiguradas = () => sortStagesByExecution(getServiceStagesFromStorage());
+export const getEtapasAtivas = () => getEtapasConfiguradas().filter((s) => s.ativo);
+export const getEtapasChecklist = () => getEtapasAtivas().filter((s) => s.apareceNoChecklist);
+export const getEtapasMedicao = () => getEtapasAtivas().filter((s) => s.apareceNaMedicao);
+export const getEtapasCronograma = () => getEtapasAtivas().filter((s) => s.apareceNoCronograma);
+
+export const getServiceStageByName = (serviceName: string) =>
+  getServiceStagesFromStorage().find((s) => s.nome === serviceName);
+
+export const isCriticalStageForStatus = (serviceName: string) => {
+  const stage = getServiceStageByName(serviceName);
+  return Boolean(stage?.ativo && (stage.etapaCritica || stage.travaLiberacao));
+};
+
+const createChecklistItemFromStage = (stage: ServiceStage): ChecklistItem => ({
+  id: stage.id,
+  label: stage.nome,
+  state: 'ok',
+  comment: '',
+});
+
+export const getChecklistItemsForFeature = (
+  apartment: Apartment,
+  feature: 'checklist' | 'cronograma' | 'medicao',
+): ChecklistItem[] => {
+  const stages =
+    feature === 'checklist'
+      ? getEtapasChecklist()
+      : feature === 'cronograma'
+        ? getEtapasCronograma()
+        : getEtapasMedicao();
+  const apartmentItemsByLabel = new Map(apartment.checklist.map((item) => [item.label, item]));
+  return stages.map((stage) => apartmentItemsByLabel.get(stage.nome) ?? createChecklistItemFromStage(stage));
+};
 
 export const createEmptyServiceStage = (order: number): ServiceStage => ({
   id: `etapa-${Date.now()}`,

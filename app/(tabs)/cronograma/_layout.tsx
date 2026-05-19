@@ -11,7 +11,7 @@ export default function CronogramaLayout() {
         headerShadowVisible: false,
         contentStyle: { backgroundColor: '#F8FAFC' },
       }}>
-      <Stack.Screen name="index" options={{ title: 'Cronograma' }} />
+      <Stack.Screen name="index" options={{ headerShown: false }} />
       <Stack.Screen name="diagnostico" options={{ title: 'Diagnóstico do MVP' }} />
       <Stack.Screen name="servicos-etapas" options={{ title: 'Serviços e Etapas' }} />
       <Stack.Screen name="medicoes" options={{ title: 'Medições' }} />

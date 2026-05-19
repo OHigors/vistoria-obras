@@ -1,7 +1,8 @@
 ﻿import { Link } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { useCallback, useMemo, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native'
+import { Text } from '@/src/ui/Text';
 
 import type { InspectionPhoto } from '@/src/data/localInspectionPhotos';
 import type { InspectionVisit } from '@/src/data/localInspectionVisits';
@@ -13,6 +14,7 @@ import * as db from '@/src/data/db';
 import { consolidatedReportHeader } from '@/src/data/reportExports';
 import { getScheduleRows, getScheduledChecklistForApartment } from '@/src/data/schedule';
 import { getBlockedServiceGroups } from '@/src/data/serviceBlockers';
+import { isCriticalStageForStatus } from '@/src/data/serviceStages';
 import { statusConfig } from '@/src/ui/status';
 
 type IssueCriticality = 'Baixa' | 'MÃ©dia' | 'Alta' | 'CrÃ­tica';
@@ -164,8 +166,13 @@ const calculateStatus = (checklist: ChecklistItem[], progress: number): Apartmen
   const pendingCount = checklist.filter((item) => item.state === 'pending').length;
   const partialCount = checklist.filter((item) => item.state === 'partial').length;
   const manyPending = pendingCount >= Math.max(3, Math.ceil(checklist.length * 0.35));
+  const hasCriticalStage = checklist.some(
+    (item) =>
+      (item.state === 'pending' || item.state === 'partial') &&
+      isCriticalStageForStatus(item.label),
+  );
 
-  if (progress < 50 || manyPending) {
+  if (progress < 50 || manyPending || hasCriticalStage) {
     return 'critical';
   }
 
