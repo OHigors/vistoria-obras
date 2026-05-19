@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 
-import type { Apartment, ApartmentStatus, Tower } from '@/src/data/mockObras';
+import type { Apartment, ApartmentStatus, ChecklistItem, Tower } from '@/src/data/mockObras';
 import type { Measurement } from '@/src/data/localMeasurements';
 import type { ServiceStage } from '@/src/data/serviceStages';
 import * as db from '@/src/data/db';
@@ -22,7 +22,7 @@ type ObrasContextValue = {
   refreshData: () => Promise<void>;
   refreshApartment: (apartmentId: string) => Promise<void>;
   refreshMeasurements: () => Promise<void>;
-  updateApartmentLocal: (apartmentId: string, progress: number, status: ApartmentStatus) => void;
+  updateApartmentLocal: (apartmentId: string, progress: number, status: ApartmentStatus, checklist?: ChecklistItem[]) => void;
 };
 
 const defaultProject: Project = { id: '', name: '', summary: '' };
@@ -40,7 +40,7 @@ const ObrasContext = createContext<ObrasContextValue>({
   refreshData: async () => {},
   refreshApartment: async () => {},
   refreshMeasurements: async () => {},
-  updateApartmentLocal: () => {},
+  updateApartmentLocal: () => { },
 });
 
 export function ObrasProvider({ children }: { children: React.ReactNode }) {
@@ -88,9 +88,13 @@ export function ObrasProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const updateApartmentLocal = useCallback(
-    (apartmentId: string, progress: number, status: ApartmentStatus) => {
+    (apartmentId: string, progress: number, status: ApartmentStatus, checklist?: ChecklistItem[]) => {
       setApartments((prev) =>
-        prev.map((a) => (a.id === apartmentId ? { ...a, progress, status } : a)),
+        prev.map((a) =>
+          a.id === apartmentId
+            ? { ...a, progress, status, ...(checklist ? { checklist } : {}) }
+            : a,
+        ),
       );
     },
     [],

@@ -1,9 +1,10 @@
 import { useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useEffect, useMemo, useState } from 'react';
-import { Image, Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native'
+import { Image, Modal, Platform, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native'
 import { Text } from '@/src/ui/Text';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import * as ImagePicker from 'expo-image-picker';
 
 import type { ApartmentStatus, ChecklistItem, ChecklistState } from '@/src/data/mockObras';
 import type { InspectionPhoto } from '@/src/data/localInspectionPhotos';
@@ -118,6 +119,7 @@ export default function ApartmentDetailScreen() {
   const [activeTab, setActiveTab] = useState<DetailTab>('Resumo');
   const [visits, setVisits] = useState<InspectionVisit[]>([]);
   const [selectedVisit, setSelectedVisit] = useState<InspectionVisit>();
+  const [photoPickerTarget, setPhotoPickerTarget] = useState<{ itemId: string; forMeasurement?: boolean } | null>(null);
 
   useEffect(() => {
     if (!apartamentoId) return;
@@ -217,7 +219,7 @@ export default function ApartmentDetailScreen() {
         const np = calculateProgress(next);
         const ns = calculateApartmentStatus(next, np);
         dbApi.updateApartmentStats(apartamentoId, np, ns);
-        updateApartmentLocal(apartamentoId, np, ns);
+        updateApartmentLocal(apartamentoId, np, ns, next);
       }
       registerVisitUpdate({ changedItemId: itemId, nextChecklist: next, nextPhotos: photos, progressBeforeFallback: calculateProgress(cur) });
       return next;
@@ -259,29 +261,52 @@ export default function ApartmentDetailScreen() {
   };
 
   const addPhotoToItem = (item: EditableChecklistItem) => {
-    if (typeof document === 'undefined' || !apartment || !tower) return;
-    const input = document.createElement('input');
-    input.type = 'file'; input.accept = 'image/*';
-    input.onchange = () => {
-      const file = input.files?.[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = () => {
-        if (typeof reader.result !== 'string') return;
-        const uri = reader.result;
-        const createdAt = new Date().toISOString();
-        const photoId = `${apartment.id}-${item.id}-${Date.now()}`;
-        const newPhoto = { id: photoId, towerId: tower.id, apartmentId: apartment.id, itemId: item.id, serviceId: item.id, service: item.label, uri, fileName: file.name, createdAt, dataHora: createdAt, comment: '', comentarioFoto: '', visitId: openVisit?.id };
-        dbApi.savePhoto(newPhoto);
-        setPhotos((cur) => {
-          const next = [...cur, newPhoto];
-          registerVisitUpdate({ addedPhotoId: photoId, changedItemId: item.id, nextChecklist: checklist, nextPhotos: next, progressBeforeFallback: progress });
-          return next;
-        });
-      };
-      reader.readAsDataURL(file);
+    if (!apartment || !tower) return;
+    setPhotoPickerTarget({ itemId: item.id });
+  };
+
+  const handlePickImage = async (source: 'camera' | 'gallery') => {
+    if (!apartment || !tower || !photoPickerTarget) return;
+    setPhotoPickerTarget(null);
+
+    if (Platform.OS !== 'web') {
+      const perm = source === 'camera'
+        ? await ImagePicker.requestCameraPermissionsAsync()
+        : await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) return;
+    }
+
+    const result = source === 'camera'
+      ? await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], quality: 0.8, base64: Platform.OS === 'web' })
+      : await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.8, base64: Platform.OS === 'web' });
+
+    if (result.canceled || !result.assets?.[0]) return;
+    const asset = result.assets[0];
+    const uri = Platform.OS === 'web' ? `data:image/jpeg;base64,${asset.base64}` : asset.uri;
+    const createdAt = new Date().toISOString();
+
+    if (photoPickerTarget.forMeasurement) {
+      updateMeasurementDraft(photoPickerTarget.itemId, 'evidenceUri', uri);
+      updateMeasurementDraft(photoPickerTarget.itemId, 'evidenceFileName', asset.fileName ?? `foto-${Date.now()}.jpg`);
+      return;
+    }
+
+    const item = checklist.find((i) => i.id === photoPickerTarget.itemId);
+    if (!item) return;
+    const photoId = `${apartment.id}-${item.id}-${Date.now()}`;
+    const newPhoto = {
+      id: photoId, towerId: tower.id, apartmentId: apartment.id,
+      itemId: item.id, serviceId: item.id, service: item.label,
+      uri, fileName: asset.fileName ?? `foto-${Date.now()}.jpg`,
+      createdAt, dataHora: createdAt,
+      comment: '', comentarioFoto: '', visitId: openVisit?.id,
     };
-    input.click();
+    dbApi.savePhoto(newPhoto);
+    setPhotos((cur) => {
+      const next = [...cur, newPhoto];
+      registerVisitUpdate({ addedPhotoId: photoId, changedItemId: item.id, nextChecklist: checklist, nextPhotos: next, progressBeforeFallback: progress });
+      return next;
+    });
   };
 
   const updatePhotoComment = (photoId: string, comment: string) => {
@@ -367,21 +392,7 @@ export default function ApartmentDetailScreen() {
   };
 
   const addMeasurementEvidence = (itemId: string) => {
-    if (typeof document === 'undefined') return;
-    const input = document.createElement('input');
-    input.type = 'file'; input.accept = 'image/*';
-    input.onchange = () => {
-      const file = input.files?.[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = () => {
-        if (typeof reader.result !== 'string') return;
-        updateMeasurementDraft(itemId, 'evidenceUri', reader.result);
-        updateMeasurementDraft(itemId, 'evidenceFileName', file.name);
-      };
-      reader.readAsDataURL(file);
-    };
-    input.click();
+    setPhotoPickerTarget({ itemId, forMeasurement: true });
   };
 
   const createMeasurement = (item: EditableChecklistItem) => {
@@ -1084,6 +1095,27 @@ export default function ApartmentDetailScreen() {
 
       </ScrollView>
 
+      {/* MODAL: photo source picker */}
+      <Modal animationType="fade" onRequestClose={() => setPhotoPickerTarget(null)} transparent visible={Boolean(photoPickerTarget)}>
+        <Pressable style={s.modalBackdrop} onPress={() => setPhotoPickerTarget(null)}>
+          <View style={s.pickerSheet}>
+            <Text style={s.pickerTitle}>Adicionar foto</Text>
+            <Pressable style={s.pickerOption} onPress={() => handlePickImage('camera')}>
+              <MaterialCommunityIcons name="camera-outline" size={22} color="#2563EB" />
+              <Text style={s.pickerOptionText}>Tirar foto</Text>
+            </Pressable>
+            <View style={s.pickerDivider} />
+            <Pressable style={s.pickerOption} onPress={() => handlePickImage('gallery')}>
+              <MaterialCommunityIcons name="image-outline" size={22} color="#2563EB" />
+              <Text style={s.pickerOptionText}>Escolher da galeria</Text>
+            </Pressable>
+            <Pressable style={s.pickerCancel} onPress={() => setPhotoPickerTarget(null)}>
+              <Text style={s.pickerCancelText}>Cancelar</Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Modal>
+
       {/* MODAL: photo */}
       <Modal animationType="fade" onRequestClose={() => setSelectedPhoto(undefined)} transparent visible={Boolean(selectedPhoto)}>
         <View style={s.modalBackdrop}>
@@ -1389,6 +1421,15 @@ const s = StyleSheet.create({
   visitMeta: { color: '#94A3B8', fontSize: 11, marginTop: 2 },
   visitCardRight: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   visitEvo: { fontSize: 14, fontWeight: '800' },
+
+  // photo source picker
+  pickerSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 20, borderTopRightRadius: 20, paddingBottom: 24, paddingTop: 8 },
+  pickerTitle: { textAlign: 'center', fontSize: 15, fontWeight: '700', color: '#0F172A', paddingVertical: 14, paddingHorizontal: 20 },
+  pickerOption: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingVertical: 16, paddingHorizontal: 24 },
+  pickerOptionText: { fontSize: 16, color: '#0F172A', fontWeight: '500' },
+  pickerDivider: { height: 1, backgroundColor: '#F1F5F9', marginHorizontal: 20 },
+  pickerCancel: { marginHorizontal: 20, marginTop: 16, borderRadius: 12, borderWidth: 1, borderColor: '#E2E8F0', paddingVertical: 14, alignItems: 'center' },
+  pickerCancelText: { fontSize: 15, color: '#64748B', fontWeight: '600' },
 
   // modals
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.65)', justifyContent: 'flex-end' },
