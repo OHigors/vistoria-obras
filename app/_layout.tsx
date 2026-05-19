@@ -1,33 +1,59 @@
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
+import * as SplashScreen from 'expo-splash-screen';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
+import { useEffect } from 'react';
 import 'react-native-reanimated';
+import {
+  useFonts,
+  Inter_100Thin,
+  Inter_200ExtraLight,
+  Inter_300Light,
+  Inter_400Regular,
+  Inter_500Medium,
+  Inter_600SemiBold,
+  Inter_700Bold,
+  Inter_800ExtraBold,
+  Inter_900Black,
+} from '@expo-google-fonts/inter';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { ObrasProvider } from '@/src/data/ObrasContext';
+
+SplashScreen.preventAutoHideAsync();
 
 export default function RootLayout() {
   const colorScheme = useColorScheme();
 
+  const [fontsLoaded] = useFonts({
+    Inter_100Thin,
+    Inter_200ExtraLight,
+    Inter_300Light,
+    Inter_400Regular,
+    Inter_500Medium,
+    Inter_600SemiBold,
+    Inter_700Bold,
+    Inter_800ExtraBold,
+    Inter_900Black,
+  });
+
+  useEffect(() => {
+    if (fontsLoaded) {
+      SplashScreen.hideAsync();
+    }
+  }, [fontsLoaded]);
+
+  if (!fontsLoaded) return null;
+
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <Stack
-        screenOptions={{
-          headerStyle: { backgroundColor: '#0F172A' },
-          headerTintColor: '#FFFFFF',
-          headerTitleStyle: { fontWeight: '700' },
-          contentStyle: { backgroundColor: '#F4F7FB' },
-        }}>
-        <Stack.Screen name="index" options={{ title: 'Residencial Cagliari' }} />
-        <Stack.Screen name="torres" options={{ title: 'Selecionar torre' }} />
-        <Stack.Screen name="torres/[torreId]" options={{ title: 'Apartamentos' }} />
-        <Stack.Screen name="apartamentos/[apartamentoId]" options={{ title: 'Vistoria' }} />
-        <Stack.Screen name="medicoes" options={{ title: 'Medições' }} />
-        <Stack.Screen name="relatorio-geral" options={{ title: 'Relatório geral' }} />
-        <Stack.Screen name="gerar-relatorio" options={{ title: 'Gerar relatório' }} />
-        <Stack.Screen name="servicos-etapas" options={{ title: 'Serviços e etapas' }} />
-        <Stack.Screen name="diagnostico" options={{ title: 'Diagnóstico do MVP' }} />
-      </Stack>
-      <StatusBar style="auto" />
+      <ObrasProvider>
+        <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: '#F8FAFC' } }}>
+          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+          <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
+        </Stack>
+        <StatusBar style="light" />
+      </ObrasProvider>
     </ThemeProvider>
   );
 }

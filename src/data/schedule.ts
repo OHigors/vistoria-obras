@@ -1,5 +1,5 @@
 import type { Apartment, ChecklistItem, ChecklistState } from '@/src/data/mockObras';
-import { getChecklistItemsForFeature, getServiceDependencyMap } from '@/src/data/serviceStages';
+import { getServiceDependencyMap, isServiceActiveForFeature } from '@/src/data/serviceStages';
 
 export type ScheduleStatus = 'No prazo' | 'Atenção' | 'Atrasado' | 'Concluído';
 
@@ -199,59 +199,12 @@ export const getScheduleStatus = (item: ScheduledChecklistItem): ScheduleStatus 
   return 'No prazo';
 };
 
-export const getScheduledChecklistForApartment = (apartment: Apartment): ScheduledChecklistItem[] => {
-  const scheduleItems = getChecklistItemsForFeature(apartment, 'cronograma');
-
-  if (typeof window === 'undefined') {
-    return scheduleItems;
-  }
-
-  try {
-    const storedValue = window.localStorage.getItem(getStorageKey(apartment.id));
-
-    if (!storedValue) {
-      return scheduleItems;
-    }
-
-    const storedItems = JSON.parse(storedValue) as Partial<ScheduledChecklistItem>[];
-    const storedItemsById = new Map(storedItems.map((item) => [item.id, item]));
-    const storedItemsByLabel = new Map(storedItems.map((item) => [item.label, item]));
-
-    return scheduleItems.map((item) => {
-      const storedItem = storedItemsById.get(item.id) ?? storedItemsByLabel.get(item.label);
-
-      return {
-        ...item,
-        state:
-          storedItem?.state === 'ok' ||
-          storedItem?.state === 'pending' ||
-          storedItem?.state === 'partial' ||
-          storedItem?.state === 'notApplicable'
-            ? storedItem.state
-            : item.state,
-        comment: typeof storedItem?.comment === 'string' ? storedItem.comment : item.comment,
-        plannedStart:
-          typeof storedItem?.plannedStart === 'string'
-            ? normalizeDateForDisplay(storedItem.plannedStart)
-            : undefined,
-        plannedEnd:
-          typeof storedItem?.plannedEnd === 'string'
-            ? normalizeDateForDisplay(storedItem.plannedEnd)
-            : undefined,
-        actualStart:
-          typeof storedItem?.actualStart === 'string'
-            ? normalizeDateForDisplay(storedItem.actualStart)
-            : undefined,
-        actualEnd:
-          typeof storedItem?.actualEnd === 'string'
-            ? normalizeDateForDisplay(storedItem.actualEnd)
-            : undefined,
-      };
-    });
-  } catch {
-    return scheduleItems;
-  }
-};
+// Checklist state and schedule dates are now loaded from Supabase into apartment.checklist.
+// checklist_items rows include planned/actual dates, so we just filter and cast.
+export const getScheduledChecklistForApartment = (apartment: Apartment): ScheduledChecklistItem[] =>
+  (apartment.checklist as ScheduledChecklistItem[]).filter((item) =>
+    isServiceActiveForFeature(item.label, 'cronograma'),
+  );
 
 export const getScheduleRows = (checklist: ScheduledChecklistItem[]): ScheduleRow[] =>
   checklist.map((item) => ({

@@ -1,21 +1,23 @@
-import { Link } from 'expo-router';
+﻿import { Link } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { useCallback, useMemo, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native'
+import { Text } from '@/src/ui/Text';
 
-import { getInspectionPhotosFromStorage, getInspectionPhotoStorageKey } from '@/src/data/localInspectionPhotos';
-import { getInspectionVisitsFromStorage, getInspectionVisitStorageKey } from '@/src/data/localInspectionVisits';
+import type { InspectionPhoto } from '@/src/data/localInspectionPhotos';
+import type { InspectionVisit } from '@/src/data/localInspectionVisits';
 import type { Measurement, MeasurementStatus } from '@/src/data/localMeasurements';
-import { formatCurrency, loadAllMeasurements, measurementStatusOptions, parseBrDateForMeasurement } from '@/src/data/localMeasurements';
+import { formatCurrency, measurementStatusOptions, parseBrDateForMeasurement } from '@/src/data/localMeasurements';
 import type { Apartment, ApartmentStatus, ChecklistItem } from '@/src/data/mockObras';
-import { apartments, getApartmentById, getTowerById, project, towers } from '@/src/data/mockObras';
+import { useObras } from '@/src/data/ObrasContext';
+import * as db from '@/src/data/db';
 import { consolidatedReportHeader } from '@/src/data/reportExports';
 import { getScheduleRows, getScheduledChecklistForApartment } from '@/src/data/schedule';
 import { getBlockedServiceGroups } from '@/src/data/serviceBlockers';
 import { isCriticalStageForStatus } from '@/src/data/serviceStages';
 import { statusConfig } from '@/src/ui/status';
 
-type IssueCriticality = 'Baixa' | 'Média' | 'Alta' | 'Crítica';
+type IssueCriticality = 'Baixa' | 'MÃ©dia' | 'Alta' | 'CrÃ­tica';
 type StoredChecklistItem = ChecklistItem & {
   issueComment?: string;
   issueCriticality?: IssueCriticality;
@@ -99,14 +101,14 @@ type VisitReportRow = {
 
 const getVisitVariationLabel = (variation: number) => {
   if (variation > 0) {
-    return `Evolução: +${variation} p.p.`;
+    return `EvoluÃ§Ã£o: +${variation} p.p.`;
   }
 
   if (variation < 0) {
-    return `Regressão: ${variation} p.p.`;
+    return `RegressÃ£o: ${variation} p.p.`;
   }
 
-  return 'Sem variação: 0 p.p.';
+  return 'Sem variaÃ§Ã£o: 0 p.p.';
 };
 
 const allFilter = 'Todos';
@@ -141,8 +143,8 @@ const downloadCsv = (fileName: string, header: string[], rows: (string | number)
   URL.revokeObjectURL(url);
 };
 
-const emptyValue = 'não informado';
-const emptyBlockValue = 'não bloqueado';
+const emptyValue = 'nÃ£o informado';
+const emptyBlockValue = 'nÃ£o bloqueado';
 
 const calculateProgress = (checklist: ChecklistItem[]) => {
   const score = checklist.reduce((total, item) => {
@@ -210,13 +212,17 @@ const isInPeriod = (value: string, periodStart: string, periodEnd: string) => {
   return (!start || date.getTime() >= start.getTime()) && (!end || date.getTime() <= end.getTime());
 };
 
-const getTowerLabel = (towerId: string) => {
-  const tower = getTowerById(towerId);
-  return tower ? `${tower.name} / ${tower.block} / ${tower.position}` : towerId;
-};
-
 export default function GeneralReportScreen() {
+  const { apartments, towers, project, getApartmentById } = useObras();
   const [refreshToken, setRefreshToken] = useState(0);
+  const [allMeasurements, setAllMeasurements] = useState<Measurement[]>([]);
+  const [visitsByApt, setVisitsByApt] = useState<Record<string, InspectionVisit[]>>({});
+  const [photosByApt, setPhotosByApt] = useState<Record<string, InspectionPhoto[]>>({});
+
+  const getTowerLabel = (towerId: string) => {
+    const tower = towers.find((t) => t.id === towerId);
+    return tower ? `${tower.name} / ${tower.block} / ${tower.position}` : towerId;
+  };
   const [towerFilter, setTowerFilter] = useState(allFilter);
   const [apartmentFilter, setApartmentFilter] = useState('');
   const [serviceFilter, setServiceFilter] = useState('');
@@ -238,23 +244,38 @@ export default function GeneralReportScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      setRefreshToken((current) => current + 1);
-    }, []),
+      const load = async () => {
+        const measurements = await db.loadAllMeasurements();
+        setAllMeasurements(measurements);
+
+        const visitEntries = await Promise.all(
+          apartments.map(async (apt) => [apt.id, await db.loadVisits(apt.id)] as const),
+        );
+        setVisitsByApt(Object.fromEntries(visitEntries));
+
+        const photoEntries = await Promise.all(
+          apartments.map(async (apt) => [apt.id, await db.loadPhotos(apt.id)] as const),
+        );
+        setPhotosByApt(Object.fromEntries(photoEntries));
+
+        setRefreshToken((current) => current + 1);
+      };
+      load();
+    }, [apartments]),
   );
 
   const reportData = useMemo(() => {
     void refreshToken;
 
-    const measurements: MeasurementReportRow[] = loadAllMeasurements(apartments.map((apartment) => apartment.id))
-      .map((measurement) => {
-        const apartment = getApartmentById(measurement.apartmentId);
-        return {
-          ...measurement,
-          apartmentNumber: apartment?.number ?? measurement.apartmentId.replace('ap-', ''),
-          towerId: measurement.towerId ?? apartment?.towerId ?? '',
-          towerLabel: getTowerLabel(measurement.towerId ?? apartment?.towerId ?? ''),
-        };
-      });
+    const measurements: MeasurementReportRow[] = allMeasurements.map((measurement) => {
+      const apartment = getApartmentById(measurement.apartmentId);
+      return {
+        ...measurement,
+        apartmentNumber: apartment?.number ?? measurement.apartmentId.replace('ap-', ''),
+        towerId: measurement.towerId ?? apartment?.towerId ?? '',
+        towerLabel: getTowerLabel(measurement.towerId ?? apartment?.towerId ?? ''),
+      };
+    });
 
     const apartmentRows: ApartmentReportRow[] = apartments.map((apartment) => {
       const checklist = getStoredChecklist(apartment);
@@ -262,7 +283,7 @@ export default function GeneralReportScreen() {
       const status = calculateStatus(checklist, progress);
       const blockedGroups = getBlockedServiceGroups(checklist);
       const scheduleRows = getScheduleRows(checklist);
-      const visits = getInspectionVisitsFromStorage(getInspectionVisitStorageKey(apartment.id));
+      const visits = visitsByApt[apartment.id] ?? [];
       const latestVisit = [...visits].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0];
 
       return {
@@ -281,7 +302,7 @@ export default function GeneralReportScreen() {
 
     const pendingRows: PendingReportRow[] = apartments.flatMap((apartment) => {
       const checklist = getStoredChecklist(apartment);
-      const photos = getInspectionPhotosFromStorage(getInspectionPhotoStorageKey(apartment.id));
+      const photos = photosByApt[apartment.id] ?? [];
 
       return checklist
         .filter((item) => item.state === 'pending' || item.state === 'partial')
@@ -291,10 +312,10 @@ export default function GeneralReportScreen() {
           towerId: apartment.towerId,
           towerLabel: getTowerLabel(apartment.towerId),
           service: item.label,
-          description: item.issueComment || item.comment || 'Pendência de vistoria',
+          description: item.issueComment || item.comment || 'PendÃªncia de vistoria',
           status: item.state === 'pending' ? 'Pendente' : 'Parcial',
-          criticality: item.issueCriticality ?? 'Média',
-          blocksServices: (getBlockedServiceGroups([item])[0]?.blockedServices ?? []).join(', ') || 'não trava',
+          criticality: item.issueCriticality ?? 'MÃ©dia',
+          blocksServices: (getBlockedServiceGroups([item])[0]?.blockedServices ?? []).join(', ') || 'nÃ£o trava',
           photoCount: photos.filter((photo) => photo.itemId === item.id || photo.serviceId === item.id).length,
           createdAt: 'localStorage',
         }));
@@ -312,9 +333,9 @@ export default function GeneralReportScreen() {
         impactedServices: group.blockedServices.join(', '),
         blockType: group.currentStatus,
         scheduleImpact: group.impact === 'Crítico' || group.impact === 'Alto' ? 'Alto impacto' : 'Em risco',
-        releaseImpact: group.blockedServices.some((service) => service.includes('entrega') || service.includes('liberação'))
-          ? 'Impacta liberação'
-          : 'Não impacta liberação final',
+        releaseImpact: group.blockedServices.some((service) => service.includes('entrega') || service.includes('liberaÃ§Ã£o'))
+          ? 'Impacta liberaÃ§Ã£o'
+          : 'NÃ£o impacta liberaÃ§Ã£o final',
         apartmentStatus: apartmentRow?.status ?? apartment.status,
       }));
     });
@@ -337,12 +358,12 @@ export default function GeneralReportScreen() {
             ? row.blockedServices.join(', ')
             : getBlockedServiceGroups(getStoredChecklist(apartment)).find((group) =>
                 group.blockedServices.includes(row.service),
-              )?.pendingService ?? 'não bloqueado',
+              )?.pendingService ?? 'nÃ£o bloqueado',
       })),
     );
 
     const visitRows: VisitReportRow[] = apartments.flatMap((apartment) =>
-      getInspectionVisitsFromStorage(getInspectionVisitStorageKey(apartment.id)).map((visit) => ({
+      (visitsByApt[apartment.id] ?? []).map((visit) => ({
         apartmentId: apartment.id,
         apartmentNumber: apartment.number,
         towerId: apartment.towerId,
@@ -359,7 +380,7 @@ export default function GeneralReportScreen() {
     );
 
     return { apartmentRows, blockedRows, measurements, pendingRows, scheduleRows, visitRows };
-  }, [refreshToken]);
+  }, [refreshToken, apartments, towers, allMeasurements, visitsByApt, photosByApt, getApartmentById, getTowerLabel]);
 
   const filterCommon = <T extends { apartmentNumber: string; service?: string; status?: string; towerId: string }>(row: T) => {
     const matchesTower = towerFilter === allFilter || row.towerId === towerFilter;
@@ -501,7 +522,7 @@ export default function GeneralReportScreen() {
         row.unitPrice,
         row.totalValue,
         row.status,
-        row.responsible ?? 'Usuário local',
+        row.responsible ?? 'UsuÃ¡rio local',
         row.launchedAt ?? '',
         row.approvedAt ?? '',
       ]),
@@ -566,7 +587,7 @@ export default function GeneralReportScreen() {
           emptyValue,
           emptyValue,
           row.lastVisit,
-          `serviços travados ${row.blockedCount}`,
+          `serviÃ§os travados ${row.blockedCount}`,
         ]),
         ...pendingRows.map((row) => [
           'pendencia',
@@ -700,8 +721,8 @@ export default function GeneralReportScreen() {
     <ScrollView contentContainerStyle={styles.container}>
       <View style={styles.header}>
         <View>
-          <Text style={styles.title}>Relatórios</Text>
-          <Text style={styles.subtitle}>Obra, vistoria, pendências, travas, cronograma, medições e visitas.</Text>
+          <Text style={styles.title}>RelatÃ³rios</Text>
+          <Text style={styles.subtitle}>Obra, vistoria, pendÃªncias, travas, cronograma, mediÃ§Ãµes e visitas.</Text>
           <Text style={styles.powerBiNote}>
             Os arquivos CSV exportados seguem estrutura padronizada para uso futuro em Power BI.
           </Text>
@@ -713,7 +734,7 @@ export default function GeneralReportScreen() {
           <Pressable disabled style={[styles.primaryButton, styles.disabledButton]}>
             <Text style={styles.disabledButtonText}>Exportar Excel</Text>
           </Pressable>
-          <Text style={styles.xlsxNote}>Exportação Excel será habilitada na próxima versão. Use CSV por enquanto.</Text>
+          <Text style={styles.xlsxNote}>ExportaÃ§Ã£o Excel serÃ¡ habilitada na prÃ³xima versÃ£o. Use CSV por enquanto.</Text>
         </View>
       </View>
 
@@ -731,12 +752,12 @@ export default function GeneralReportScreen() {
         </View>
         <View style={styles.inputGrid}>
           <TextInput style={styles.input} placeholder="Apartamento" placeholderTextColor="#94A3B8" value={apartmentFilter} onChangeText={setApartmentFilter} />
-          <TextInput style={styles.input} placeholder="Serviço" placeholderTextColor="#94A3B8" value={serviceFilter} onChangeText={setServiceFilter} />
+          <TextInput style={styles.input} placeholder="ServiÃ§o" placeholderTextColor="#94A3B8" value={serviceFilter} onChangeText={setServiceFilter} />
           <TextInput style={styles.input} placeholder="Empreiteiro" placeholderTextColor="#94A3B8" value={contractorFilter} onChangeText={setContractorFilter} />
           <TextInput style={styles.input} placeholder="Status" placeholderTextColor="#94A3B8" value={statusFilter} onChangeText={setStatusFilter} />
           <TextInput style={styles.input} placeholder="Criticidade" placeholderTextColor="#94A3B8" value={criticalityFilter} onChangeText={setCriticalityFilter} />
-          <TextInput style={styles.input} placeholder="Período início DD/MM/AAAA" placeholderTextColor="#94A3B8" value={periodStartFilter} onChangeText={setPeriodStartFilter} />
-          <TextInput style={styles.input} placeholder="Período fim DD/MM/AAAA" placeholderTextColor="#94A3B8" value={periodEndFilter} onChangeText={setPeriodEndFilter} />
+          <TextInput style={styles.input} placeholder="PerÃ­odo inÃ­cio DD/MM/AAAA" placeholderTextColor="#94A3B8" value={periodStartFilter} onChangeText={setPeriodStartFilter} />
+          <TextInput style={styles.input} placeholder="PerÃ­odo fim DD/MM/AAAA" placeholderTextColor="#94A3B8" value={periodEndFilter} onChangeText={setPeriodEndFilter} />
         </View>
         <Pressable onPress={clearFilters} style={styles.secondaryButton}>
           <Text style={styles.secondaryButtonText}>Limpar filtros</Text>
@@ -750,11 +771,11 @@ export default function GeneralReportScreen() {
           <SummaryCard label="total de apartamentos" value={apartmentRows.length} />
           <SummaryCard label="apartamentos excelentes" value={statusCounts.excellent} />
           <SummaryCard label="apartamentos bons" value={statusCounts.good} />
-          <SummaryCard label="apartamentos em atenção" value={statusCounts.attention} />
-          <SummaryCard label="apartamentos críticos" value={statusCounts.critical} />
-          <SummaryCard label="pendências abertas" value={pendingRows.length} />
-          <SummaryCard label="serviços travados" value={blockedRows.length} />
-          <SummaryCard label="serviços atrasados" value={scheduleRows.filter((row) => row.delayDays > 0).length} />
+          <SummaryCard label="apartamentos em atenÃ§Ã£o" value={statusCounts.attention} />
+          <SummaryCard label="apartamentos crÃ­ticos" value={statusCounts.critical} />
+          <SummaryCard label="pendÃªncias abertas" value={pendingRows.length} />
+          <SummaryCard label="serviÃ§os travados" value={blockedRows.length} />
+          <SummaryCard label="serviÃ§os atrasados" value={scheduleRows.filter((row) => row.delayDays > 0).length} />
           <SummaryCard label="total medido" value={formatCurrency(totalMeasured)} />
           <SummaryCard label="total aprovado para pagamento" value={formatCurrency(totalApproved)} />
           <SummaryCard label="total pago externamente" value={formatCurrency(totalPaidExternally)} />
@@ -762,7 +783,7 @@ export default function GeneralReportScreen() {
       </View>
 
       <View style={styles.panel}>
-        <Text style={styles.sectionTitle}>Totais de medição</Text>
+        <Text style={styles.sectionTitle}>Totais de mediÃ§Ã£o</Text>
         <View style={styles.metricGrid}>
           {measurementStatusOptions.map((status) => (
             <Text key={status} style={styles.metric}>
@@ -772,16 +793,16 @@ export default function GeneralReportScreen() {
         </View>
       </View>
 
-      <ReportSection title="Relatório de apartamentos" onExport={exportApartments}>
+      <ReportSection title="RelatÃ³rio de apartamentos" onExport={exportApartments}>
         {apartmentRows.map((row) => (
           <RowCard key={row.apartment.id} apartmentId={row.apartment.id} title={`${row.towerLabel} / Apartamento ${row.apartment.number}`}>
             <Text style={styles.detailText}>Pavimento: {row.floor}</Text>
             <Text style={styles.detailText}>Status visual: {statusConfig[row.status].label}</Text>
             <Text style={styles.detailText}>Percentual vistoriado: {row.progress}%</Text>
-            <Text style={styles.detailText}>Pendências: {row.pendingCount}</Text>
-            <Text style={styles.detailText}>Serviços travados: {row.blockedCount}</Text>
+            <Text style={styles.detailText}>PendÃªncias: {row.pendingCount}</Text>
+            <Text style={styles.detailText}>ServiÃ§os travados: {row.blockedCount}</Text>
             <Text style={styles.detailText}>Dias de atraso: {row.maxDelayDays}</Text>
-            <Text style={styles.detailText}>Última visita: {row.lastVisit}</Text>
+            <Text style={styles.detailText}>Ãšltima visita: {row.lastVisit}</Text>
           </RowCard>
         ))}
       </ReportSection>
@@ -796,93 +817,93 @@ export default function GeneralReportScreen() {
         </View>
       </ReportSection>
 
-      <ReportSection title="Apartamentos críticos">
-        {criticalApartments.length === 0 ? <Text style={styles.emptyText}>Nenhum apartamento crítico nos filtros.</Text> : null}
+      <ReportSection title="Apartamentos crÃ­ticos">
+        {criticalApartments.length === 0 ? <Text style={styles.emptyText}>Nenhum apartamento crÃ­tico nos filtros.</Text> : null}
         {criticalApartments.map((row) => (
           <RowCard key={`critical-${row.apartment.id}`} apartmentId={row.apartment.id} title={`${row.towerLabel} / Apartamento ${row.apartment.number}`}>
-            <Text style={styles.detailText}>Pendências: {row.pendingCount}</Text>
-            <Text style={styles.detailText}>Serviços travados: {row.blockedCount}</Text>
+            <Text style={styles.detailText}>PendÃªncias: {row.pendingCount}</Text>
+            <Text style={styles.detailText}>ServiÃ§os travados: {row.blockedCount}</Text>
             <Text style={styles.detailText}>Maior atraso: {row.maxDelayDays} dia(s)</Text>
           </RowCard>
         ))}
       </ReportSection>
 
-      <ReportSection title="Relatório de pendências" onExport={exportPending}>
-        <GroupedCounter title="Pendências por torre" rows={pendingRows.map((row) => row.towerLabel)} />
-        <GroupedCounter title="Pendências por apartamento" rows={pendingRows.map((row) => `Apartamento ${row.apartmentNumber}`)} />
-        <GroupedCounter title="Pendências por serviço" rows={pendingRows.map((row) => row.service)} />
+      <ReportSection title="RelatÃ³rio de pendÃªncias" onExport={exportPending}>
+        <GroupedCounter title="PendÃªncias por torre" rows={pendingRows.map((row) => row.towerLabel)} />
+        <GroupedCounter title="PendÃªncias por apartamento" rows={pendingRows.map((row) => `Apartamento ${row.apartmentNumber}`)} />
+        <GroupedCounter title="PendÃªncias por serviÃ§o" rows={pendingRows.map((row) => row.service)} />
         {pendingRows.map((row) => (
           <RowCard key={`${row.apartmentId}-${row.service}`} apartmentId={row.apartmentId} title={`${row.towerLabel} / Apartamento ${row.apartmentNumber}`}>
-            <Text style={styles.detailText}>Serviço: {row.service}</Text>
-            <Text style={styles.detailText}>Descrição: {row.description}</Text>
+            <Text style={styles.detailText}>ServiÃ§o: {row.service}</Text>
+            <Text style={styles.detailText}>DescriÃ§Ã£o: {row.description}</Text>
             <Text style={styles.detailText}>Status: {row.status}</Text>
             <Text style={styles.detailText}>Criticidade: {row.criticality}</Text>
-            <Text style={styles.detailText}>Trava serviço: {row.blocksServices}</Text>
+            <Text style={styles.detailText}>Trava serviÃ§o: {row.blocksServices}</Text>
             <Text style={styles.detailText}>Fotos: {row.photoCount}</Text>
-            <Text style={styles.detailText}>Data de criação: {row.createdAt}</Text>
+            <Text style={styles.detailText}>Data de criaÃ§Ã£o: {row.createdAt}</Text>
           </RowCard>
         ))}
       </ReportSection>
 
-      <ReportSection title="Serviços travados" onExport={exportBlocked}>
+      <ReportSection title="ServiÃ§os travados" onExport={exportBlocked}>
         {blockedRows.map((row) => (
           <RowCard key={`${row.apartmentId}-${row.originService}`} apartmentId={row.apartmentId} title={`${row.towerLabel} / Apartamento ${row.apartmentNumber}`}>
-            <Text style={styles.detailText}>Serviço origem: {row.originService}</Text>
-            <Text style={styles.detailText}>Serviços impactados: {row.impactedServices}</Text>
+            <Text style={styles.detailText}>ServiÃ§o origem: {row.originService}</Text>
+            <Text style={styles.detailText}>ServiÃ§os impactados: {row.impactedServices}</Text>
             <Text style={styles.detailText}>Tipo de bloqueio: {row.blockType}</Text>
             <Text style={styles.detailText}>Impacto no cronograma: {row.scheduleImpact}</Text>
-            <Text style={styles.detailText}>Impacto na liberação: {row.releaseImpact}</Text>
+            <Text style={styles.detailText}>Impacto na liberaÃ§Ã£o: {row.releaseImpact}</Text>
             <Text style={styles.detailText}>Status do apartamento: {statusConfig[row.apartmentStatus].label}</Text>
           </RowCard>
         ))}
       </ReportSection>
 
-      <ReportSection title="Serviços atrasados / Cronograma" onExport={exportSchedule}>
+      <ReportSection title="ServiÃ§os atrasados / Cronograma" onExport={exportSchedule}>
         {scheduleRows.filter((row) => row.delayDays > 0).map((row) => (
           <RowCard key={`${row.apartmentId}-${row.service}`} apartmentId={row.apartmentId} title={`${row.towerLabel} / Apartamento ${row.apartmentNumber}`}>
-            <Text style={styles.detailText}>Serviço: {row.service}</Text>
-            <Text style={styles.detailText}>Início planejado: {row.plannedStart || 'sem data'}</Text>
+            <Text style={styles.detailText}>ServiÃ§o: {row.service}</Text>
+            <Text style={styles.detailText}>InÃ­cio planejado: {row.plannedStart || 'sem data'}</Text>
             <Text style={styles.detailText}>Fim planejado: {row.plannedEnd || 'sem data'}</Text>
-            <Text style={styles.detailText}>Início real: {row.actualStart || 'sem data'}</Text>
+            <Text style={styles.detailText}>InÃ­cio real: {row.actualStart || 'sem data'}</Text>
             <Text style={styles.detailText}>Fim real: {row.actualEnd || 'sem data'}</Text>
             <Text style={styles.detailText}>Status: {row.status}</Text>
             <Text style={styles.detailText}>Dias de atraso: {row.delayDays}</Text>
-            <Text style={styles.detailText}>Serviço bloqueado por: {row.blockedBy}</Text>
+            <Text style={styles.detailText}>ServiÃ§o bloqueado por: {row.blockedBy}</Text>
           </RowCard>
         ))}
       </ReportSection>
 
-      <ReportSection title="Relatório de medições" onExport={exportMeasurements}>
-        <GroupedCounter title="Medições por empreiteiro" rows={measurementRows.map((row) => row.contractor)} />
-        <GroupedCounter title="Medições por período" rows={measurementRows.map((row) => `${row.periodStart} até ${row.periodEnd}`)} />
-        <GroupedCounter title="Medições aprovadas para pagamento" rows={approvedMeasurements.map((row) => row.contractor)} />
+      <ReportSection title="RelatÃ³rio de mediÃ§Ãµes" onExport={exportMeasurements}>
+        <GroupedCounter title="MediÃ§Ãµes por empreiteiro" rows={measurementRows.map((row) => row.contractor)} />
+        <GroupedCounter title="MediÃ§Ãµes por perÃ­odo" rows={measurementRows.map((row) => `${row.periodStart} atÃ© ${row.periodEnd}`)} />
+        <GroupedCounter title="MediÃ§Ãµes aprovadas para pagamento" rows={approvedMeasurements.map((row) => row.contractor)} />
         {measurementRows.map((row) => (
           <RowCard key={row.id} title={`${row.towerLabel} / Apartamento ${row.apartmentNumber}`}>
-            <Text style={styles.detailText}>Serviço: {row.service}</Text>
+            <Text style={styles.detailText}>ServiÃ§o: {row.service}</Text>
             <Text style={styles.detailText}>Empreiteiro: {row.contractor}</Text>
-            <Text style={styles.detailText}>Período: {row.periodStart} até {row.periodEnd}</Text>
+            <Text style={styles.detailText}>PerÃ­odo: {row.periodStart} atÃ© {row.periodEnd}</Text>
             <Text style={styles.detailText}>Quantidade: {row.quantity} {row.unit}</Text>
-            <Text style={styles.detailText}>Valor unitário: {formatCurrency(row.unitPrice)}</Text>
+            <Text style={styles.detailText}>Valor unitÃ¡rio: {formatCurrency(row.unitPrice)}</Text>
             <Text style={styles.detailText}>Valor total: {formatCurrency(row.totalValue)}</Text>
             <Text style={styles.detailText}>Status: {row.status}</Text>
-            <Text style={styles.detailText}>Responsável: {row.responsible ?? 'Usuário local'}</Text>
-            <Text style={styles.detailText}>Data de lançamento: {row.launchedAt ? new Date(row.launchedAt).toLocaleString('pt-BR') : 'sem data'}</Text>
-            <Text style={styles.detailText}>Data de aprovação: {row.approvedAt ? new Date(row.approvedAt).toLocaleString('pt-BR') : 'não aprovada'}</Text>
+            <Text style={styles.detailText}>ResponsÃ¡vel: {row.responsible ?? 'UsuÃ¡rio local'}</Text>
+            <Text style={styles.detailText}>Data de lanÃ§amento: {row.launchedAt ? new Date(row.launchedAt).toLocaleString('pt-BR') : 'sem data'}</Text>
+            <Text style={styles.detailText}>Data de aprovaÃ§Ã£o: {row.approvedAt ? new Date(row.approvedAt).toLocaleString('pt-BR') : 'nÃ£o aprovada'}</Text>
           </RowCard>
         ))}
       </ReportSection>
 
-      <ReportSection title="Histórico de visitas" onExport={exportVisits}>
+      <ReportSection title="HistÃ³rico de visitas" onExport={exportVisits}>
         {visitRows.map((row) => (
           <RowCard key={`${row.apartmentId}-${row.date}`} title={`${row.towerLabel} / Apartamento ${row.apartmentNumber}`}>
             <Text style={styles.detailText}>Data: {row.date}</Text>
-            <Text style={styles.detailText}>Responsável: {row.responsible}</Text>
+            <Text style={styles.detailText}>ResponsÃ¡vel: {row.responsible}</Text>
             <Text style={styles.detailText}>Antes: {row.progressBefore}%</Text>
             <Text style={styles.detailText}>Depois: {row.progressAfter}%</Text>
             <Text style={styles.detailText}>{getVisitVariationLabel(row.evolution)}</Text>
-            <Text style={styles.detailText}>Status após visita: {row.statusAfter}</Text>
+            <Text style={styles.detailText}>Status apÃ³s visita: {row.statusAfter}</Text>
             <Text style={styles.detailText}>Fotos: {row.photosAdded}</Text>
-            <Text style={styles.detailText}>Pendências: {row.pendingCount}</Text>
+            <Text style={styles.detailText}>PendÃªncias: {row.pendingCount}</Text>
           </RowCard>
         ))}
       </ReportSection>
@@ -940,7 +961,7 @@ function RowCard({
           <Link
             asChild
             href={{
-              pathname: '/apartamentos/[apartamentoId]',
+              pathname: '/visao-geral/apartamentos/[apartamentoId]',
               params: { apartamentoId: apartmentId },
             }}>
             <Pressable style={styles.secondaryButton}>
@@ -1195,3 +1216,4 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
 });
+

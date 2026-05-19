@@ -127,53 +127,25 @@ const normalizeStage = (stage: Partial<ServiceStage>, index: number): ServiceSta
   };
 };
 
-export const getServiceStagesFromStorage = (): ServiceStage[] => {
-  if (typeof window === 'undefined') {
-    return defaultServiceStages;
-  }
-
-  try {
-    const storedValue = window.localStorage.getItem(serviceStagesStorageKey);
-
-    if (!storedValue) {
-      return defaultServiceStages;
-    }
-
-    const storedStages = JSON.parse(storedValue) as Partial<ServiceStage>[];
-    const normalizedStages = storedStages
-      .map(normalizeStage)
-      .filter((stage): stage is ServiceStage => Boolean(stage));
-
-    return normalizedStages.length ? normalizedStages.sort((first, second) => first.ordemExecucao - second.ordemExecucao) : defaultServiceStages;
-  } catch {
-    return defaultServiceStages;
-  }
-};
+// These sync shims are kept for backward compat with non-async callers (diagnostics.ts).
+// Real loading/saving goes through src/data/db.ts (loadServiceStages / saveServiceStages).
+export const getServiceStagesFromStorage = (): ServiceStage[] => defaultServiceStages;
+export const saveServiceStagesToStorage = (_stages: ServiceStage[]) => {};
 
 const sortStagesByExecution = (stages: ServiceStage[]) =>
-  [...stages].sort((first, second) => first.ordemExecucao - second.ordemExecucao);
+  [...stages].sort((a, b) => a.ordemExecucao - b.ordemExecucao);
 
-export const getEtapasConfiguradas = () =>
-  sortStagesByExecution(getServiceStagesFromStorage());
-
-export const getEtapasAtivas = () =>
-  getEtapasConfiguradas().filter((stage) => stage.ativo);
-
-export const getEtapasChecklist = () =>
-  getEtapasAtivas().filter((stage) => stage.apareceNoChecklist);
-
-export const getEtapasMedicao = () =>
-  getEtapasAtivas().filter((stage) => stage.apareceNaMedicao);
-
-export const getEtapasCronograma = () =>
-  getEtapasAtivas().filter((stage) => stage.apareceNoCronograma);
+export const getEtapasConfiguradas = () => sortStagesByExecution(getServiceStagesFromStorage());
+export const getEtapasAtivas = () => getEtapasConfiguradas().filter((s) => s.ativo);
+export const getEtapasChecklist = () => getEtapasAtivas().filter((s) => s.apareceNoChecklist);
+export const getEtapasMedicao = () => getEtapasAtivas().filter((s) => s.apareceNaMedicao);
+export const getEtapasCronograma = () => getEtapasAtivas().filter((s) => s.apareceNoCronograma);
 
 export const getServiceStageByName = (serviceName: string) =>
-  getServiceStagesFromStorage().find((stage) => stage.nome === serviceName);
+  getServiceStagesFromStorage().find((s) => s.nome === serviceName);
 
 export const isCriticalStageForStatus = (serviceName: string) => {
   const stage = getServiceStageByName(serviceName);
-
   return Boolean(stage?.ativo && (stage.etapaCritica || stage.travaLiberacao));
 };
 
@@ -195,16 +167,7 @@ export const getChecklistItemsForFeature = (
         ? getEtapasCronograma()
         : getEtapasMedicao();
   const apartmentItemsByLabel = new Map(apartment.checklist.map((item) => [item.label, item]));
-
   return stages.map((stage) => apartmentItemsByLabel.get(stage.nome) ?? createChecklistItemFromStage(stage));
-};
-
-export const saveServiceStagesToStorage = (stages: ServiceStage[]) => {
-  if (typeof window === 'undefined') {
-    return;
-  }
-
-  window.localStorage.setItem(serviceStagesStorageKey, JSON.stringify(stages));
 };
 
 export const createEmptyServiceStage = (order: number): ServiceStage => ({
@@ -225,19 +188,8 @@ export const createEmptyServiceStage = (order: number): ServiceStage => ({
 
 export const getServiceDependencyMap = () =>
   getServiceStagesFromStorage().reduce<Record<string, string[]>>((dependencies, stage) => {
-    if (!stage.ativo) {
-      delete dependencies[stage.nome];
-      return dependencies;
-    }
-
-    const dependents = [...stage.servicosDependentes];
-
-    if (stage.travaLiberacao && !dependents.includes('liberação do apartamento')) {
-      dependents.push('liberação do apartamento');
-    }
-
-    if (dependents.length > 0) {
-      dependencies[stage.nome] = dependents;
+    if (stage.ativo && stage.servicosDependentes.length > 0) {
+      dependencies[stage.nome] = stage.servicosDependentes;
     }
 
     return dependencies;

@@ -160,7 +160,6 @@ export const apartments: Apartment[] = [
 export const project = {
   id: 'residencial-cagliari',
   name: 'Residencial Cagliari',
-  address: 'Obra residencial multifamiliar',
   summary: 'MVP para vistoria e acompanhamento visual de apartamentos.',
 };
 
