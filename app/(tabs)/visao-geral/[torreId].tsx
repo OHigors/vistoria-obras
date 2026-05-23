@@ -1,6 +1,7 @@
 import { Link, useLocalSearchParams, useRouter } from 'expo-router';
 import { useMemo, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native'
+import { Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Text } from '@/src/ui/Text';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
@@ -81,7 +82,8 @@ const STATUS_FILTER_MAP: Record<FilterOption, (s: ApartmentSummary) => boolean> 
 export default function TowerApartmentsScreen() {
   const { torreId } = useLocalSearchParams<{ torreId: string }>();
   const router = useRouter();
-  const { getTowerById, getApartmentsByTower } = useObras();
+  const insets = useSafeAreaInsets();
+  const { getTowerById, getApartmentsByTower, loading } = useObras();
   const tower = getTowerById(torreId);
   const towerApartments = getApartmentsByTower(torreId);
   const [viewMode, setViewMode] = useState<ViewMode>('Lista');
@@ -143,20 +145,31 @@ export default function TowerApartmentsScreen() {
     return { avgProgress, criticalCount, totalPending, totalBlocked };
   }, [apartmentSummaries]);
 
+  const backBar = (
+    <View style={[s.backBar, { paddingTop: insets.top + 8 }]}>
+      <Pressable onPress={() => router.push('/(tabs)/visao-geral' as any)} style={s.backBtn}>
+        <MaterialCommunityIcons name="chevron-left" size={26} color="#0F172A" />
+        <Text style={s.backBtnText}>Visão Geral</Text>
+      </Pressable>
+    </View>
+  );
+
   if (!tower) {
     return (
-      <View style={s.empty}>
-        <MaterialCommunityIcons name="office-building-remove-outline" size={48} color="#CBD5E1" />
-        <Text style={s.emptyTitle}>Torre não encontrada</Text>
-        <Link href="/visao-geral" asChild>
-          <Pressable style={s.emptyBtn}><Text style={s.emptyBtnText}>Voltar</Text></Pressable>
-        </Link>
+      <View style={s.emptyWrap}>
+        {backBar}
+        <View style={s.empty}>
+          <MaterialCommunityIcons name={loading ? 'progress-clock' : 'office-building-remove-outline'} size={48} color="#CBD5E1" />
+          <Text style={s.emptyTitle}>{loading ? 'Carregando torre…' : 'Torre não encontrada'}</Text>
+        </View>
       </View>
     );
   }
 
   return (
-    <ScrollView contentContainerStyle={s.container} showsVerticalScrollIndicator={false}>
+    <>
+      <ScrollView contentContainerStyle={[s.container, { paddingTop: insets.top + 8 }]} showsVerticalScrollIndicator={false}>
+        {backBar}
 
       {/* HEADER */}
       <View style={s.header}>
@@ -378,13 +391,20 @@ export default function TowerApartmentsScreen() {
       )}
 
     </ScrollView>
+    </>
   );
 }
 
 const s = StyleSheet.create({
-  container: { gap: 12, paddingBottom: 32, paddingTop: 4 },
+  container: { gap: 12, paddingBottom: 32 },
+
+  // back bar
+  backBar: { paddingHorizontal: 8, paddingBottom: 4, backgroundColor: '#F8FAFC' },
+  backBtn: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', gap: 2, paddingVertical: 6, paddingHorizontal: 4 },
+  backBtnText: { color: '#0F172A', fontSize: 15, fontWeight: '600' },
 
   // empty
+  emptyWrap: { flex: 1, backgroundColor: '#F8FAFC' },
   empty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12, padding: 32 },
   emptyTitle: { color: '#0F172A', fontSize: 18, fontWeight: '700' },
   emptyBtn: { backgroundColor: '#2563EB', borderRadius: 10, paddingHorizontal: 20, paddingVertical: 10 },

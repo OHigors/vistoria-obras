@@ -36,6 +36,9 @@ expo-web*.log
 .env.*
 .env*.local
 
+# local db backups
+/backups/
+
 # typescript
 *.tsbuildinfo
 

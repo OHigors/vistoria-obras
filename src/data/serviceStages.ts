@@ -15,6 +15,8 @@ export type ServiceStage = {
   ativo: boolean;
   servicosDependentes: string[];
   observacao: string;
+  dataInicio: string;
+  dataFim: string;
 };
 
 export const serviceStagesStorageKey = 'config-etapas-servicos-obra';
@@ -98,6 +100,8 @@ const createStage = (name: string, index: number): ServiceStage => ({
   ativo: true,
   servicosDependentes: defaultServiceDependencies[name] ?? [],
   observacao: '',
+  dataInicio: '',
+  dataFim: '',
 });
 
 export const defaultServiceStages: ServiceStage[] = [
@@ -124,6 +128,8 @@ const normalizeStage = (stage: Partial<ServiceStage>, index: number): ServiceSta
     ativo: stage.ativo !== false,
     servicosDependentes: Array.isArray(stage.servicosDependentes) ? stage.servicosDependentes : [],
     observacao: typeof stage.observacao === 'string' ? stage.observacao : '',
+    dataInicio: typeof stage.dataInicio === 'string' ? stage.dataInicio : '',
+    dataFim: typeof stage.dataFim === 'string' ? stage.dataFim : '',
   };
 };
 
@@ -184,6 +190,8 @@ export const createEmptyServiceStage = (order: number): ServiceStage => ({
   ativo: true,
   servicosDependentes: [],
   observacao: '',
+  dataInicio: '',
+  dataFim: '',
 });
 
 export const getServiceDependencyMap = () =>

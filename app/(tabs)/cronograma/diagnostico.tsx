@@ -1,6 +1,9 @@
+import { useRouter } from 'expo-router';
 import { useMemo, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, View } from 'react-native'
+import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Text } from '@/src/ui/Text';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import type { DiagnosticReport, DiagnosticStatus } from '@/src/data/diagnostics';
 import { createDiagnosticText, runMvpDiagnostics } from '@/src/data/diagnostics';
@@ -12,6 +15,8 @@ const statusStyle: Record<DiagnosticStatus, { background: string; color: string 
 };
 
 export default function DiagnosticsScreen() {
+  const router = useRouter();
+  const insets = useSafeAreaInsets();
   const [report, setReport] = useState<DiagnosticReport>(() => runMvpDiagnostics());
   const [copyMessage, setCopyMessage] = useState('');
   const reportText = useMemo(() => createDiagnosticText(report), [report]);
@@ -36,7 +41,14 @@ export default function DiagnosticsScreen() {
   };
 
   return (
-    <ScrollView contentContainerStyle={styles.container}>
+    <>
+      <View style={[styles.backBar, { paddingTop: insets.top + 8 }]}>
+        <Pressable onPress={() => router.push('/(tabs)/cronograma' as any)} style={styles.backBtn}>
+          <MaterialCommunityIcons name="chevron-left" size={26} color="#0F172A" />
+          <Text style={styles.backBtnText}>Cronograma</Text>
+        </Pressable>
+      </View>
+      <ScrollView contentContainerStyle={styles.container}>
       <View style={styles.header}>
         <View>
           <Text style={styles.title}>Diagnóstico do MVP</Text>
@@ -124,11 +136,15 @@ export default function DiagnosticsScreen() {
           );
         })}
       </View>
-    </ScrollView>
+      </ScrollView>
+    </>
   );
 }
 
 const styles = StyleSheet.create({
+  backBar: { paddingHorizontal: 8, paddingBottom: 4, backgroundColor: '#F8FAFC' },
+  backBtn: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', gap: 2, paddingVertical: 6, paddingHorizontal: 4 },
+  backBtnText: { color: '#0F172A', fontSize: 15, fontWeight: '600' },
   container: {
     gap: 14,
     padding: 20,

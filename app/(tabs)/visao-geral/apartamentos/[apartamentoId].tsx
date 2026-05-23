@@ -1,6 +1,6 @@
-import { useLocalSearchParams } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Image, Modal, Platform, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native'
 import { Text } from '@/src/ui/Text';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
@@ -102,10 +102,15 @@ const calculateApartmentStatus = (items: EditableChecklistItem[], progress: numb
 
 export default function ApartmentDetailScreen() {
   const { apartamentoId } = useLocalSearchParams<{ apartamentoId: string }>();
+  const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { getApartmentById, getTowerById, updateApartmentLocal, project } = useObras();
+  const { getApartmentById, getTowerById, updateApartmentLocal, project, loading } = useObras();
   const apartment = getApartmentById(apartamentoId);
   const tower = apartment ? getTowerById(apartment.towerId) : undefined;
+
+  const goBackToTower = useCallback(() => {
+    router.push(apartment ? `/(tabs)/visao-geral/${apartment.towerId}` as any : '/(tabs)/visao-geral' as any);
+  }, [router, apartment?.towerId]);
 
   const initialChecklist = useMemo(() => getInitialChecklist(apartment?.checklist), [apartment?.checklist]);
   const [checklist, setChecklist] = useState<EditableChecklistItem[]>(initialChecklist);
@@ -134,9 +139,15 @@ export default function ApartmentDetailScreen() {
 
   if (!apartment || !tower) {
     return (
-      <View style={s.empty}>
-        <MaterialCommunityIcons name="home-alert-outline" size={48} color="#CBD5E1" />
-        <Text style={s.emptyTitle}>Apartamento não encontrado</Text>
+      <View style={[s.empty, { paddingTop: insets.top + 16 }]}>
+        <Pressable onPress={goBackToTower} style={s.emptyBack}>
+          <MaterialCommunityIcons name="chevron-left" size={28} color="#0F172A" />
+          <Text style={s.emptyBackText}>Voltar</Text>
+        </Pressable>
+        <View style={s.emptyCenter}>
+          <MaterialCommunityIcons name={loading ? 'progress-clock' : 'home-alert-outline'} size={48} color="#CBD5E1" />
+          <Text style={s.emptyTitle}>{loading ? 'Carregando apartamento…' : 'Apartamento não encontrado'}</Text>
+        </View>
       </View>
     );
   }
@@ -282,31 +293,48 @@ export default function ApartmentDetailScreen() {
 
     if (result.canceled || !result.assets?.[0]) return;
     const asset = result.assets[0];
-    const uri = Platform.OS === 'web' ? `data:image/jpeg;base64,${asset.base64}` : asset.uri;
+    const localUri = Platform.OS === 'web' ? `data:image/jpeg;base64,${asset.base64}` : asset.uri;
     const createdAt = new Date().toISOString();
+    const fileName = asset.fileName ?? `foto-${Date.now()}.jpg`;
 
     if (photoPickerTarget.forMeasurement) {
-      updateMeasurementDraft(photoPickerTarget.itemId, 'evidenceUri', uri);
-      updateMeasurementDraft(photoPickerTarget.itemId, 'evidenceFileName', asset.fileName ?? `foto-${Date.now()}.jpg`);
+      updateMeasurementDraft(photoPickerTarget.itemId, 'evidenceUri', localUri);
+      updateMeasurementDraft(photoPickerTarget.itemId, 'evidenceFileName', fileName);
       return;
     }
 
     const item = checklist.find((i) => i.id === photoPickerTarget.itemId);
     if (!item) return;
     const photoId = `${apartment.id}-${item.id}-${Date.now()}`;
-    const newPhoto = {
+    const storagePath = `${apartment.id}/${item.id}/${photoId}.jpg`;
+
+    // Optimistic insert with the local URI so the thumb shows immediately.
+    const optimisticPhoto = {
       id: photoId, towerId: tower.id, apartmentId: apartment.id,
       itemId: item.id, serviceId: item.id, service: item.label,
-      uri, fileName: asset.fileName ?? `foto-${Date.now()}.jpg`,
+      uri: localUri, storagePath: '', fileName,
       createdAt, dataHora: createdAt,
       comment: '', comentarioFoto: '', visitId: openVisit?.id,
     };
-    dbApi.savePhoto(newPhoto);
     setPhotos((cur) => {
-      const next = [...cur, newPhoto];
+      const next = [...cur, optimisticPhoto];
       registerVisitUpdate({ addedPhotoId: photoId, changedItemId: item.id, nextChecklist: checklist, nextPhotos: next, progressBeforeFallback: progress });
       return next;
     });
+
+    // Upload to Storage, then persist the row pointing at the storage path.
+    (async () => {
+      try {
+        await dbApi.uploadInspectionPhoto(localUri, storagePath, asset.mimeType ?? 'image/jpeg');
+        const publicUrl = dbApi.getInspectionPhotoUrl(storagePath);
+        const persisted = { ...optimisticPhoto, uri: publicUrl, storagePath };
+        await dbApi.savePhoto(persisted);
+        setPhotos((cur) => cur.map((p) => (p.id === photoId ? persisted : p)));
+      } catch (err) {
+        console.error('Failed to upload inspection photo', err);
+        setPhotos((cur) => cur.filter((p) => p.id !== photoId));
+      }
+    })();
   };
 
   const updatePhotoComment = (photoId: string, comment: string) => {
@@ -321,9 +349,9 @@ export default function ApartmentDetailScreen() {
   };
 
   const removePhoto = (photoId: string) => {
-    dbApi.deletePhoto(photoId);
     setPhotos((cur) => {
       const target = cur.find((p) => p.id === photoId);
+      dbApi.deletePhoto(photoId, target?.storagePath);
       const next = cur.filter((p) => p.id !== photoId);
       registerVisitUpdate({ changedItemId: target?.serviceId, nextChecklist: checklist, nextPhotos: next, progressBeforeFallback: progress });
       return next;
@@ -455,7 +483,11 @@ export default function ApartmentDetailScreen() {
       <ScrollView contentContainerStyle={s.container} showsVerticalScrollIndicator={false}>
 
         {/* STATUS HEADER */}
-        <View style={[s.header, { backgroundColor: status.color, paddingTop: insets.top + 44 }]}>
+        <View style={[s.header, { backgroundColor: status.color, paddingTop: insets.top + 12 }]}>
+          <Pressable onPress={goBackToTower} style={s.headerBack}>
+            <MaterialCommunityIcons name="chevron-left" size={26} color="rgba(255,255,255,0.9)" />
+            <Text style={s.headerBackText}>{tower.name}</Text>
+          </Pressable>
           <View style={s.headerRow}>
             <View style={s.headerInfo}>
               <Text style={s.headerKicker}>{tower.name} · {tower.block} · {apartment.floor}</Text>
@@ -1216,11 +1248,16 @@ export default function ApartmentDetailScreen() {
 const s = StyleSheet.create({
   // layout
   container: { gap: 12, paddingBottom: 40 },
-  empty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12, padding: 32 },
+  empty: { flex: 1, backgroundColor: '#F8FAFC', padding: 16 },
+  emptyBack: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', gap: 2, paddingVertical: 8, paddingRight: 12 },
+  emptyBackText: { color: '#0F172A', fontSize: 15, fontWeight: '600' },
+  emptyCenter: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
   emptyTitle: { color: '#0F172A', fontSize: 18, fontWeight: '700' },
 
   // header
-  header: { paddingHorizontal: 20, paddingBottom: 20, gap: 14 },
+  header: { paddingHorizontal: 20, paddingBottom: 20, gap: 10 },
+  headerBack: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', marginLeft: -4, marginBottom: 2, gap: 2 },
+  headerBackText: { color: 'rgba(255,255,255,0.9)', fontSize: 15, fontWeight: '600' },
   headerRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
   headerInfo: { flex: 1, gap: 4 },
   headerKicker: { color: 'rgba(255,255,255,0.7)', fontSize: 12, fontWeight: '700' },
