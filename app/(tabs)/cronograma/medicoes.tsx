@@ -1,6 +1,8 @@
 import { useFocusEffect } from '@react-navigation/native';
+import { useRouter } from 'expo-router';
 import { useCallback, useMemo, useState } from 'react';
 import { Image, Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Text } from '@/src/ui/Text';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
@@ -81,6 +83,8 @@ const STATUS_COLORS: Record<string, { bg: string; text: string; border: string }
 };
 
 export default function MeasurementsScreen() {
+  const router = useRouter();
+  const insets = useSafeAreaInsets();
   const { towers, project, getApartmentById, getTowerById } = useObras();
   const [measurements, setMeasurements] = useState<EnrichedMeasurement[]>([]);
   const [towerFilter, setTowerFilter] = useState(allFilter);
@@ -165,7 +169,14 @@ export default function MeasurementsScreen() {
   };
 
   return (
-    <ScrollView style={s.scroll} contentContainerStyle={s.container}>
+    <>
+      <View style={[s.backBar, { paddingTop: insets.top + 8 }]}>
+        <Pressable onPress={() => router.push('/(tabs)/cronograma' as any)} style={s.backBtn}>
+          <MaterialCommunityIcons name="chevron-left" size={26} color="#0F172A" />
+          <Text style={s.backBtnText}>Cronograma</Text>
+        </Pressable>
+      </View>
+      <ScrollView style={s.scroll} contentContainerStyle={s.container}>
 
       {/* HEADER */}
       <View style={s.pageHeader}>
@@ -391,11 +402,15 @@ export default function MeasurementsScreen() {
           </View>
         </View>
       </Modal>
-    </ScrollView>
+      </ScrollView>
+    </>
   );
 }
 
 const s = StyleSheet.create({
+  backBar: { paddingHorizontal: 8, paddingBottom: 4, backgroundColor: '#F8FAFC' },
+  backBtn: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', gap: 2, paddingVertical: 6, paddingHorizontal: 4 },
+  backBtnText: { color: '#0F172A', fontSize: 15, fontWeight: '600' },
   scroll: { backgroundColor: '#F8FAFC' },
   container: { gap: 12, padding: 16, paddingBottom: 40 },
 

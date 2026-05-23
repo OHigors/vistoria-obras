@@ -139,7 +139,44 @@ function mapVisit(row: Record<string, unknown>): InspectionVisit {
   };
 }
 
+const INSPECTION_PHOTOS_BUCKET = 'inspection-photos';
+
+// storage_path may hold either a real Storage object path (e.g. "obraX/apt/123.jpg")
+// or a legacy inline URI (data:image/...;base64,... | file:// | http://). Only the
+// first form should be resolved through Storage.
+function isLegacyPhotoUri(value: string): boolean {
+  return /^(data:|https?:|file:|blob:)/i.test(value);
+}
+
+export function getInspectionPhotoUrl(storagePath: string): string {
+  if (!storagePath) return '';
+  if (isLegacyPhotoUri(storagePath)) return storagePath;
+  const { data } = supabase.storage.from(INSPECTION_PHOTOS_BUCKET).getPublicUrl(storagePath);
+  return data.publicUrl;
+}
+
+export async function uploadInspectionPhoto(
+  localUri: string,
+  destinationPath: string,
+  contentType = 'image/jpeg',
+): Promise<string> {
+  // Works for data:, file:, http(s):, blob: — fetch handles them all in RN/web.
+  const response = await fetch(localUri);
+  const blob = await response.blob();
+  const { error } = await supabase.storage
+    .from(INSPECTION_PHOTOS_BUCKET)
+    .upload(destinationPath, blob, { contentType, upsert: true });
+  if (error) throw error;
+  return destinationPath;
+}
+
+export async function deleteInspectionPhotoObject(storagePath: string): Promise<void> {
+  if (!storagePath || isLegacyPhotoUri(storagePath)) return;
+  await supabase.storage.from(INSPECTION_PHOTOS_BUCKET).remove([storagePath]);
+}
+
 function mapPhoto(row: Record<string, unknown>): InspectionPhoto {
+  const storagePath = (row.storage_path as string) ?? '';
   return {
     id: row.id as string,
     towerId: row.tower_id as string,
@@ -147,7 +184,8 @@ function mapPhoto(row: Record<string, unknown>): InspectionPhoto {
     itemId: (row.item_id as string) || (row.service_id as string),
     serviceId: row.service_id as string,
     service: row.service as string,
-    uri: row.storage_path as string,
+    uri: getInspectionPhotoUrl(storagePath),
+    storagePath: isLegacyPhotoUri(storagePath) ? '' : storagePath,
     fileName: row.file_name as string,
     createdAt: row.created_at as string,
     dataHora: row.created_at as string,
@@ -172,6 +210,8 @@ function mapServiceStage(row: Record<string, unknown>): ServiceStage {
     ativo: row.ativo as boolean,
     servicosDependentes: (row.servicos_dependentes as string[]) ?? [],
     observacao: row.observacao as string,
+    dataInicio: (row.data_inicio as string | null) ?? '',
+    dataFim: (row.data_fim as string | null) ?? '',
   };
 }
 
@@ -360,14 +400,15 @@ export async function savePhoto(photo: InspectionPhoto): Promise<void> {
     item_id: photo.itemId,
     service_id: photo.serviceId,
     service: photo.service,
-    storage_path: photo.uri,
+    storage_path: photo.storagePath,
     file_name: photo.fileName,
     comment: photo.comment,
     visit_id: photo.visitId ?? null,
   });
 }
 
-export async function deletePhoto(id: string): Promise<void> {
+export async function deletePhoto(id: string, storagePath?: string): Promise<void> {
+  if (storagePath) await deleteInspectionPhotoObject(storagePath);
   await supabase.from('inspection_photos').delete().eq('id', id);
 }
 
@@ -399,6 +440,12 @@ export async function saveServiceStages(stages: ServiceStage[]): Promise<void> {
     ativo: stage.ativo,
     servicos_dependentes: stage.servicosDependentes,
     observacao: stage.observacao,
+    data_inicio: stage.dataInicio || null,
+    data_fim: stage.dataFim || null,
   }));
   await supabase.from('service_stages').upsert(rows);
+}
+
+export async function deleteServiceStage(id: string): Promise<void> {
+  await supabase.from('service_stages').delete().eq('id', id);
 }

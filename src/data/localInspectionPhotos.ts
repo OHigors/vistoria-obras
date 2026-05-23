@@ -5,7 +5,12 @@ export type InspectionPhoto = {
   itemId: string;
   serviceId: string;
   service: string;
+  // Display URI (public URL when stored in Supabase Storage, or a data:/file: URI
+  // for legacy rows / pre-upload previews).
   uri: string;
+  // Path inside the inspection-photos Storage bucket. Empty for legacy rows
+  // that still inline the image bytes into uri.
+  storagePath: string;
   fileName: string;
   createdAt: string;
   dataHora: string;
@@ -46,6 +51,7 @@ export const getInspectionPhotosFromStorage = (
         serviceId,
         towerId,
         uri,
+        storagePath,
         dataHora,
         visitId,
       } = photo;
@@ -72,6 +78,7 @@ export const getInspectionPhotosFromStorage = (
           serviceId,
           service,
           uri,
+          storagePath: typeof storagePath === 'string' ? storagePath : '',
           fileName,
           createdAt,
           dataHora: typeof dataHora === 'string' ? dataHora : createdAt,
