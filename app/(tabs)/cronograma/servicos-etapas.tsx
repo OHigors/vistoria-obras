@@ -40,6 +40,115 @@ function Field({ keyboardType, label, onChangeText, value, placeholder, error }:
   );
 }
 
+// Common metric units found on Brazilian construction sites, grouped so the
+// picker feels organised when scanning options.
+const unidadeMedicaoOptions: { group: string; items: { value: string; label: string }[] }[] = [
+  {
+    group: 'Área e volume',
+    items: [
+      { value: 'm²', label: 'm² — metro quadrado' },
+      { value: 'm³', label: 'm³ — metro cúbico' },
+    ],
+  },
+  {
+    group: 'Comprimento',
+    items: [
+      { value: 'm', label: 'm — metro linear' },
+      { value: 'cm', label: 'cm — centímetro' },
+      { value: 'mm', label: 'mm — milímetro' },
+      { value: 'km', label: 'km — quilômetro' },
+    ],
+  },
+  {
+    group: 'Peso e volume',
+    items: [
+      { value: 'kg', label: 'kg — quilograma' },
+      { value: 't', label: 't — tonelada' },
+      { value: 'L', label: 'L — litro' },
+      { value: 'mL', label: 'mL — mililitro' },
+      { value: 'sc', label: 'sc — saco (ex.: cimento 50 kg)' },
+      { value: 'gl', label: 'gl — galão' },
+      { value: 'bd', label: 'bd — balde' },
+    ],
+  },
+  {
+    group: 'Quantidade',
+    items: [
+      { value: 'un', label: 'un — unidade' },
+      { value: 'pç', label: 'pç — peça' },
+      { value: 'cj', label: 'cj — conjunto' },
+      { value: 'par', label: 'par' },
+      { value: 'dz', label: 'dz — dúzia' },
+      { value: 'mi', label: 'mi — milheiro' },
+    ],
+  },
+  {
+    group: 'Tempo e serviço',
+    items: [
+      { value: 'h', label: 'h — hora' },
+      { value: 'd', label: 'd — dia' },
+      { value: 'hh', label: 'hh — homem-hora' },
+      { value: 'vb', label: 'vb — verba' },
+    ],
+  },
+];
+
+function SelectField({ label, value, onChange, error }: { label: string; value: string; onChange: (v: string) => void; error?: string }) {
+  const [open, setOpen] = useState(false);
+  const flatOptions = unidadeMedicaoOptions.flatMap((g) => g.items);
+  const selected = flatOptions.find((o) => o.value === value);
+  return (
+    <View style={s.fieldGroup}>
+      <Text style={[s.fieldLabel, error && s.fieldLabelError]}>
+        {label}{error ? ' *' : ''}
+      </Text>
+      <Pressable onPress={() => setOpen(true)} style={[s.input, s.selectInput, error && s.inputError]}>
+        <Text style={[s.selectInputText, !selected && s.selectInputPlaceholder]}>
+          {selected ? selected.label : 'Selecione a unidade'}
+        </Text>
+        <MaterialCommunityIcons name="chevron-down" size={18} color="#94A3B8" />
+      </Pressable>
+      {error ? <Text style={s.fieldErrorText}>{error}</Text> : null}
+
+      <Modal animationType="fade" transparent visible={open} onRequestClose={() => setOpen(false)}>
+        <Pressable style={s.selectBackdrop} onPress={() => setOpen(false)}>
+          <Pressable style={s.selectSheet} onPress={(e) => e.stopPropagation()}>
+            <View style={s.selectHeader}>
+              <Text style={s.selectTitle}>Unidade de medição</Text>
+              <Pressable onPress={() => setOpen(false)} style={s.selectClose}>
+                <MaterialCommunityIcons name="close" size={20} color="#475569" />
+              </Pressable>
+            </View>
+            <ScrollView style={s.selectList}>
+              {unidadeMedicaoOptions.map((group) => (
+                <View key={group.group} style={s.selectGroup}>
+                  <Text style={s.selectGroupTitle}>{group.group}</Text>
+                  {group.items.map((opt) => {
+                    const isSelected = opt.value === value;
+                    return (
+                      <Pressable
+                        key={opt.value}
+                        onPress={() => { onChange(opt.value); setOpen(false); }}
+                        style={[s.selectItem, isSelected && s.selectItemSelected]}
+                      >
+                        <Text style={[s.selectItemValue, isSelected && s.selectItemValueSelected]}>{opt.value}</Text>
+                        <Text style={[s.selectItemLabel, isSelected && s.selectItemLabelSelected]} numberOfLines={1}>
+                          {opt.label.replace(`${opt.value} — `, '')}
+                        </Text>
+                        {isSelected && <MaterialCommunityIcons name="check" size={16} color="#6D28D9" />}
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              ))}
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
+    </View>
+  );
+}
+
 // dd/mm/yyyy <-> yyyy-mm-dd (ISO for Postgres `date`)
 function isoToBR(iso: string) {
   if (!iso) return '';
@@ -318,7 +427,7 @@ export default function ServiceStagesScreen() {
         <View style={s.formGrid}>
           <Field label="Nome" value={draft.nome} onChangeText={(v) => updateDraft('nome', v)} error={errors.nome} />
           <Field label="Categoria" value={draft.categoria} onChangeText={(v) => updateDraft('categoria', v)} error={errors.categoria} />
-          <Field label="Unidade de medição" value={draft.unidadeMedicao} onChangeText={(v) => updateDraft('unidadeMedicao', v)} error={errors.unidadeMedicao} />
+          <SelectField label="Unidade de medição" value={draft.unidadeMedicao} onChange={(v) => updateDraft('unidadeMedicao', v)} error={errors.unidadeMedicao} />
         </View>
 
         {/* Duração — start + end */}
@@ -692,6 +801,25 @@ const s = StyleSheet.create({
   fieldLabelError: { color: '#B91C1C' },
   inputError: { borderColor: '#F87171', backgroundColor: '#FEF2F2' },
   fieldErrorText: { color: '#B91C1C', fontSize: 11, fontWeight: '700' },
+
+  // unit select
+  selectInput: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingRight: 10, paddingVertical: 10 },
+  selectInputText: { color: '#0F172A', fontSize: 14, fontWeight: '600', flex: 1 },
+  selectInputPlaceholder: { color: '#94A3B8', fontWeight: '400' },
+  selectBackdrop: { flex: 1, backgroundColor: 'rgba(15,23,42,0.55)', justifyContent: 'flex-end' },
+  selectSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 18, borderTopRightRadius: 18, maxHeight: '75%', paddingBottom: 12 },
+  selectHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 18, paddingTop: 16, paddingBottom: 8, borderBottomWidth: 1, borderBottomColor: '#E2E8F0' },
+  selectTitle: { color: '#0F172A', fontSize: 16, fontWeight: '800' },
+  selectClose: { padding: 6, borderRadius: 999 },
+  selectList: { paddingHorizontal: 12, paddingTop: 8 },
+  selectGroup: { gap: 4, marginBottom: 12 },
+  selectGroupTitle: { color: '#6D28D9', fontSize: 11, fontWeight: '900', textTransform: 'uppercase', letterSpacing: 0.6, paddingHorizontal: 8 },
+  selectItem: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 12, paddingVertical: 10, borderRadius: 10 },
+  selectItemSelected: { backgroundColor: '#F5F3FF' },
+  selectItemValue: { color: '#0F172A', fontSize: 14, fontWeight: '800', minWidth: 36 },
+  selectItemValueSelected: { color: '#6D28D9' },
+  selectItemLabel: { color: '#475569', fontSize: 13, flex: 1 },
+  selectItemLabelSelected: { color: '#5B21B6', fontWeight: '600' },
 
   // modal
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(15,23,42,0.55)', justifyContent: 'center', alignItems: 'center', padding: 20 },
