@@ -22,6 +22,7 @@ type ObrasContextValue = {
   refreshData: () => Promise<void>;
   refreshApartment: (apartmentId: string) => Promise<void>;
   refreshMeasurements: () => Promise<void>;
+  refreshServiceStages: () => Promise<void>;
   updateApartmentLocal: (apartmentId: string, progress: number, status: ApartmentStatus, checklist?: ChecklistItem[]) => void;
 };
 
@@ -40,6 +41,7 @@ const ObrasContext = createContext<ObrasContextValue>({
   refreshData: async () => {},
   refreshApartment: async () => {},
   refreshMeasurements: async () => {},
+  refreshServiceStages: async () => {},
   updateApartmentLocal: () => { },
 });
 
@@ -73,6 +75,11 @@ export function ObrasProvider({ children }: { children: React.ReactNode }) {
   const refreshMeasurements = useCallback(async () => {
     const data = await db.loadAllMeasurements();
     setMeasurements(data);
+  }, []);
+
+  const refreshServiceStages = useCallback(async () => {
+    const data = await db.loadServiceStages();
+    setServiceStages(data);
   }, []);
 
   useEffect(() => {
@@ -130,6 +137,7 @@ export function ObrasProvider({ children }: { children: React.ReactNode }) {
         refreshData: loadAll,
         refreshApartment,
         refreshMeasurements,
+        refreshServiceStages,
         updateApartmentLocal,
       }}>
       {children}

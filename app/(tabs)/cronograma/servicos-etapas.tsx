@@ -10,6 +10,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { createEmptyServiceStage, defaultServiceStages } from '@/src/data/serviceStages';
 import type { ServiceStage } from '@/src/data/serviceStages';
 import * as db from '@/src/data/db';
+import { useObras } from '@/src/data/ObrasContext';
 
 const booleanFields = [
   ['apareceNoChecklist', 'Checklist'],
@@ -111,6 +112,7 @@ const categoryColor = (cat: string) => {
 export default function ServiceStagesScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { refreshServiceStages } = useObras();
   const scrollRef = useRef<ScrollView | null>(null);
   const formY = useRef(0);
   const [stages, setStages] = useState<ServiceStage[]>([]);
@@ -149,7 +151,9 @@ export default function ServiceStagesScreen() {
   const persistStages = (next: ServiceStage[]) => {
     const ordered = next.map((s, i) => ({ ...s, ordemExecucao: i + 1 })).sort((a, b) => a.ordemExecucao - b.ordemExecucao);
     setStages(ordered);
-    db.saveServiceStages(ordered);
+    // Persist and broadcast the new catalog so other screens (apartment "add step"
+    // modal in particular) see the change without needing a full app reload.
+    db.saveServiceStages(ordered).then(() => refreshServiceStages());
   };
 
   const updateDraft = <F extends keyof ServiceStage>(field: F, value: ServiceStage[F]) => {
@@ -195,7 +199,7 @@ export default function ServiceStagesScreen() {
     const next = stages.filter((s) => s.id !== id);
     const ordered = next.map((s, i) => ({ ...s, ordemExecucao: i + 1 }));
     setStages(ordered);
-    db.deleteServiceStage(id);
+    db.deleteServiceStage(id).then(() => refreshServiceStages());
     if (ordered.length > 0) db.saveServiceStages(ordered);
     if (editingId === id) {
       setEditingId(undefined);

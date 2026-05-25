@@ -287,6 +287,10 @@ export async function upsertChecklistItem(
   });
 }
 
+export async function deleteChecklistItem(itemId: string): Promise<void> {
+  await supabase.from('checklist_items').delete().eq('id', itemId);
+}
+
 // ─── Measurements ─────────────────────────────────────────────────────────────
 
 export async function loadMeasurements(apartmentId: string): Promise<Measurement[]> {
