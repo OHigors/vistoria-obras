@@ -30,6 +30,27 @@ export const statusConfig: Record<
   },
 };
 
+// 5 bands of 20% each, red → orange → amber → blue → green.
+// Used for progress visualisations (bars, stripes) where we want a smoother
+// gradient than the 4-state apartment status palette.
+const progressBands: { min: number; color: string; soft: string }[] = [
+  { min: 0,  color: '#B91C1C', soft: '#FEE2E2' },
+  { min: 20, color: '#EA580C', soft: '#FED7AA' },
+  { min: 40, color: '#CA8A04', soft: '#FEF3C7' },
+  { min: 60, color: '#2563EB', soft: '#DBEAFE' },
+  { min: 80, color: '#047857', soft: '#D1FAE5' },
+];
+
+export const getProgressColor = (progress: number): string => {
+  const p = Math.max(0, Math.min(100, progress));
+  return [...progressBands].reverse().find((b) => p >= b.min)!.color;
+};
+
+export const getProgressBackground = (progress: number): string => {
+  const p = Math.max(0, Math.min(100, progress));
+  return [...progressBands].reverse().find((b) => p >= b.min)!.soft;
+};
+
 export const checklistConfig: Record<
   ChecklistState,
   { label: string; color: string; background: string; symbol: string }

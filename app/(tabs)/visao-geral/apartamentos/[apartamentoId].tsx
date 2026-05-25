@@ -32,7 +32,7 @@ import type { ScheduleFields } from '@/src/data/schedule';
 import { formatDateBr, getScheduleRows, isValidBrDate, maskDateBr } from '@/src/data/schedule';
 import { getBlockedServiceGroups } from '@/src/data/serviceBlockers';
 import { isServiceActiveForFeature } from '@/src/data/serviceStages';
-import { checklistConfig, statusConfig } from '@/src/ui/status';
+import { checklistConfig, getProgressColor, statusConfig } from '@/src/ui/status';
 
 const checklistOptions: ChecklistState[] = ['ok', 'pending', 'partial', 'notApplicable'];
 const criticalityOptions = ['Baixa', 'Média', 'Alta', 'Crítica'] as const;
@@ -698,7 +698,7 @@ export default function ApartmentDetailScreen() {
         }}>
 
         {/* STATUS HEADER */}
-        <View style={[s.header, { backgroundColor: status.color, paddingTop: insets.top + 12 }]}>
+        <View style={[s.header, { backgroundColor: getProgressColor(progress), paddingTop: insets.top + 12 }]}>
           <Pressable onPress={goBackToTower} style={s.headerBack}>
             <MaterialCommunityIcons name="chevron-left" size={26} color="rgba(255,255,255,0.9)" />
             <Text style={s.headerBackText}>{tower.name}</Text>
@@ -1683,6 +1683,8 @@ const s = StyleSheet.create({
   tabBtnActive: { backgroundColor: '#EFF6FF', borderColor: '#2563EB' },
   tabBtnText: { color: '#94A3B8', fontSize: 12, fontWeight: '700' },
   tabBtnTextActive: { color: '#2563EB' },
+  tabBtnDisabled: { backgroundColor: '#F8FAFC', borderColor: '#E2E8F0', opacity: 0.6 },
+  tabBtnTextDisabled: { color: '#CBD5E1' },
 
   // card
   card: { backgroundColor: '#FFFFFF', borderColor: '#E2E8F0', borderWidth: 1, borderRadius: 14, padding: 16, marginHorizontal: 16, gap: 12 },

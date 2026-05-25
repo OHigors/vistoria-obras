@@ -10,7 +10,7 @@ import { useObras } from '@/src/data/ObrasContext';
 import { summarizeApartmentSchedule } from '@/src/data/schedule';
 import { getBlockedServiceGroups, getChecklistForApartment } from '@/src/data/serviceBlockers';
 import { isCriticalStageForStatus } from '@/src/data/serviceStages';
-import { statusConfig } from '@/src/ui/status';
+import { getProgressColor, statusConfig } from '@/src/ui/status';
 
 const viewModes = ['Lista', 'Mapa'] as const;
 const filterOptions = [
@@ -188,7 +188,7 @@ export default function TowerApartmentsScreen() {
           <Text style={s.headerDesc}>{tower.description}</Text>
         ) : null}
         <View style={s.headerBar}>
-          <View style={[s.headerBarFill, { width: `${towerStats.avgProgress}%` as `${number}%` }]} />
+          <View style={[s.headerBarFill, { width: `${towerStats.avgProgress}%` as `${number}%`, backgroundColor: getProgressColor(towerStats.avgProgress) }]} />
         </View>
         <Text style={s.headerBarLabel}>{towerStats.avgProgress}% de avanço médio</Text>
       </View>
@@ -275,13 +275,14 @@ export default function TowerApartmentsScreen() {
         <View style={s.list}>
           {filteredSummaries.map((summary) => {
             const st = statusConfig[summary.statusKey];
+            const progressColor = getProgressColor(summary.progress);
             const { apartment } = summary;
             return (
               <Pressable
                 key={apartment.id}
                 onPress={() => router.push({ pathname: '/visao-geral/apartamentos/[apartamentoId]', params: { apartamentoId: apartment.id } })}
                 style={s.aptCard}>
-                  <View style={[s.aptCardStripe, { backgroundColor: st.color }]} />
+                  <View style={[s.aptCardStripe, { backgroundColor: progressColor }]} />
                   <View style={s.aptCardInner}>
                     <View style={s.aptCardTop}>
                       <View style={s.aptCardLeft}>
@@ -297,7 +298,7 @@ export default function TowerApartmentsScreen() {
                     </View>
 
                     <View style={s.aptBar}>
-                      <View style={[s.aptBarFill, { backgroundColor: st.color, width: `${summary.progress}%` as `${number}%` }]} />
+                      <View style={[s.aptBarFill, { backgroundColor: progressColor, width: `${summary.progress}%` as `${number}%` }]} />
                     </View>
 
                     <View style={s.aptMetrics}>
@@ -348,15 +349,18 @@ export default function TowerApartmentsScreen() {
         <View style={s.mapPanel}>
           {/* Legend */}
           <View style={s.legend}>
-            {(['excellent', 'good', 'attention', 'critical'] as ApartmentStatus[]).map((key) => {
-              const st = statusConfig[key];
-              return (
-                <View key={key} style={s.legendItem}>
-                  <View style={[s.legendDot, { backgroundColor: st.color }]} />
-                  <Text style={s.legendText}>{st.label}</Text>
-                </View>
-              );
-            })}
+            {[
+              { label: '0-20%', color: getProgressColor(10) },
+              { label: '20-40%', color: getProgressColor(30) },
+              { label: '40-60%', color: getProgressColor(50) },
+              { label: '60-80%', color: getProgressColor(70) },
+              { label: '80-100%', color: getProgressColor(90) },
+            ].map((band) => (
+              <View key={band.label} style={s.legendItem}>
+                <View style={[s.legendDot, { backgroundColor: band.color }]} />
+                <Text style={s.legendText}>{band.label}</Text>
+              </View>
+            ))}
           </View>
 
           {/* Floors */}
@@ -369,16 +373,16 @@ export default function TowerApartmentsScreen() {
               </View>
               <View style={s.compactGrid}>
                 {summariesByFloor[floor].map((summary) => {
-                  const st = statusConfig[summary.statusKey];
+                  const progressColor = getProgressColor(summary.progress);
                   return (
                     <Pressable
                       key={`map-${summary.apartment.id}`}
                       onPress={() => router.push({ pathname: '/visao-geral/apartamentos/[apartamentoId]', params: { apartamentoId: summary.apartment.id } })}
-                      style={[s.mapUnit, { backgroundColor: st.background, borderColor: st.color }]}>
-                      <Text style={[s.mapUnitNumber, { color: st.color }]}>{summary.apartment.number}</Text>
-                      <Text style={[s.mapUnitProgress, { color: st.color }]}>{summary.progress}%</Text>
+                      style={[s.mapUnit, { backgroundColor: '#FFFFFF', borderColor: progressColor }]}>
+                      <Text style={[s.mapUnitNumber, { color: progressColor }]}>{summary.apartment.number}</Text>
+                      <Text style={[s.mapUnitProgress, { color: progressColor }]}>{summary.progress}%</Text>
                       {summary.pendingCount > 0 && (
-                        <View style={[s.mapUnitDot, { backgroundColor: st.color }]} />
+                        <View style={[s.mapUnitDot, { backgroundColor: progressColor }]} />
                       )}
                       {summary.pendingCount === 0 && <View style={s.mapUnitDot} />}
                     </Pressable>
