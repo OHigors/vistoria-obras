@@ -5,6 +5,7 @@ import { Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Text } from '@/src/ui/Text';
 import { Skeleton } from '@/src/ui/Skeleton';
+import { useToast } from '@/src/ui/Toast';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { createEmptyServiceStage, defaultServiceStages } from '@/src/data/serviceStages';
@@ -40,71 +41,39 @@ function Field({ keyboardType, label, onChangeText, value, placeholder, error }:
   );
 }
 
-// Common metric units found on Brazilian construction sites, grouped so the
-// picker feels organised when scanning options.
-const unidadeMedicaoOptions: { group: string; items: { value: string; label: string }[] }[] = [
-  {
-    group: 'Área e volume',
-    items: [
-      { value: 'm²', label: 'm² — metro quadrado' },
-      { value: 'm³', label: 'm³ — metro cúbico' },
-    ],
-  },
-  {
-    group: 'Comprimento',
-    items: [
-      { value: 'm', label: 'm — metro linear' },
-      { value: 'cm', label: 'cm — centímetro' },
-      { value: 'mm', label: 'mm — milímetro' },
-      { value: 'km', label: 'km — quilômetro' },
-    ],
-  },
-  {
-    group: 'Peso e volume',
-    items: [
-      { value: 'kg', label: 'kg — quilograma' },
-      { value: 't', label: 't — tonelada' },
-      { value: 'L', label: 'L — litro' },
-      { value: 'mL', label: 'mL — mililitro' },
-      { value: 'sc', label: 'sc — saco (ex.: cimento 50 kg)' },
-      { value: 'gl', label: 'gl — galão' },
-      { value: 'bd', label: 'bd — balde' },
-    ],
-  },
-  {
-    group: 'Quantidade',
-    items: [
-      { value: 'un', label: 'un — unidade' },
-      { value: 'pç', label: 'pç — peça' },
-      { value: 'cj', label: 'cj — conjunto' },
-      { value: 'par', label: 'par' },
-      { value: 'dz', label: 'dz — dúzia' },
-      { value: 'mi', label: 'mi — milheiro' },
-    ],
-  },
-  {
-    group: 'Tempo e serviço',
-    items: [
-      { value: 'h', label: 'h — hora' },
-      { value: 'd', label: 'd — dia' },
-      { value: 'hh', label: 'hh — homem-hora' },
-      { value: 'vb', label: 'vb — verba' },
-    ],
-  },
-];
-
-function SelectField({ label, value, onChange, error }: { label: string; value: string; onChange: (v: string) => void; error?: string }) {
+function CatalogSelectField({
+  label,
+  value,
+  options,
+  onChange,
+  onManage,
+  placeholder,
+  sheetTitle,
+  manageLabel,
+  manageIcon,
+  error,
+}: {
+  label: string;
+  value: string;
+  options: { id: string; nome: string }[];
+  onChange: (v: string) => void;
+  onManage: () => void;
+  placeholder: string;
+  sheetTitle: string;
+  manageLabel: string;
+  manageIcon: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
+  error?: string;
+}) {
   const [open, setOpen] = useState(false);
-  const flatOptions = unidadeMedicaoOptions.flatMap((g) => g.items);
-  const selected = flatOptions.find((o) => o.value === value);
+  const selectedExists = options.some((c) => c.nome === value);
   return (
     <View style={s.fieldGroup}>
       <Text style={[s.fieldLabel, error && s.fieldLabelError]}>
         {label}{error ? ' *' : ''}
       </Text>
       <Pressable onPress={() => setOpen(true)} style={[s.input, s.selectInput, error && s.inputError]}>
-        <Text style={[s.selectInputText, !selected && s.selectInputPlaceholder]}>
-          {selected ? selected.label : 'Selecione a unidade'}
+        <Text style={[s.selectInputText, !value && s.selectInputPlaceholder]}>
+          {value || placeholder}
         </Text>
         <MaterialCommunityIcons name="chevron-down" size={18} color="#94A3B8" />
       </Pressable>
@@ -114,34 +83,45 @@ function SelectField({ label, value, onChange, error }: { label: string; value: 
         <Pressable style={s.selectBackdrop} onPress={() => setOpen(false)}>
           <Pressable style={s.selectSheet} onPress={(e) => e.stopPropagation()}>
             <View style={s.selectHeader}>
-              <Text style={s.selectTitle}>Unidade de medição</Text>
+              <Text style={s.selectTitle}>{sheetTitle}</Text>
               <Pressable onPress={() => setOpen(false)} style={s.selectClose}>
                 <MaterialCommunityIcons name="close" size={20} color="#475569" />
               </Pressable>
             </View>
             <ScrollView style={s.selectList}>
-              {unidadeMedicaoOptions.map((group) => (
-                <View key={group.group} style={s.selectGroup}>
-                  <Text style={s.selectGroupTitle}>{group.group}</Text>
-                  {group.items.map((opt) => {
-                    const isSelected = opt.value === value;
+              {options.length === 0 ? (
+                <Text style={s.emptyDepText}>Nenhum item cadastrado. Use "{manageLabel}" para criar.</Text>
+              ) : (
+                <View style={s.selectGroup}>
+                  {value && !selectedExists ? (
+                    <Pressable style={[s.selectItem, s.selectItemSelected]}>
+                      <View style={[s.depGroupDot, { backgroundColor: categoryColor(value) }]} />
+                      <Text style={[s.selectItemLabel, s.selectItemLabelSelected]} numberOfLines={1}>{value} (atual)</Text>
+                    </Pressable>
+                  ) : null}
+                  {options.map((opt) => {
+                    const isSelected = opt.nome === value;
                     return (
                       <Pressable
-                        key={opt.value}
-                        onPress={() => { onChange(opt.value); setOpen(false); }}
+                        key={opt.id}
+                        onPress={() => { onChange(opt.nome); setOpen(false); }}
                         style={[s.selectItem, isSelected && s.selectItemSelected]}
                       >
-                        <Text style={[s.selectItemValue, isSelected && s.selectItemValueSelected]}>{opt.value}</Text>
+                        <View style={[s.depGroupDot, { backgroundColor: categoryColor(opt.nome) }]} />
                         <Text style={[s.selectItemLabel, isSelected && s.selectItemLabelSelected]} numberOfLines={1}>
-                          {opt.label.replace(`${opt.value} — `, '')}
+                          {opt.nome}
                         </Text>
                         {isSelected && <MaterialCommunityIcons name="check" size={16} color="#6D28D9" />}
                       </Pressable>
                     );
                   })}
                 </View>
-              ))}
+              )}
             </ScrollView>
+            <Pressable onPress={() => { setOpen(false); onManage(); }} style={s.selectManageBtn}>
+              <MaterialCommunityIcons name={manageIcon} size={16} color="#6D28D9" />
+              <Text style={s.selectManageText}>{manageLabel}</Text>
+            </Pressable>
           </Pressable>
         </Pressable>
       </Modal>
@@ -221,19 +201,21 @@ const categoryColor = (cat: string) => {
 export default function ServiceStagesScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { refreshServiceStages } = useObras();
+  const { refreshServiceStages, serviceCategories, serviceUnits } = useObras();
+  const toast = useToast();
   const scrollRef = useRef<ScrollView | null>(null);
-  const formY = useRef(0);
   const [stages, setStages] = useState<ServiceStage[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<string>();
   const [draft, setDraft] = useState<ServiceStage>(() => createEmptyServiceStage(1));
   const [depFilter, setDepFilter] = useState('');
   const [errors, setErrors] = useState<Partial<Record<keyof ServiceStage, string>>>({});
+  const [formOpen, setFormOpen] = useState(false);
   const [restoreOpen, setRestoreOpen] = useState(false);
   const [openDepGroups, setOpenDepGroups] = useState<Record<string, boolean>>({});
   const [collapsedStageGroups, setCollapsedStageGroups] = useState<Record<string, boolean>>({});
   const [stageToDelete, setStageToDelete] = useState<ServiceStage | null>(null);
+  const [showBackToTop, setShowBackToTop] = useState(false);
 
   useFocusEffect(useCallback(() => {
     setLoading(true);
@@ -245,6 +227,12 @@ export default function ServiceStagesScreen() {
         setDraft(createEmptyServiceStage(loaded.length + 1));
         setEditingId(undefined);
         setLoading(false);
+        // Start with every stage group collapsed so the page is quick to scan.
+        const cats = new Set<string>();
+        for (const st of loaded) cats.add((st.categoria || 'Sem categoria').trim() || 'Sem categoria');
+        const collapsed: Record<string, boolean> = {};
+        cats.forEach((c) => { collapsed[c] = true; });
+        setCollapsedStageGroups(collapsed);
       };
       const elapsed = Date.now() - started;
       if (elapsed >= MIN) finish();
@@ -253,7 +241,7 @@ export default function ServiceStagesScreen() {
   }, []));
 
   const sortedStages = useMemo(
-    () => [...stages].sort((a, b) => a.ordemExecucao - b.ordemExecucao),
+    () => [...stages].sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR')),
     [stages],
   );
 
@@ -277,27 +265,30 @@ export default function ServiceStagesScreen() {
     if (!draft.unidadeMedicao.trim()) next.unidadeMedicao = 'Informe a unidade';
     if (Object.keys(next).length > 0) {
       setErrors(next);
-      requestAnimationFrame(() => {
-        scrollRef.current?.scrollTo({ y: Math.max(formY.current - 12, 0), animated: true });
-      });
       return;
     }
     setErrors({});
     const normalized: ServiceStage = { ...draft, id: draft.id || `etapa-${Date.now()}`, nome: draft.nome.trim(), categoria: draft.categoria.trim(), unidadeMedicao: draft.unidadeMedicao.trim(), observacao: draft.observacao.trim() };
     const updated = editingId ? stages.map((s) => (s.id === editingId ? normalized : s)) : [...stages, normalized];
-    persistStages(updated);
+    const ordered = updated.map((s, i) => ({ ...s, ordemExecucao: i + 1 })).sort((a, b) => a.ordemExecucao - b.ordemExecucao);
+    setStages(ordered);
     setEditingId(undefined);
     setDraft(createEmptyServiceStage(updated.length + 1));
     setDepFilter('');
+    setFormOpen(false);
+    const wasEditing = !!editingId;
+    toast.saving(wasEditing ? 'Atualizando etapa…' : 'Criando etapa…');
+    db.saveServiceStages(ordered)
+      .then(() => refreshServiceStages())
+      .then(() => toast.saved(wasEditing ? 'Etapa atualizada' : 'Etapa criada'))
+      .catch(() => toast.error(wasEditing ? 'Erro ao atualizar etapa' : 'Erro ao criar etapa'));
   };
 
   const editStage = (stage: ServiceStage) => {
     setEditingId(stage.id);
     setDraft(stage);
     setDepFilter('');
-    requestAnimationFrame(() => {
-      scrollRef.current?.scrollTo({ y: Math.max(formY.current - 12, 0), animated: true });
-    });
+    setFormOpen(true);
   };
   const inactivate = (stage: ServiceStage) => persistStages(stages.map((s) => (s.id === stage.id ? { ...s, ativo: false } : s)));
   const reactivate = (stage: ServiceStage) => persistStages(stages.map((s) => (s.id === stage.id ? { ...s, ativo: true } : s)));
@@ -308,22 +299,18 @@ export default function ServiceStagesScreen() {
     const next = stages.filter((s) => s.id !== id);
     const ordered = next.map((s, i) => ({ ...s, ordemExecucao: i + 1 }));
     setStages(ordered);
-    db.deleteServiceStage(id).then(() => refreshServiceStages());
-    if (ordered.length > 0) db.saveServiceStages(ordered);
+    toast.saving('Excluindo etapa…');
+    const tasks: Promise<unknown>[] = [db.deleteServiceStage(id)];
+    if (ordered.length > 0) tasks.push(db.saveServiceStages(ordered));
+    Promise.all(tasks)
+      .then(() => refreshServiceStages())
+      .then(() => toast.saved('Etapa excluída'))
+      .catch(() => toast.error('Erro ao excluir etapa'));
     if (editingId === id) {
       setEditingId(undefined);
       setDraft(createEmptyServiceStage(ordered.length + 1));
     }
     setStageToDelete(null);
-  };
-
-  const moveStage = (stage: ServiceStage, dir: -1 | 1) => {
-    const ordered = [...sortedStages];
-    const i = ordered.findIndex((s) => s.id === stage.id);
-    const j = i + dir;
-    if (i < 0 || j < 0 || j >= ordered.length) return;
-    [ordered[i], ordered[j]] = [ordered[j], ordered[i]];
-    persistStages(ordered);
   };
 
   const toggleDependent = (name: string) => {
@@ -345,6 +332,7 @@ export default function ServiceStagesScreen() {
     setEditingId(undefined);
     setDraft(createEmptyServiceStage(stages.length + 1));
     setDepFilter('');
+    setFormOpen(false);
   };
 
   const activeCount = stages.filter((s) => s.ativo).length;
@@ -367,7 +355,7 @@ export default function ServiceStagesScreen() {
       if (!map.has(cat)) map.set(cat, []);
       map.get(cat)!.push(item);
     }
-    return [...map.entries()];
+    return [...map.entries()].sort(([a], [b]) => a.localeCompare(b, 'pt-BR'));
   };
 
   const dependencyGroups = groupByCategoria(dependencyCandidates);
@@ -388,7 +376,17 @@ export default function ServiceStagesScreen() {
           <Text style={s.backBtnText}>Cronograma</Text>
         </Pressable>
       </View>
-      <ScrollView ref={scrollRef} style={s.scroll} contentContainerStyle={s.container}>
+      <ScrollView
+        ref={scrollRef}
+        style={s.scroll}
+        contentContainerStyle={s.container}
+        scrollEventThrottle={64}
+        onScroll={(e) => {
+          const y = e.nativeEvent.contentOffset.y;
+          if (y > 400 && !showBackToTop) setShowBackToTop(true);
+          else if (y <= 400 && showBackToTop) setShowBackToTop(false);
+        }}
+      >
 
       {/* HEADER */}
       <View style={s.pageHeader}>
@@ -403,131 +401,27 @@ export default function ServiceStagesScreen() {
             )}
           </View>
         </View>
-        <Pressable onPress={() => setRestoreOpen(true)} style={s.restoreBtn}>
-          <MaterialCommunityIcons name="restore" size={16} color="#6D28D9" />
-          <Text style={s.restoreBtnText}>Restaurar</Text>
-        </Pressable>
-      </View>
-
-      {/* FORM — purple border */}
-      <View
-        onLayout={(e) => { formY.current = e.nativeEvent.layout.y; }}
-        style={[s.section, s.sectionPurple, editingId && s.sectionEditing]}
-      >
-        <View style={s.formHeader}>
-          <Text style={[s.sectionTitle, { color: '#6D28D9' }]}>{editingId ? 'Editar etapa' : 'Nova etapa'}</Text>
-          {editingId && (
-            <View style={s.editingBadge}>
-              <MaterialCommunityIcons name="pencil" size={12} color="#6D28D9" />
-              <Text style={s.editingBadgeText}>Editando “{draft.nome || 'etapa'}”</Text>
-            </View>
-          )}
-        </View>
-
-        <View style={s.formGrid}>
-          <Field label="Nome" value={draft.nome} onChangeText={(v) => updateDraft('nome', v)} error={errors.nome} />
-          <Field label="Categoria" value={draft.categoria} onChangeText={(v) => updateDraft('categoria', v)} error={errors.categoria} />
-          <SelectField label="Unidade de medição" value={draft.unidadeMedicao} onChange={(v) => updateDraft('unidadeMedicao', v)} error={errors.unidadeMedicao} />
-        </View>
-
-        {/* Duração — start + end */}
-        <View style={s.durationBox}>
-          <View style={s.durationHeader}>
-            <MaterialCommunityIcons name="calendar-range" size={16} color="#6D28D9" />
-            <Text style={s.fieldLabel}>Duração da etapa</Text>
-          </View>
-          <View style={s.formGrid}>
-            <DateField label="Início" value={draft.dataInicio} onChangeISO={(iso) => updateDraft('dataInicio', iso)} />
-            <DateField label="Fim" value={draft.dataFim} onChangeISO={(iso) => updateDraft('dataFim', iso)} />
-          </View>
-        </View>
-
-        <View style={s.toggleRow}>
-          {booleanFields.map(([field, label]) => {
-            const on = Boolean(draft[field]);
-            return (
-              <Pressable key={field} onPress={() => updateDraft(field, !on)} style={[s.toggle, on && s.toggleOn]}>
-                <MaterialCommunityIcons name={on ? 'check-circle' : 'circle-outline'} size={14} color={on ? '#6D28D9' : '#94A3B8'} />
-                <Text style={[s.toggleText, on && s.toggleTextOn]}>{label}</Text>
-              </Pressable>
-            );
-          })}
-        </View>
-
-        {sortedStages.filter((s) => s.id !== draft.id).length > 0 && (
-          <View style={s.dependencyBox}>
-            <Text style={s.fieldLabel}>Serviços que esta etapa trava</Text>
-            <View style={s.searchWrap}>
-              <MaterialCommunityIcons name="magnify" size={16} color="#94A3B8" />
-              <TextInput
-                onChangeText={setDepFilter}
-                placeholder="Filtrar etapas…"
-                placeholderTextColor="#94A3B8"
-                style={s.searchInput}
-                value={depFilter}
-              />
-              {depFilter ? (
-                <Pressable onPress={() => setDepFilter('')} style={s.searchClear}>
-                  <MaterialCommunityIcons name="close-circle" size={16} color="#94A3B8" />
-                </Pressable>
-              ) : null}
-            </View>
-            {dependencyCandidates.length === 0 ? (
-              <Text style={s.emptyDepText}>Nenhuma etapa corresponde ao filtro.</Text>
-            ) : (
-              dependencyGroups.map(([cat, items]) => {
-                const forceOpen = Boolean(normalizedFilter);
-                const isOpen = forceOpen || openDepGroups[cat] === true;
-                const selectedInGroup = items.filter((st) => draft.servicosDependentes.includes(st.nome)).length;
-                return (
-                  <View key={`depgrp-${cat}`} style={s.depGroup}>
-                    <Pressable
-                      onPress={() => setOpenDepGroups((cur) => ({ ...cur, [cat]: !isOpen }))}
-                      style={s.depGroupHeader}
-                    >
-                      <MaterialCommunityIcons name={isOpen ? 'chevron-down' : 'chevron-right'} size={16} color="#64748B" />
-                      <View style={[s.depGroupDot, { backgroundColor: categoryColor(cat) }]} />
-                      <Text style={s.depGroupTitle}>{cat}</Text>
-                      {selectedInGroup > 0 ? (
-                        <View style={s.depGroupSelPill}>
-                          <MaterialCommunityIcons name="lock" size={10} color="#B45309" />
-                          <Text style={s.depGroupSelText}>{selectedInGroup}</Text>
-                        </View>
-                      ) : null}
-                      <Text style={s.depGroupCount}>{items.length}</Text>
-                    </Pressable>
-                    {isOpen && (
-                      <View style={s.toggleRow}>
-                        {items.map((st) => {
-                          const sel = draft.servicosDependentes.includes(st.nome);
-                          return (
-                            <Pressable key={`dep-${st.id}`} onPress={() => toggleDependent(st.nome)} style={[s.toggle, sel && s.toggleWarn]}>
-                              <MaterialCommunityIcons name={sel ? 'lock' : 'lock-open-outline'} size={13} color={sel ? '#B45309' : '#94A3B8'} />
-                              <Text style={[s.toggleText, sel && s.toggleWarnText]}>{st.nome}</Text>
-                            </Pressable>
-                          );
-                        })}
-                      </View>
-                    )}
-                  </View>
-                );
-              })
-            )}
-          </View>
-        )}
-
-        <TextInput multiline onChangeText={(v) => updateDraft('observacao', v)} placeholder="Observação (opcional)" placeholderTextColor="#94A3B8" style={s.textarea} value={draft.observacao} />
-
-        <View style={s.actionRow}>
-          <Pressable onPress={saveDraft} style={s.btnPrimary}>
-            <MaterialCommunityIcons name={editingId ? 'content-save' : 'plus'} size={16} color="#FFFFFF" />
-            <Text style={s.btnPrimaryText}>{editingId ? 'Salvar edição' : 'Criar etapa'}</Text>
+        <View style={s.headerActions}>
+          <Pressable
+            accessibilityLabel="Nova etapa"
+            onPress={() => {
+              setEditingId(undefined);
+              setDraft(createEmptyServiceStage(stages.length + 1));
+              setDepFilter('');
+              setErrors({});
+              setFormOpen(true);
+            }}
+            style={s.headerIconBtn}
+          >
+            <MaterialCommunityIcons name="plus" size={20} color="#6D28D9" />
           </Pressable>
-          {editingId && (
-            <Pressable onPress={cancelEdit} style={s.btnSecondary}>
-              <Text style={s.btnSecondaryText}>Cancelar</Text>
-            </Pressable>
-          )}
+          <Pressable
+            accessibilityLabel="Gerenciar categorias e unidades"
+            onPress={() => router.push('/(tabs)/cronograma/catalogos' as any)}
+            style={s.headerIconBtn}
+          >
+            <MaterialCommunityIcons name="tag-multiple-outline" size={18} color="#6D28D9" />
+          </Pressable>
         </View>
       </View>
 
@@ -558,82 +452,75 @@ export default function ServiceStagesScreen() {
               </Text>
             </Pressable>
             {!collapsed && items.map((stage) => (
-              <View key={stage.id} style={[s.stageCard, !stage.ativo && s.stageInactive, editingId === stage.id && s.stageEditing]}>
+              <View key={stage.id} style={[s.stageCard, editingId === stage.id && s.stageEditing]}>
                 <View style={[s.stageStripe, { backgroundColor: color }]} />
                 <View style={s.stageBody}>
-            <View style={s.stageTop}>
-              <View style={s.stageOrder}>
-                <Text style={s.stageOrderText}>{stage.ordemExecucao}</Text>
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={s.stageName}>{stage.nome}</Text>
-                <Text style={s.stageMeta}>{stage.unidadeMedicao}</Text>
-              </View>
-              <View style={[s.stagePill, stage.ativo ? s.stagePillActive : s.stagePillInactive]}>
-                <Text style={[s.stagePillText, stage.ativo ? s.stagePillActiveText : s.stagePillInactiveText]}>
-                  {stage.ativo ? 'Ativa' : 'Inativa'}
-                </Text>
-              </View>
-            </View>
+                  <View style={[s.stageContent, !stage.ativo && s.stageInactiveContent]}>
+                    <View style={s.stageTop}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={s.stageName}>{stage.nome}</Text>
+                        <Text style={s.stageMeta}>{stage.unidadeMedicao}</Text>
+                      </View>
+                      <View style={[s.stagePill, stage.ativo ? s.stagePillActive : s.stagePillInactive]}>
+                        <Text style={[s.stagePillText, stage.ativo ? s.stagePillActiveText : s.stagePillInactiveText]}>
+                          {stage.ativo ? 'Ativa' : 'Inativa'}
+                        </Text>
+                      </View>
+                    </View>
 
-            {Boolean(stage.dataInicio || stage.dataFim) && (
-              <View style={s.durationRow}>
-                <MaterialCommunityIcons name="calendar-range" size={13} color="#6D28D9" />
-                <Text style={s.durationText}>
-                  {formatDateBR(stage.dataInicio)} → {formatDateBR(stage.dataFim)}
-                </Text>
-              </View>
-            )}
+                    {Boolean(stage.dataInicio || stage.dataFim) && (
+                      <View style={s.durationRow}>
+                        <MaterialCommunityIcons name="calendar-range" size={13} color="#6D28D9" />
+                        <Text style={s.durationText}>
+                          {formatDateBR(stage.dataInicio)} → {formatDateBR(stage.dataFim)}
+                        </Text>
+                      </View>
+                    )}
 
-            <View style={s.metricsRow}>
-              {[
-                { label: 'Checklist', on: stage.apareceNoChecklist },
-                { label: 'Cronograma', on: stage.apareceNoCronograma },
-                { label: 'Medição', on: stage.apareceNaMedicao },
-                { label: 'Crítica', on: stage.etapaCritica },
-                { label: 'Trava lib.', on: stage.travaLiberacao },
-              ].map((m) => (
-                <View key={m.label} style={[s.metricChip, m.on ? s.metricChipOn : s.metricChipOff]}>
-                  <MaterialCommunityIcons name={m.on ? 'check' : 'close'} size={10} color={m.on ? '#047857' : '#94A3B8'} />
-                  <Text style={[s.metricChipText, m.on ? s.metricChipTextOn : s.metricChipTextOff]}>{m.label}</Text>
-                </View>
-              ))}
-            </View>
+                    <View style={s.metricsRow}>
+                      {[
+                        { label: 'Checklist', on: stage.apareceNoChecklist },
+                        { label: 'Cronograma', on: stage.apareceNoCronograma },
+                        { label: 'Medição', on: stage.apareceNaMedicao },
+                        { label: 'Crítica', on: stage.etapaCritica },
+                        { label: 'Trava lib.', on: stage.travaLiberacao },
+                      ].map((m) => (
+                        <View key={m.label} style={[s.metricChip, m.on ? s.metricChipOn : s.metricChipOff]}>
+                          <MaterialCommunityIcons name={m.on ? 'check' : 'close'} size={10} color={m.on ? '#047857' : '#94A3B8'} />
+                          <Text style={[s.metricChipText, m.on ? s.metricChipTextOn : s.metricChipTextOff]}>{m.label}</Text>
+                        </View>
+                      ))}
+                    </View>
 
-            {stage.servicosDependentes.length > 0 && (
-              <View style={s.blocksRow}>
-                <MaterialCommunityIcons name="lock" size={13} color="#B45309" />
-                <Text style={s.blocksText}>Trava: {stage.servicosDependentes.join(', ')}</Text>
-              </View>
-            )}
-            {stage.observacao ? <Text style={s.observacaoText}>{stage.observacao}</Text> : null}
+                    {stage.servicosDependentes.length > 0 && (
+                      <View style={s.blocksRow}>
+                        <MaterialCommunityIcons name="lock" size={13} color="#B45309" />
+                        <Text style={s.blocksText}>Trava: {stage.servicosDependentes.join(', ')}</Text>
+                      </View>
+                    )}
+                    {stage.observacao ? <Text style={s.observacaoText}>{stage.observacao}</Text> : null}
+                  </View>
 
-            <View style={s.actionRow}>
-              <Pressable onPress={() => moveStage(stage, -1)} style={s.btnIcon}>
-                <MaterialCommunityIcons name="arrow-up" size={16} color="#475569" />
-              </Pressable>
-              <Pressable onPress={() => moveStage(stage, 1)} style={s.btnIcon}>
-                <MaterialCommunityIcons name="arrow-down" size={16} color="#475569" />
-              </Pressable>
-              <Pressable onPress={() => editStage(stage)} style={s.btnSecondary}>
-                <MaterialCommunityIcons name="pencil" size={13} color="#1D4ED8" />
-                <Text style={s.btnSecondaryText}>Editar</Text>
-              </Pressable>
-              {stage.ativo ? (
-                <Pressable onPress={() => inactivate(stage)} style={s.btnDanger}>
-                  <Text style={s.btnDangerText}>Inativar</Text>
-                </Pressable>
-              ) : (
-                <Pressable onPress={() => reactivate(stage)} style={s.btnReactivate}>
-                  <MaterialCommunityIcons name="restart" size={13} color="#047857" />
-                  <Text style={s.btnReactivateText}>Reativar</Text>
-                </Pressable>
-              )}
-              <Pressable onPress={() => setStageToDelete(stage)} style={s.btnDelete}>
-                <MaterialCommunityIcons name="trash-can-outline" size={14} color="#FFFFFF" />
-                <Text style={s.btnDeleteText}>Excluir</Text>
-              </Pressable>
-            </View>
+                  <View style={s.actionRow}>
+                    {stage.ativo ? (
+                      <Pressable onPress={() => inactivate(stage)} style={s.btnDanger}>
+                        <Text style={s.btnDangerText}>Inativar</Text>
+                      </Pressable>
+                    ) : (
+                      <Pressable onPress={() => reactivate(stage)} style={s.btnReactivate}>
+                        <MaterialCommunityIcons name="restart" size={13} color="#047857" />
+                        <Text style={s.btnReactivateText}>Reativar</Text>
+                      </Pressable>
+                    )}
+                    <Pressable onPress={() => editStage(stage)} style={s.btnSecondary}>
+                      <MaterialCommunityIcons name="pencil" size={13} color="#1D4ED8" />
+                      <Text style={s.btnSecondaryText}>Editar</Text>
+                    </Pressable>
+                    <Pressable onPress={() => setStageToDelete(stage)} style={s.btnDelete}>
+                      <MaterialCommunityIcons name="trash-can-outline" size={14} color="#FFFFFF" />
+                      <Text style={s.btnDeleteText}>Excluir</Text>
+                    </Pressable>
+                  </View>
                 </View>
               </View>
             ))}
@@ -643,6 +530,162 @@ export default function ServiceStagesScreen() {
       </View>
 
       </ScrollView>
+
+      {showBackToTop && (
+        <Pressable
+          onPress={() => scrollRef.current?.scrollTo({ y: 0, animated: false })}
+          style={s.backToTopFab}
+          testID="back-to-top">
+          <MaterialCommunityIcons name="chevron-up" size={22} color="#FFFFFF" />
+        </Pressable>
+      )}
+
+      {/* FORM MODAL */}
+      <Modal animationType="slide" transparent visible={formOpen} onRequestClose={cancelEdit}>
+        <Pressable style={s.selectBackdrop} onPress={cancelEdit}>
+          <Pressable style={s.formSheet} onPress={(e) => e.stopPropagation()}>
+            {/* grab handle */}
+            <View style={s.formSheetHandle} />
+            {/* header */}
+            <View style={s.formSheetHeader}>
+              <View style={s.formSheetHeaderLeft}>
+                <MaterialCommunityIcons name={editingId ? 'pencil' : 'plus-circle-outline'} size={20} color="#6D28D9" />
+                <Text style={s.formSheetTitle}>{editingId ? 'Editar etapa' : 'Nova etapa'}</Text>
+              </View>
+              <Pressable onPress={cancelEdit} style={s.selectClose}>
+                <MaterialCommunityIcons name="close" size={20} color="#475569" />
+              </Pressable>
+            </View>
+
+            <ScrollView style={s.formSheetScroll} contentContainerStyle={s.formSheetContent} keyboardShouldPersistTaps="handled">
+              <View style={s.formColumn}>
+                <Field label="Nome" value={draft.nome} onChangeText={(v) => updateDraft('nome', v)} error={errors.nome} />
+                <CatalogSelectField
+                  label="Categoria"
+                  value={draft.categoria}
+                  options={serviceCategories}
+                  onChange={(v) => updateDraft('categoria', v)}
+                  onManage={() => { cancelEdit(); router.push('/(tabs)/cronograma/catalogos?tab=categorias' as any); }}
+                  placeholder="Selecione a categoria"
+                  sheetTitle="Categoria"
+                  manageLabel="Gerenciar categorias"
+                  manageIcon="tag-multiple-outline"
+                  error={errors.categoria}
+                />
+                <CatalogSelectField
+                  label="Unidade de medição"
+                  value={draft.unidadeMedicao}
+                  options={serviceUnits}
+                  onChange={(v) => updateDraft('unidadeMedicao', v)}
+                  onManage={() => { cancelEdit(); router.push('/(tabs)/cronograma/catalogos?tab=unidades' as any); }}
+                  placeholder="Selecione a unidade"
+                  sheetTitle="Unidade de medição"
+                  manageLabel="Gerenciar unidades"
+                  manageIcon="ruler"
+                  error={errors.unidadeMedicao}
+                />
+              </View>
+
+              <View style={s.durationBox}>
+                <View style={s.durationHeader}>
+                  <MaterialCommunityIcons name="calendar-range" size={16} color="#6D28D9" />
+                  <Text style={s.fieldLabel}>Duração da etapa</Text>
+                </View>
+                <View style={s.formGrid}>
+                  <DateField label="Início" value={draft.dataInicio} onChangeISO={(iso) => updateDraft('dataInicio', iso)} />
+                  <DateField label="Fim" value={draft.dataFim} onChangeISO={(iso) => updateDraft('dataFim', iso)} />
+                </View>
+              </View>
+
+              <View style={s.toggleRow}>
+                {booleanFields.map(([field, label]) => {
+                  const on = Boolean(draft[field]);
+                  return (
+                    <Pressable key={field} onPress={() => updateDraft(field, !on)} style={[s.toggle, on && s.toggleOn]}>
+                      <MaterialCommunityIcons name={on ? 'check-circle' : 'circle-outline'} size={14} color={on ? '#6D28D9' : '#94A3B8'} />
+                      <Text style={[s.toggleText, on && s.toggleTextOn]}>{label}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              {sortedStages.filter((st) => st.id !== draft.id).length > 0 && (
+                <View style={s.dependencyBox}>
+                  <Text style={s.fieldLabel}>Serviços que esta etapa trava</Text>
+                  <View style={s.searchWrap}>
+                    <MaterialCommunityIcons name="magnify" size={16} color="#94A3B8" />
+                    <TextInput
+                      onChangeText={setDepFilter}
+                      placeholder="Filtrar etapas…"
+                      placeholderTextColor="#94A3B8"
+                      style={s.searchInput}
+                      value={depFilter}
+                    />
+                    {depFilter ? (
+                      <Pressable onPress={() => setDepFilter('')} style={s.searchClear}>
+                        <MaterialCommunityIcons name="close-circle" size={16} color="#94A3B8" />
+                      </Pressable>
+                    ) : null}
+                  </View>
+                  {dependencyCandidates.length === 0 ? (
+                    <Text style={s.emptyDepText}>Nenhuma etapa corresponde ao filtro.</Text>
+                  ) : (
+                    dependencyGroups.map(([cat, items]) => {
+                      const forceOpen = Boolean(normalizedFilter);
+                      const isOpen = forceOpen || openDepGroups[cat] === true;
+                      const selectedInGroup = items.filter((st) => draft.servicosDependentes.includes(st.nome)).length;
+                      return (
+                        <View key={`depgrp-${cat}`} style={s.depGroup}>
+                          <Pressable
+                            onPress={() => setOpenDepGroups((cur) => ({ ...cur, [cat]: !isOpen }))}
+                            style={s.depGroupHeader}
+                          >
+                            <MaterialCommunityIcons name={isOpen ? 'chevron-down' : 'chevron-right'} size={16} color="#64748B" />
+                            <View style={[s.depGroupDot, { backgroundColor: categoryColor(cat) }]} />
+                            <Text style={s.depGroupTitle}>{cat}</Text>
+                            {selectedInGroup > 0 ? (
+                              <View style={s.depGroupSelPill}>
+                                <MaterialCommunityIcons name="lock" size={10} color="#B45309" />
+                                <Text style={s.depGroupSelText}>{selectedInGroup}</Text>
+                              </View>
+                            ) : null}
+                            <Text style={s.depGroupCount}>{items.length}</Text>
+                          </Pressable>
+                          {isOpen && (
+                            <View style={s.toggleRow}>
+                              {items.map((st) => {
+                                const sel = draft.servicosDependentes.includes(st.nome);
+                                return (
+                                  <Pressable key={`dep-${st.id}`} onPress={() => toggleDependent(st.nome)} style={[s.toggle, sel && s.toggleWarn]}>
+                                    <MaterialCommunityIcons name={sel ? 'lock' : 'lock-open-outline'} size={13} color={sel ? '#B45309' : '#94A3B8'} />
+                                    <Text style={[s.toggleText, sel && s.toggleWarnText]}>{st.nome}</Text>
+                                  </Pressable>
+                                );
+                              })}
+                            </View>
+                          )}
+                        </View>
+                      );
+                    })
+                  )}
+                </View>
+              )}
+
+              <TextInput multiline onChangeText={(v) => updateDraft('observacao', v)} placeholder="Observação (opcional)" placeholderTextColor="#94A3B8" style={s.textarea} value={draft.observacao} />
+
+              <View style={s.actionRow}>
+                <Pressable onPress={saveDraft} style={s.btnPrimary}>
+                  <MaterialCommunityIcons name={editingId ? 'content-save' : 'plus'} size={16} color="#FFFFFF" />
+                  <Text style={s.btnPrimaryText}>{editingId ? 'Salvar edição' : 'Criar etapa'}</Text>
+                </Pressable>
+                <Pressable onPress={cancelEdit} style={s.btnSecondary}>
+                  <Text style={s.btnSecondaryText}>Cancelar</Text>
+                </Pressable>
+              </View>
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       <Modal animationType="fade" transparent visible={restoreOpen} onRequestClose={() => setRestoreOpen(false)}>
         <Pressable style={s.modalBackdrop} onPress={() => setRestoreOpen(false)}>
@@ -701,10 +744,13 @@ const s = StyleSheet.create({
   container: { gap: 12, padding: 16, paddingBottom: 40 },
 
   // page header
-  pageHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#FFFFFF', borderRadius: 16, borderWidth: 2, borderColor: '#8B5CF6', padding: 16 },
+  pageHeader: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#FFFFFF', borderRadius: 16, borderWidth: 2, borderColor: '#8B5CF6', padding: 16 },
   pageHeaderLeft: { flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1 },
   pageTitle: { color: '#0F172A', fontSize: 22, fontWeight: '900' },
   pageSubtitle: { color: '#64748B', fontSize: 13, marginTop: 2 },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 0 },
+  headerIconBtn: { width: 38, height: 38, borderRadius: 10, borderWidth: 1, borderColor: '#DDD6FE', alignItems: 'center', justifyContent: 'center' },
+  headerIconBtnPrimary: { backgroundColor: '#EDE9FE', borderColor: '#8B5CF6' },
   restoreBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, borderRadius: 10, borderWidth: 1, borderColor: '#DDD6FE', paddingHorizontal: 12, paddingVertical: 9 },
   restoreBtnText: { color: '#6D28D9', fontSize: 12, fontWeight: '700' },
 
@@ -720,6 +766,7 @@ const s = StyleSheet.create({
 
   // form
   formGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  formColumn: { gap: 10 },
   fieldGroup: { flexGrow: 1, gap: 6, minWidth: 160 },
   fieldLabel: { color: '#475569', fontSize: 12, fontWeight: '700' },
   input: { backgroundColor: '#F8FAFC', borderColor: '#CBD5E1', borderRadius: 10, borderWidth: 1, color: '#0F172A', fontSize: 14, minHeight: 42, paddingHorizontal: 12 },
@@ -743,12 +790,11 @@ const s = StyleSheet.create({
   // stage cards
   stageCard: { backgroundColor: '#F8FAFC', borderRadius: 12, borderWidth: 1, borderColor: '#E2E8F0', flexDirection: 'row', overflow: 'hidden' },
   stageStripe: { width: 4, alignSelf: 'stretch' },
-  stageBody: { flex: 1, padding: 12, gap: 10 },
-  stageInactive: { opacity: 0.6 },
+  stageBody: { flex: 1, padding: 14, gap: 14 },
+  stageContent: { gap: 14 },
+  stageInactiveContent: { opacity: 0.55 },
   stageEditing: { borderColor: '#8B5CF6', backgroundColor: '#FAF5FF' },
   stageTop: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  stageOrder: { width: 30, height: 30, borderRadius: 8, backgroundColor: '#EFF6FF', alignItems: 'center', justifyContent: 'center' },
-  stageOrderText: { color: '#1D4ED8', fontSize: 13, fontWeight: '900' },
   stageName: { color: '#0F172A', fontSize: 14, fontWeight: '800' },
   stageMeta: { color: '#64748B', fontSize: 12, marginTop: 1 },
   stagePill: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 4 },
@@ -781,10 +827,15 @@ const s = StyleSheet.create({
   btnDeleteText: { color: '#FFFFFF', fontSize: 12, fontWeight: '800' },
   btnReactivate: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: '#D1FAE5', borderColor: '#A7F3D0', borderWidth: 1, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8 },
   btnReactivateText: { color: '#047857', fontSize: 12, fontWeight: '800' },
-  btnIcon: { borderColor: '#E2E8F0', borderRadius: 8, borderWidth: 1, padding: 8 },
+  backToTopFab: {
+    position: 'absolute', right: 20, bottom: 24, width: 44, height: 44, borderRadius: 22,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: '#64748B',
+    shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 6,
+  },
 
   // grouping (mirrors the floorGroup pattern from app/(tabs)/visao-geral/[torreId].tsx)
-  stageGroup: { gap: 8 },
+  stageGroup: { gap: 12 },
   stageGroupHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingTop: 4 },
   stageGroupDot: { width: 10, height: 10, borderRadius: 5 },
   stageGroupTitle: { color: '#0F172A', fontSize: 13, fontWeight: '800', flex: 1 },
@@ -820,6 +871,17 @@ const s = StyleSheet.create({
   selectItemValueSelected: { color: '#6D28D9' },
   selectItemLabel: { color: '#475569', fontSize: 13, flex: 1 },
   selectItemLabelSelected: { color: '#5B21B6', fontWeight: '600' },
+  selectManageBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginHorizontal: 16, marginTop: 8, paddingVertical: 11, borderRadius: 10, borderWidth: 1, borderColor: '#DDD6FE', backgroundColor: '#F5F3FF' },
+  selectManageText: { color: '#6D28D9', fontSize: 13, fontWeight: '800' },
+
+  // form sheet
+  formSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: '92%', paddingBottom: 0 },
+  formSheetHandle: { width: 36, height: 4, backgroundColor: '#E2E8F0', borderRadius: 2, alignSelf: 'center', marginTop: 10, marginBottom: 4 },
+  formSheetHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 18, paddingTop: 10, paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: '#F1F5F9' },
+  formSheetHeaderLeft: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  formSheetTitle: { color: '#0F172A', fontSize: 16, fontWeight: '800' },
+  formSheetScroll: { flexGrow: 0 },
+  formSheetContent: { gap: 14, padding: 18, paddingBottom: 36 },
 
   // modal
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(15,23,42,0.55)', justifyContent: 'center', alignItems: 'center', padding: 20 },

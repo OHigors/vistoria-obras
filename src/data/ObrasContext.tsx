@@ -3,6 +3,8 @@ import { createContext, useCallback, useContext, useEffect, useState } from 'rea
 import type { Apartment, ApartmentStatus, ChecklistItem, Tower } from '@/src/data/mockObras';
 import type { Measurement } from '@/src/data/localMeasurements';
 import type { ServiceStage } from '@/src/data/serviceStages';
+import type { ServiceCategory } from '@/src/data/serviceCategories';
+import type { ServiceUnit } from '@/src/data/serviceUnits';
 import * as db from '@/src/data/db';
 
 type Project = { id: string; name: string; summary: string };
@@ -12,6 +14,8 @@ type ObrasContextValue = {
   towers: Tower[];
   apartments: Apartment[];
   serviceStages: ServiceStage[];
+  serviceCategories: ServiceCategory[];
+  serviceUnits: ServiceUnit[];
   measurements: Measurement[];
   loading: boolean;
   // helpers
@@ -23,6 +27,8 @@ type ObrasContextValue = {
   refreshApartment: (apartmentId: string) => Promise<void>;
   refreshMeasurements: () => Promise<void>;
   refreshServiceStages: () => Promise<void>;
+  refreshServiceCategories: () => Promise<void>;
+  refreshServiceUnits: () => Promise<void>;
   updateApartmentLocal: (apartmentId: string, progress: number, status: ApartmentStatus, checklist?: ChecklistItem[]) => void;
 };
 
@@ -33,6 +39,8 @@ const ObrasContext = createContext<ObrasContextValue>({
   towers: [],
   apartments: [],
   serviceStages: [],
+  serviceCategories: [],
+  serviceUnits: [],
   measurements: [],
   loading: true,
   getTowerById: () => undefined,
@@ -42,6 +50,8 @@ const ObrasContext = createContext<ObrasContextValue>({
   refreshApartment: async () => {},
   refreshMeasurements: async () => {},
   refreshServiceStages: async () => {},
+  refreshServiceCategories: async () => {},
+  refreshServiceUnits: async () => {},
   updateApartmentLocal: () => { },
 });
 
@@ -50,22 +60,28 @@ export function ObrasProvider({ children }: { children: React.ReactNode }) {
   const [towers, setTowers] = useState<Tower[]>([]);
   const [apartments, setApartments] = useState<Apartment[]>([]);
   const [serviceStages, setServiceStages] = useState<ServiceStage[]>([]);
+  const [serviceCategories, setServiceCategories] = useState<ServiceCategory[]>([]);
+  const [serviceUnits, setServiceUnits] = useState<ServiceUnit[]>([]);
   const [measurements, setMeasurements] = useState<Measurement[]>([]);
   const [loading, setLoading] = useState(true);
 
   const loadAll = useCallback(async () => {
     try {
-      const [proj, towerData, apartmentData, stageData, measurementData] = await Promise.all([
+      const [proj, towerData, apartmentData, stageData, categoryData, unitData, measurementData] = await Promise.all([
         db.fetchProject(),
         db.fetchTowers(),
         db.fetchApartments(),
         db.loadServiceStages(),
+        db.loadServiceCategories(),
+        db.loadServiceUnits(),
         db.loadAllMeasurements(),
       ]);
       setProject(proj);
       setTowers(towerData);
       setApartments(apartmentData);
       setServiceStages(stageData);
+      setServiceCategories(categoryData);
+      setServiceUnits(unitData);
       setMeasurements(measurementData);
     } finally {
       setLoading(false);
@@ -80,6 +96,16 @@ export function ObrasProvider({ children }: { children: React.ReactNode }) {
   const refreshServiceStages = useCallback(async () => {
     const data = await db.loadServiceStages();
     setServiceStages(data);
+  }, []);
+
+  const refreshServiceCategories = useCallback(async () => {
+    const data = await db.loadServiceCategories();
+    setServiceCategories(data);
+  }, []);
+
+  const refreshServiceUnits = useCallback(async () => {
+    const data = await db.loadServiceUnits();
+    setServiceUnits(data);
   }, []);
 
   useEffect(() => {
@@ -129,6 +155,8 @@ export function ObrasProvider({ children }: { children: React.ReactNode }) {
         towers,
         apartments,
         serviceStages,
+        serviceCategories,
+        serviceUnits,
         measurements,
         loading,
         getTowerById,
@@ -138,6 +166,8 @@ export function ObrasProvider({ children }: { children: React.ReactNode }) {
         refreshApartment,
         refreshMeasurements,
         refreshServiceStages,
+        refreshServiceCategories,
+        refreshServiceUnits,
         updateApartmentLocal,
       }}>
       {children}

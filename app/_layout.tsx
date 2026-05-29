@@ -19,6 +19,7 @@ import {
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ObrasProvider } from '@/src/data/ObrasContext';
+import { ToastProvider } from '@/src/ui/Toast';
 
 SplashScreen.preventAutoHideAsync();
 
@@ -48,11 +49,13 @@ export default function RootLayout() {
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
       <ObrasProvider>
-        <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: '#F8FAFC' } }}>
-          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-          <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
-        </Stack>
-        <StatusBar style="light" />
+        <ToastProvider>
+          <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: '#F8FAFC' } }}>
+            <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+            <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
+          </Stack>
+          <StatusBar style="light" />
+        </ToastProvider>
       </ObrasProvider>
     </ThemeProvider>
   );

@@ -4,6 +4,8 @@ import type { Measurement, MeasurementStatus, MeasurementType } from '@/src/data
 import type { InspectionVisit, VisitChecklistCounts } from '@/src/data/localInspectionVisits';
 import type { InspectionPhoto } from '@/src/data/localInspectionPhotos';
 import type { ServiceStage } from '@/src/data/serviceStages';
+import type { ServiceCategory } from '@/src/data/serviceCategories';
+import type { ServiceUnit } from '@/src/data/serviceUnits';
 import type { ScheduleFields } from '@/src/data/schedule';
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
@@ -452,4 +454,117 @@ export async function saveServiceStages(stages: ServiceStage[]): Promise<void> {
 
 export async function deleteServiceStage(id: string): Promise<void> {
   await supabase.from('service_stages').delete().eq('id', id);
+}
+
+// ─── Service categories ───────────────────────────────────────────────────────
+
+function mapServiceCategory(row: Record<string, unknown>): ServiceCategory {
+  return { id: row.id as string, nome: row.nome as string };
+}
+
+export async function loadServiceCategories(): Promise<ServiceCategory[]> {
+  const { data, error } = await supabase
+    .from('service_categories')
+    .select('id, nome')
+    .eq('obra_id', OBRA_ID)
+    .order('nome');
+  if (error) throw error;
+  return (data ?? []).map(mapServiceCategory);
+}
+
+export async function saveServiceCategory(category: ServiceCategory): Promise<void> {
+  const id = category.id || `cat-${Date.now()}`;
+  const { error } = await supabase.from('service_categories').upsert({
+    id,
+    obra_id: OBRA_ID,
+    nome: category.nome,
+  });
+  if (error) throw error;
+}
+
+export async function renameServiceCategory(id: string, oldNome: string, newNome: string): Promise<void> {
+  const { error } = await supabase
+    .from('service_categories')
+    .update({ nome: newNome })
+    .eq('id', id);
+  if (error) throw error;
+  // Cascade to stages using the old name so existing groupings stay consistent.
+  if (oldNome && oldNome !== newNome) {
+    await supabase
+      .from('service_stages')
+      .update({ categoria: newNome })
+      .eq('obra_id', OBRA_ID)
+      .eq('categoria', oldNome);
+  }
+}
+
+export async function countStagesUsingCategory(nome: string): Promise<number> {
+  const { count, error } = await supabase
+    .from('service_stages')
+    .select('id', { count: 'exact', head: true })
+    .eq('obra_id', OBRA_ID)
+    .eq('categoria', nome);
+  if (error) throw error;
+  return count ?? 0;
+}
+
+export async function deleteServiceCategory(id: string): Promise<void> {
+  const { error } = await supabase.from('service_categories').delete().eq('id', id);
+  if (error) throw error;
+}
+
+// ─── Service units ────────────────────────────────────────────────────────────
+
+function mapServiceUnit(row: Record<string, unknown>): ServiceUnit {
+  return { id: row.id as string, nome: row.nome as string };
+}
+
+export async function loadServiceUnits(): Promise<ServiceUnit[]> {
+  const { data, error } = await supabase
+    .from('service_units')
+    .select('id, nome')
+    .eq('obra_id', OBRA_ID)
+    .order('nome');
+  if (error) throw error;
+  return (data ?? []).map(mapServiceUnit);
+}
+
+export async function saveServiceUnit(unit: ServiceUnit): Promise<void> {
+  const id = unit.id || `unit-${Date.now()}`;
+  const { error } = await supabase.from('service_units').upsert({
+    id,
+    obra_id: OBRA_ID,
+    nome: unit.nome,
+  });
+  if (error) throw error;
+}
+
+export async function renameServiceUnit(id: string, oldNome: string, newNome: string): Promise<void> {
+  const { error } = await supabase
+    .from('service_units')
+    .update({ nome: newNome })
+    .eq('id', id);
+  if (error) throw error;
+  if (oldNome && oldNome !== newNome) {
+    await supabase
+      .from('service_stages')
+      .update({ unidade_medicao: newNome })
+      .eq('obra_id', OBRA_ID)
+      .eq('unidade_medicao', oldNome);
+  }
+}
+
+export async function countStagesUsingUnit(nome: string): Promise<number> {
+  const { count, error } = await supabase
+    .from('service_stages')
+    .select('id', { count: 'exact', head: true })
+    .eq('obra_id', OBRA_ID)
+    .eq('unidade_medicao', nome);
+  if (error) throw error;
+  return count ?? 0;
+}
+
+export async function deleteServiceUnit(id: string): Promise<void> {
+  const { error } = await supabase.from('service_units').delete().eq('id', id);
+  if (error) throw error;
 }
