@@ -180,7 +180,7 @@ export const createEmptyServiceStage = (order: number): ServiceStage => ({
   id: `etapa-${Date.now()}`,
   nome: '',
   categoria: '',
-  unidadeMedicao: 'un',
+  unidadeMedicao: '',
   ordemExecucao: order,
   apareceNoChecklist: true,
   apareceNoCronograma: true,

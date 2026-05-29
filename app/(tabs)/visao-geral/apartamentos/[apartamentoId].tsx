@@ -31,10 +31,17 @@ import * as dbApi from '@/src/data/db';
 import type { ScheduleFields } from '@/src/data/schedule';
 import { formatDateBr, getScheduleRows, isValidBrDate, maskDateBr } from '@/src/data/schedule';
 import { getBlockedServiceGroups } from '@/src/data/serviceBlockers';
-import { isServiceActiveForFeature } from '@/src/data/serviceStages';
+import { defaultServiceDependencies, isServiceActiveForFeature } from '@/src/data/serviceStages';
 import { checklistConfig, getProgressColor, statusConfig } from '@/src/ui/status';
 
 const checklistOptions: ChecklistState[] = ['ok', 'pending', 'partial', 'notApplicable'];
+
+const CATEGORY_PALETTE = ['#2563EB', '#7C3AED', '#0891B2', '#16A34A', '#D97706', '#DB2777', '#0EA5E9', '#65A30D', '#B45309', '#9333EA'];
+const categoryColor = (cat: string) => {
+  let hash = 0;
+  for (let i = 0; i < cat.length; i++) hash = (hash * 31 + cat.charCodeAt(i)) >>> 0;
+  return CATEGORY_PALETTE[hash % CATEGORY_PALETTE.length];
+};
 const criticalityOptions = ['Baixa', 'Média', 'Alta', 'Crítica'] as const;
 const detailTabs = ['Resumo', 'Checklist', 'Pendências', 'Fotos', 'Serviços', 'Cronograma', 'Medições', 'Histórico'] as const;
 
@@ -56,6 +63,30 @@ type EditableChecklistItem = ChecklistItem & {
 
 const isIssueCriticality = (v: unknown): v is IssueCriticality =>
   criticalityOptions.includes(v as IssueCriticality);
+
+// Group step configuration: parent step name → sub-step names.
+// When all sub-steps are 'ok' the parent auto-resolves to 'ok'.
+// Add more entries here to create more group steps.
+const GROUP_STEP_CHILDREN: Record<string, string[]> = {
+  Impermeabilização: [
+    'Impermeabilização do banheiro',
+    'Impermeabilização da área de serviço',
+    'Impermeabilização da cozinha',
+  ],
+};
+
+const applyGroupStepStates = (items: EditableChecklistItem[]): EditableChecklistItem[] => {
+  const stateByLabel = new Map(items.map((i) => [i.label, i.state]));
+  return items.map((item) => {
+    const children = GROUP_STEP_CHILDREN[item.label];
+    if (!children) return item;
+    const childStates = children.map((name) => stateByLabel.get(name) ?? 'pending');
+    const allDone = childStates.every((s) => s === 'ok' || s === 'notApplicable');
+    const anyProgress = childStates.some((s) => s === 'ok' || s === 'partial');
+    const derivedState: ChecklistState = allDone ? 'ok' : anyProgress ? 'partial' : 'pending';
+    return derivedState !== item.state ? { ...item, state: derivedState } : item;
+  });
+};
 
 const getInitialChecklist = (items?: ChecklistItem[]): EditableChecklistItem[] =>
   (items ?? []).filter((item) => isServiceActiveForFeature(item.label, 'checklist')).map((item) => ({
@@ -131,6 +162,8 @@ export default function ApartmentDetailScreen() {
   const [confirmRemoveStep, setConfirmRemoveStep] = useState<EditableChecklistItem | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
   const [showBackToTop, setShowBackToTop] = useState(false);
+  const [collapsedChecklistGroups, setCollapsedChecklistGroups] = useState<Record<string, boolean>>({});
+  const [collapsedAddStepGroups, setCollapsedAddStepGroups] = useState<Record<string, boolean>>({});
   const scrollRef = useRef<ScrollView | null>(null);
 
   // ── save batching + visible feedback ─────────────────────────────────────
@@ -246,6 +279,66 @@ export default function ApartmentDetailScreen() {
   const okCount = checklist.filter((i) => i.state === 'ok' || i.state === 'notApplicable').length;
   const currentStatusKey = calculateApartmentStatus(checklist, progress);
   const status = statusConfig[currentStatusKey];
+
+  const categoryByLabel = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const stage of serviceStages) {
+      const cat = stage.categoria?.trim() || 'Sem categoria';
+      map.set(stage.nome, cat);
+    }
+    return map;
+  }, [serviceStages]);
+
+  const checklistGroups = useMemo(() => {
+    const map = new Map<string, EditableChecklistItem[]>();
+    for (const item of checklist) {
+      const cat = categoryByLabel.get(item.label) || 'Sem categoria';
+      if (!map.has(cat)) map.set(cat, []);
+      map.get(cat)!.push(item);
+    }
+    return [...map.entries()].sort(([a], [b]) => a.localeCompare(b, 'pt-BR'));
+  }, [checklist, categoryByLabel]);
+
+  useEffect(() => {
+    setCollapsedChecklistGroups((cur) => {
+      const next = { ...cur };
+      for (const [cat] of checklistGroups) if (!(cat in next)) next[cat] = true;
+      return next;
+    });
+  }, [checklistGroups]);
+  // Reverse dependency map: step label → blocker labels that must be 'ok' first.
+  // Merges the hardcoded defaultServiceDependencies with any user-configured
+  // servicosDependentes so both sources are respected.
+  const blockedBy = useMemo(() => {
+    // Build forward map (blocker → what it blocks), starting from defaults
+    const forward = new Map<string, string[]>(
+      Object.entries(defaultServiceDependencies).map(([k, v]) => [k.toLowerCase(), v.map((s) => s.toLowerCase())])
+    );
+    for (const stage of serviceStages) {
+      if (stage.servicosDependentes.length > 0) {
+        const key = stage.nome.toLowerCase();
+        const existing = forward.get(key) ?? [];
+        const merged = [...new Set([...existing, ...stage.servicosDependentes.map((s) => s.toLowerCase())])];
+        forward.set(key, merged);
+      }
+    }
+    // Invert to: blocked label → list of blocker labels
+    const map = new Map<string, string[]>();
+    for (const [blocker, blocked] of forward) {
+      for (const dep of blocked) {
+        const cur = map.get(dep) ?? [];
+        map.set(dep, [...cur, blocker]);
+      }
+    }
+    return map;
+  }, [serviceStages]);
+
+  const checklistStateByLabel = useMemo(() => {
+    const map = new Map<string, ChecklistState>();
+    for (const item of checklist) map.set(item.label.toLowerCase(), item.state);
+    return map;
+  }, [checklist]);
+
   const measurableItems = checklist.filter((i) => i.state === 'ok' && isServiceActiveForFeature(i.label, 'medicao'));
   const blockedServiceGroups = getBlockedServiceGroups(checklist);
   const scheduleRows = getScheduleRows(checklist);
@@ -312,19 +405,20 @@ export default function ApartmentDetailScreen() {
 
   const updateItemStatus = (itemId: string, state: ChecklistState) => {
     const prev = checklist;
-    const next = prev.map((i) => i.id === itemId
+    const baseNext = prev.map((i) => i.id === itemId
       ? { ...i, state, issueCriticality: state === 'pending' || state === 'partial' ? i.issueCriticality ?? 'Média' : undefined, issueComment: state === 'pending' || state === 'partial' ? i.issueComment ?? '' : '' }
       : i);
+    // Re-derive group step parent states whenever a sub-step changes.
+    const next = applyGroupStepStates(baseNext);
     setChecklist(next);
-    const changed = next.find((i) => i.id === itemId);
-    if (changed && apartamentoId) {
-      pendingRef.current.checklistItems.set(itemId, changed);
+    if (apartamentoId) {
+      // Queue every item whose state changed (direct edit + any auto-updated parent).
+      for (const item of next) {
+        const prevItem = prev.find((p) => p.id === item.id);
+        if (prevItem?.state !== item.state) pendingRef.current.checklistItems.set(item.id, item);
+      }
       const np = calculateProgress(next);
       const ns = calculateApartmentStatus(next, np);
-      // Apartment stats are a single small upsert and feed the header; keep
-      // it immediate so the user sees the new % without waiting for debounce.
-      // Done outside any setState updater so we never call another component's
-      // setState during this render.
       dbApi.updateApartmentStats(apartamentoId, np, ns);
       updateApartmentLocal(apartamentoId, np, ns, next);
     }
@@ -862,7 +956,19 @@ export default function ApartmentDetailScreen() {
             <View style={s.checklistHeader}>
               <Text style={s.checklistProgress}>{okCount} / {checklist.length} concluídos</Text>
               <View style={s.checklistHeaderActions}>
-                <Pressable onPress={() => { setAddStepSearch(''); setAddStepOpen(true); }} style={s.addStepBtn} testID="add-step-btn">
+                <Pressable
+                  onPress={() => {
+                    setAddStepSearch('');
+                    const cats: Record<string, boolean> = {};
+                    for (const stg of serviceStages) {
+                      const cat = stg.categoria?.trim() || 'Sem categoria';
+                      cats[cat] = true;
+                    }
+                    setCollapsedAddStepGroups(cats);
+                    setAddStepOpen(true);
+                  }}
+                  style={s.addStepBtn}
+                  testID="add-step-btn">
                   <MaterialCommunityIcons name="plus-circle-outline" size={14} color="#2563EB" />
                   <Text style={s.addStepBtnText}>Adicionar etapa</Text>
                 </Pressable>
@@ -872,19 +978,48 @@ export default function ApartmentDetailScreen() {
                 </Pressable>
               </View>
             </View>
-            {checklist.map((item) => {
-              const cfg = checklistConfig[item.state];
-              const itemPhotos = photosByServiceId[item.id] ?? [];
-              const isPending = item.state === 'pending' || item.state === 'partial';
+            {checklistGroups.map(([cat, groupItems]) => {
+              const color = categoryColor(cat);
+              const collapsed = collapsedChecklistGroups[cat] === true;
+              const okInGroup = groupItems.filter((i) => i.state === 'ok' || i.state === 'notApplicable').length;
               return (
-                <View key={item.id} style={[s.checkCard, { borderLeftColor: cfg.color }]}>
+                <View key={`chk-grp-${cat}`} style={s.checklistGroup}>
+                  <Pressable
+                    onPress={() => setCollapsedChecklistGroups((cur) => ({ ...cur, [cat]: !collapsed }))}
+                    style={s.checklistGroupHeader}>
+                    <MaterialCommunityIcons name={collapsed ? 'chevron-right' : 'chevron-down'} size={18} color="#64748B" />
+                    <View style={[s.checklistGroupDot, { backgroundColor: color }]} />
+                    <Text style={s.checklistGroupTitle}>{cat}</Text>
+                    <Text style={s.checklistGroupCount}>{okInGroup}/{groupItems.length} OK</Text>
+                  </Pressable>
+                  {!collapsed && groupItems.map((item) => {
+                    const cfg = checklistConfig[item.state];
+                    const itemPhotos = photosByServiceId[item.id] ?? [];
+                    const isPending = item.state === 'pending' || item.state === 'partial';
+                    const blockerLabels = blockedBy.get(item.label.toLowerCase()) ?? [];
+                    const activeBlockers = blockerLabels.filter((b) => checklistStateByLabel.get(b) !== 'ok');
+                    const isLocked = activeBlockers.length > 0;
+                    const isGroupStep = item.label in GROUP_STEP_CHILDREN;
+                    const subStepNames = isGroupStep ? GROUP_STEP_CHILDREN[item.label] : [];
+                    const subStepItems = subStepNames.map((name) => checklist.find((i) => i.label === name));
+                    return (
+                      <View key={item.id} style={[s.checkCard, { borderLeftColor: isLocked ? '#B45309' : isGroupStep ? '#0891B2' : cfg.color }, isLocked && s.checkCardLocked]}>
                   <View style={s.checkCardTop}>
-                    <View style={[s.checkIcon, { backgroundColor: cfg.background }]}>
-                      <Text style={[s.checkIconSymbol, { color: cfg.color }]}>{cfg.symbol}</Text>
+                    <View style={[s.checkIcon, { backgroundColor: isGroupStep ? '#E0F2FE' : cfg.background }]}>
+                      {isGroupStep
+                        ? <MaterialCommunityIcons name="layers-outline" size={18} color="#0891B2" />
+                        : <Text style={[s.checkIconSymbol, { color: cfg.color }]}>{cfg.symbol}</Text>
+                      }
                     </View>
                     <View style={s.checkCardInfo}>
                       <View style={s.checkLabelRow}>
                         <Text style={s.checkLabel}>{item.label}</Text>
+                        {isGroupStep && (
+                          <View style={s.groupBadge}>
+                            <MaterialCommunityIcons name="layers-outline" size={10} color="#0891B2" />
+                            <Text style={s.groupBadgeText}>Grupo</Text>
+                          </View>
+                        )}
                         {isExtraStep(item.label) && (
                           <View style={s.extraBadge}>
                             <MaterialCommunityIcons name="star-outline" size={10} color="#7C3AED" />
@@ -892,8 +1027,11 @@ export default function ApartmentDetailScreen() {
                           </View>
                         )}
                       </View>
-                      <Text style={[s.checkStatus, { color: cfg.color }]}>
-                        {cfg.label}{itemPhotos.length > 0 ? ` · ${itemPhotos.length} foto(s)` : ''}
+                      <Text style={[s.checkStatus, { color: isGroupStep ? '#0891B2' : cfg.color }]}>
+                        {isGroupStep
+                          ? `${subStepItems.filter((s) => s?.state === 'ok' || s?.state === 'notApplicable').length}/${subStepNames.length} sub-etapas OK`
+                          : `${cfg.label}${itemPhotos.length > 0 ? ` · ${itemPhotos.length} foto(s)` : ''}`
+                        }
                       </Text>
                     </View>
                     {isExtraStep(item.label) && (
@@ -907,100 +1045,159 @@ export default function ApartmentDetailScreen() {
                     )}
                   </View>
 
-                  <View style={s.stateRow}>
-                    {checklistOptions.map((opt) => {
-                      const oc = checklistConfig[opt];
-                      const sel = item.state === opt;
-                      return (
-                        <Pressable
-                          key={opt}
-                          onPress={() => updateItemStatus(item.id, opt)}
-                          testID={`checklist-${item.id}-${opt}`}
-                          style={[s.stateBtn, sel && { backgroundColor: oc.background, borderColor: oc.color }]}>
-                          <Text style={[s.stateBtnText, sel && { color: oc.color, fontWeight: '800' as const }]}>{oc.label}</Text>
-                        </Pressable>
-                      );
-                    })}
-                  </View>
-
-                  <TextInput
-                    multiline
-                    onChangeText={(v) => updateItemComment(item.id, v)}
-                    placeholder="Comentário..."
-                    placeholderTextColor="#94A3B8"
-                    style={s.textarea}
-                    value={item.comment}
-                  />
-
-                  {isPending && (
-                    <View style={s.issueBox}>
-                      <Text style={s.issueBoxTitle}>Criticidade da pendência</Text>
-                      <View style={s.critRow}>
-                        {criticalityOptions.map((c) => {
-                          const sel = item.issueCriticality === c;
-                          const cc = c === 'Crítica' ? '#B91C1C' : c === 'Alta' ? '#B45309' : c === 'Média' ? '#D97706' : '#64748B';
+                  {isLocked ? (
+                    <View style={s.lockBanner}>
+                      <MaterialCommunityIcons name="lock" size={14} color="#B45309" />
+                      <View style={{ flex: 1 }}>
+                        <Text style={s.lockTitle}>Etapa bloqueada</Text>
+                        <Text style={s.lockText} numberOfLines={3}>
+                          Aguardando conclusão de: {activeBlockers.join(', ')}
+                        </Text>
+                      </View>
+                    </View>
+                  ) : isGroupStep ? (
+                    <View style={s.roadmapTrack}>
+                      {subStepNames.map((name, idx) => {
+                        const sub = subStepItems[idx];
+                        const subState = sub?.state ?? 'pending';
+                        const subIsOk = subState === 'ok' || subState === 'notApplicable';
+                        const subIsPartial = subState === 'partial';
+                        const subBlockers = blockedBy.get(name.toLowerCase()) ?? [];
+                        const subIsLocked = subBlockers.some((b) => checklistStateByLabel.get(b) !== 'ok');
+                        const dotColor = subIsLocked ? '#B45309' : subIsOk ? '#047857' : subIsPartial ? '#D97706' : '#94A3B8';
+                        const prevSub = idx > 0 ? subStepItems[idx - 1] : null;
+                        const prevIsOk = prevSub ? (prevSub.state === 'ok' || prevSub.state === 'notApplicable') : false;
+                        const leftLineColor = idx === 0 ? 'transparent' : prevIsOk ? '#047857' : '#E2E8F0';
+                        const rightLineColor = idx === subStepNames.length - 1 ? 'transparent' : subIsOk ? '#047857' : '#E2E8F0';
+                        const shortLabel = name.replace(/^Impermeabilização /, '');
+                        return (
+                          <View key={name} style={s.roadmapCell}>
+                            <View style={s.roadmapDotRow}>
+                              <View style={[s.roadmapHalfLine, { backgroundColor: leftLineColor }]} />
+                              <View style={[s.roadmapDot, {
+                                backgroundColor: subIsOk ? dotColor : subIsLocked ? '#FEF3C7' : '#FFFFFF',
+                                borderColor: dotColor,
+                              }]}>
+                                {subIsLocked
+                                  ? <MaterialCommunityIcons name="lock" size={9} color="#B45309" />
+                                  : subIsOk
+                                  ? <MaterialCommunityIcons name="check" size={11} color="#FFFFFF" />
+                                  : subIsPartial
+                                  ? <View style={[s.roadmapInnerDot, { backgroundColor: dotColor }]} />
+                                  : null
+                                }
+                              </View>
+                              <View style={[s.roadmapHalfLine, { backgroundColor: rightLineColor }]} />
+                            </View>
+                            <Text style={[s.roadmapCellLabel, { color: dotColor }]} numberOfLines={2}>{shortLabel}</Text>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  ) : (
+                    <>
+                      <View style={s.stateRow}>
+                        {checklistOptions.map((opt) => {
+                          const oc = checklistConfig[opt];
+                          const sel = item.state === opt;
                           return (
                             <Pressable
-                              key={c}
-                              onPress={() => updateItemIssue(item.id, 'issueCriticality', c)}
-                              style={[s.critBtn, sel && { backgroundColor: cc, borderColor: cc }]}>
-                              <Text style={[s.critBtnText, sel && { color: '#FFF' }]}>{c}</Text>
+                              key={opt}
+                              onPress={() => updateItemStatus(item.id, opt)}
+                              testID={`checklist-${item.id}-${opt}`}
+                              style={[s.stateBtn, sel && { backgroundColor: oc.background, borderColor: oc.color }]}>
+                              <Text style={[s.stateBtnText, sel && { color: oc.color, fontWeight: '800' as const }]}>{oc.label}</Text>
                             </Pressable>
                           );
                         })}
                       </View>
+
                       <TextInput
                         multiline
-                        onChangeText={(v) => updateItemIssue(item.id, 'issueComment', v)}
-                        placeholder="Descreva a pendência..."
+                        onChangeText={(v) => updateItemComment(item.id, v)}
+                        placeholder="Comentário..."
                         placeholderTextColor="#94A3B8"
                         style={s.textarea}
-                        value={item.issueComment ?? ''}
+                        value={item.comment}
                       />
-                    </View>
-                  )}
 
-                  <Pressable onPress={() => addPhotoToItem(item)} style={s.photoBtn} testID={`add-photo-${item.id}`}>
-                    <MaterialCommunityIcons name="camera-plus-outline" size={15} color="#2563EB" />
-                    <Text style={s.photoBtnText}>{itemPhotos.length > 0 ? 'Mais fotos' : 'Adicionar foto'}</Text>
-                  </Pressable>
-
-                  {itemPhotos.length > 0 && (
-                    <View style={s.thumbGrid}>
-                      {itemPhotos.map((photo) => (
-                        <View key={photo.id} style={s.thumbCard}>
-                          <Pressable onPress={() => setSelectedPhoto(photo)}>
-                            <View>
-                              <Image source={{ uri: photo.uri }} style={s.thumb} />
-                              {uploadStatus[photo.id] === 'uploading' && (
-                                <View style={s.thumbOverlay}>
-                                  <MaterialCommunityIcons name="cloud-upload-outline" size={18} color="#FFFFFF" />
-                                  <Text style={s.thumbOverlayText}>Enviando…</Text>
-                                </View>
-                              )}
-                              {uploadStatus[photo.id] === 'uploaded' && (
-                                <View style={s.thumbBadge}>
-                                  <MaterialCommunityIcons name="check" size={12} color="#FFFFFF" />
-                                </View>
-                              )}
-                            </View>
-                          </Pressable>
+                      {isPending && (
+                        <View style={s.issueBox}>
+                          <Text style={s.issueBoxTitle}>Criticidade da pendência</Text>
+                          <View style={s.critRow}>
+                            {criticalityOptions.map((c) => {
+                              const sel = item.issueCriticality === c;
+                              const cc = c === 'Crítica' ? '#B91C1C' : c === 'Alta' ? '#B45309' : c === 'Média' ? '#D97706' : '#64748B';
+                              return (
+                                <Pressable
+                                  key={c}
+                                  onPress={() => updateItemIssue(item.id, 'issueCriticality', c)}
+                                  style={[s.critBtn, sel && { backgroundColor: cc, borderColor: cc }]}>
+                                  <Text style={[s.critBtnText, sel && { color: '#FFF' }]}>{c}</Text>
+                                </Pressable>
+                              );
+                            })}
+                          </View>
                           <TextInput
-                            onChangeText={(v) => updatePhotoComment(photo.id, v)}
-                            placeholder="Comentário..."
+                            multiline
+                            onChangeText={(v) => updateItemIssue(item.id, 'issueComment', v)}
+                            placeholder="Descreva a pendência..."
                             placeholderTextColor="#94A3B8"
-                            style={s.thumbInput}
-                            testID={`photo-comment-${photo.id}`}
-                            value={photo.comment}
+                            style={s.textarea}
+                            value={item.issueComment ?? ''}
                           />
-                          <Pressable onPress={() => removePhoto(photo.id)} style={s.removeBtn} testID={`remove-photo-${photo.id}`}>
-                            <MaterialCommunityIcons name="trash-can-outline" size={12} color="#B91C1C" />
-                            <Text style={s.removeBtnText}>Remover</Text>
-                          </Pressable>
                         </View>
-                      ))}
-                    </View>
+                      )}
+
+                      <Pressable onPress={() => addPhotoToItem(item)} style={s.photoBtn} testID={`add-photo-${item.id}`}>
+                        <MaterialCommunityIcons name="camera-plus-outline" size={15} color="#2563EB" />
+                        <Text style={s.photoBtnText}>{itemPhotos.length > 0 ? 'Mais fotos' : 'Adicionar foto'}</Text>
+                      </Pressable>
+
+                      {itemPhotos.length > 0 && (
+                        <View style={s.thumbGrid}>
+                          {itemPhotos.map((photo) => (
+                            <View key={photo.id} style={s.thumbCard}>
+                              <Pressable onPress={() => setSelectedPhoto(photo)}>
+                                <View>
+                                  <Image source={{ uri: photo.uri }} style={s.thumb} />
+                                  {uploadStatus[photo.id] === 'uploading' && (
+                                    <View style={s.thumbOverlay}>
+                                      <MaterialCommunityIcons name="cloud-upload-outline" size={18} color="#FFFFFF" />
+                                      <Text style={s.thumbOverlayText}>Enviando…</Text>
+                                    </View>
+                                  )}
+                                  {uploadStatus[photo.id] === 'uploaded' && (
+                                    <View style={s.thumbBadge}>
+                                      <MaterialCommunityIcons name="check" size={12} color="#FFFFFF" />
+                                    </View>
+                                  )}
+                                </View>
+                              </Pressable>
+                              <View style={s.thumbBody}>
+                                <TextInput
+                                  multiline
+                                  onChangeText={(v) => updatePhotoComment(photo.id, v)}
+                                  placeholder="Comentário..."
+                                  placeholderTextColor="#94A3B8"
+                                  style={s.thumbInput}
+                                  testID={`photo-comment-${photo.id}`}
+                                  value={photo.comment}
+                                />
+                                <Pressable onPress={() => removePhoto(photo.id)} style={s.removeBtn} testID={`remove-photo-${photo.id}`}>
+                                  <MaterialCommunityIcons name="trash-can-outline" size={12} color="#B91C1C" />
+                                  <Text style={s.removeBtnText}>Remover</Text>
+                                </Pressable>
+                              </View>
+                            </View>
+                          ))}
+                        </View>
+                      )}
+                    </>
                   )}
+                      </View>
+                    );
+                  })}
                 </View>
               );
             })}
@@ -1549,21 +1746,38 @@ export default function ApartmentDetailScreen() {
 
       {/* MODAL: add catalog step to this apartment */}
       <Modal animationType="slide" onRequestClose={() => setAddStepOpen(false)} transparent visible={addStepOpen}>
-        <View style={s.modalBackdrop}>
-          <View style={s.addStepSheet}>
-            <Text style={s.addStepTitle}>Adicionar etapa ao apartamento</Text>
-            <Text style={s.addStepSub}>
-              Escolha uma etapa do catálogo para incluir apenas neste apartamento. Para gerenciar o catálogo, vá em Cronograma → Serviços e etapas.
-            </Text>
-            <TextInput
-              autoFocus={Platform.OS !== 'web'}
-              onChangeText={setAddStepSearch}
-              placeholder="Buscar por nome ou categoria…"
-              placeholderTextColor="#94A3B8"
-              style={s.addStepSearch}
-              value={addStepSearch}
-            />
-            <ScrollView style={s.addStepList} contentContainerStyle={{ gap: 8 }}>
+        <Pressable style={s.modalBackdrop} onPress={() => setAddStepOpen(false)}>
+          <Pressable style={s.addStepSheet} onPress={() => {}}>
+            <View style={s.addStepGrabber} />
+            <View style={s.addStepHeader}>
+              <View style={s.addStepHeaderIcon}>
+                <MaterialCommunityIcons name="playlist-plus" size={20} color="#2563EB" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={s.addStepTitle}>Adicionar etapa</Text>
+                <Text style={s.addStepSub}>Escolha uma etapa do catálogo para incluir neste apartamento.</Text>
+              </View>
+              <Pressable onPress={() => setAddStepOpen(false)} hitSlop={8} style={s.addStepCloseBtn}>
+                <MaterialCommunityIcons name="close" size={18} color="#64748B" />
+              </Pressable>
+            </View>
+            <View style={s.addStepSearchWrap}>
+              <MaterialCommunityIcons name="magnify" size={18} color="#94A3B8" />
+              <TextInput
+                autoFocus={Platform.OS !== 'web'}
+                onChangeText={setAddStepSearch}
+                placeholder="Buscar por nome ou categoria…"
+                placeholderTextColor="#94A3B8"
+                style={s.addStepSearchInput}
+                value={addStepSearch}
+              />
+              {addStepSearch ? (
+                <Pressable onPress={() => setAddStepSearch('')} hitSlop={6}>
+                  <MaterialCommunityIcons name="close-circle" size={16} color="#94A3B8" />
+                </Pressable>
+              ) : null}
+            </View>
+            <ScrollView style={s.addStepList} contentContainerStyle={{ gap: 20, paddingBottom: 12 }} showsVerticalScrollIndicator={false}>
               {availableStages.length === 0 ? (
                 <View style={s.addStepEmpty}>
                   <MaterialCommunityIcons name="check-all" size={28} color="#CBD5E1" />
@@ -1572,32 +1786,68 @@ export default function ApartmentDetailScreen() {
                   </Text>
                 </View>
               ) : (
-                availableStages.map((stage) => (
-                  <Pressable key={stage.id} onPress={() => addStepToApartment(stage.nome)} style={s.addStepItem} testID={`pick-stage-${stage.id}`}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={s.addStepItemName}>{stage.nome}</Text>
-                      <Text style={s.addStepItemMeta}>
-                        {stage.categoria || '—'} · ordem {stage.ordemExecucao}
-                        {stage.etapaCritica ? ' · crítica' : ''}
-                        {stage.travaLiberacao ? ' · trava' : ''}
-                      </Text>
-                    </View>
-                    <MaterialCommunityIcons name="plus" size={18} color="#2563EB" />
-                  </Pressable>
-                ))
+                (() => {
+                  const groups = new Map<string, typeof availableStages>();
+                  for (const stg of availableStages) {
+                    const cat = stg.categoria?.trim() || 'Sem categoria';
+                    if (!groups.has(cat)) groups.set(cat, [] as any);
+                    (groups.get(cat) as any).push(stg);
+                  }
+                  const searching = addStepSearch.trim().length > 0;
+                  return [...groups.entries()]
+                    .sort(([a], [b]) => a.localeCompare(b, 'pt-BR'))
+                    .map(([cat, items]) => {
+                      const color = categoryColor(cat);
+                      const collapsed = !searching && collapsedAddStepGroups[cat] === true;
+                      return (
+                        <View key={`add-grp-${cat}`} style={s.addStepGroup}>
+                          <Pressable
+                            onPress={() => setCollapsedAddStepGroups((cur) => ({ ...cur, [cat]: !collapsed }))}
+                            style={s.addStepGroupHeader}>
+                            <MaterialCommunityIcons name={collapsed ? 'chevron-right' : 'chevron-down'} size={18} color="#64748B" />
+                            <View style={[s.addStepGroupDot, { backgroundColor: color }]} />
+                            <Text style={s.addStepGroupTitle}>{cat}</Text>
+                            <Text style={s.addStepGroupCount}>{items.length}</Text>
+                          </Pressable>
+                          {!collapsed && items.map((stage) => (
+                            <Pressable key={stage.id} onPress={() => addStepToApartment(stage.nome)} style={s.addStepItem} testID={`pick-stage-${stage.id}`}>
+                              <View style={[s.addStepItemBullet, { backgroundColor: color }]} />
+                              <View style={{ flex: 1 }}>
+                                <Text style={s.addStepItemName}>{stage.nome}</Text>
+                                {(stage.etapaCritica || stage.travaLiberacao) && (
+                                  <View style={s.addStepBadgeRow}>
+                                    {stage.etapaCritica && (
+                                      <View style={[s.addStepBadge, { backgroundColor: '#FEE2E2' }]}>
+                                        <Text style={[s.addStepBadgeText, { color: '#B91C1C' }]}>Crítica</Text>
+                                      </View>
+                                    )}
+                                    {stage.travaLiberacao && (
+                                      <View style={[s.addStepBadge, { backgroundColor: '#FEF3C7' }]}>
+                                        <Text style={[s.addStepBadgeText, { color: '#B45309' }]}>Trava</Text>
+                                      </View>
+                                    )}
+                                  </View>
+                                )}
+                              </View>
+                              <View style={s.addStepPlusBtn}>
+                                <MaterialCommunityIcons name="plus" size={18} color="#FFFFFF" />
+                              </View>
+                            </Pressable>
+                          ))}
+                        </View>
+                      );
+                    });
+                })()
               )}
             </ScrollView>
-            <Pressable onPress={() => setAddStepOpen(false)} style={s.modalClose}>
-              <Text style={s.modalCloseText}>Fechar</Text>
-            </Pressable>
-          </View>
-        </View>
+          </Pressable>
+        </Pressable>
       </Modal>
 
       {/* BACK-TO-TOP FAB — appears after scrolling, sits above the save toast */}
       {showBackToTop && (
         <Pressable
-          onPress={() => scrollRef.current?.scrollTo({ y: 0, animated: true })}
+          onPress={() => scrollRef.current?.scrollTo({ y: 0, animated: false })}
           style={[s.backToTopFab, { bottom: saveStatus !== 'idle' ? 80 : 24 }]}
           testID="back-to-top">
           <MaterialCommunityIcons name="chevron-up" size={22} color="#FFFFFF" />
@@ -1712,6 +1962,11 @@ const s = StyleSheet.create({
   textarea: { backgroundColor: '#F8FAFC', borderColor: '#E2E8F0', borderRadius: 10, borderWidth: 1, color: '#0F172A', fontSize: 13, minHeight: 64, padding: 10, textAlignVertical: 'top' },
 
   // checklist
+  checklistGroup: { gap: 10, paddingHorizontal: 16 },
+  checklistGroupHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingTop: 4 },
+  checklistGroupDot: { width: 10, height: 10, borderRadius: 5 },
+  checklistGroupTitle: { color: '#0F172A', fontSize: 13, fontWeight: '800', flex: 1 },
+  checklistGroupCount: { color: '#94A3B8', fontSize: 11, fontWeight: '600' },
   checklistHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, gap: 8 },
   checklistHeaderActions: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   checklistProgress: { color: '#475569', fontSize: 13, fontWeight: '700' },
@@ -1723,7 +1978,7 @@ const s = StyleSheet.create({
   extraBadge: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#F5F3FF', borderColor: '#DDD6FE', borderWidth: 1, borderRadius: 999, paddingHorizontal: 6, paddingVertical: 2 },
   extraBadgeText: { color: '#7C3AED', fontSize: 10, fontWeight: '800', letterSpacing: 0.3 },
   removeStepBtn: { padding: 4 },
-  checkCard: { backgroundColor: '#FFFFFF', borderColor: '#E2E8F0', borderWidth: 1, borderRadius: 14, borderLeftWidth: 4, marginHorizontal: 16, padding: 14, gap: 12 },
+  checkCard: { backgroundColor: '#FFFFFF', borderColor: '#E2E8F0', borderWidth: 1, borderRadius: 14, borderLeftWidth: 4, padding: 14, gap: 12 },
   checkCardTop: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   checkIcon: { width: 38, height: 38, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
   checkIconSymbol: { fontSize: 17, fontWeight: '900' },
@@ -1731,6 +1986,23 @@ const s = StyleSheet.create({
   checkLabel: { color: '#0F172A', fontSize: 14, fontWeight: '700' },
   checkStatus: { fontSize: 12, fontWeight: '600', marginTop: 2 },
   stateRow: { flexDirection: 'row', gap: 6 },
+  checkCardLocked: { opacity: 0.75, backgroundColor: '#FFFBEB' },
+  lockBanner: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, backgroundColor: '#FEF3C7', borderColor: '#FCD34D', borderWidth: 1, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10 },
+  lockTitle: { color: '#92400E', fontSize: 12, fontWeight: '800', marginBottom: 2 },
+  lockText: { color: '#B45309', fontSize: 12, fontWeight: '600' },
+
+  // group step badge
+  groupBadge: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#E0F2FE', borderColor: '#BAE6FD', borderWidth: 1, borderRadius: 999, paddingHorizontal: 6, paddingVertical: 2 },
+  groupBadgeText: { color: '#0891B2', fontSize: 10, fontWeight: '800', letterSpacing: 0.3 },
+
+  // roadmap (sub-step progress line)
+  roadmapTrack: { flexDirection: 'row', paddingTop: 2 },
+  roadmapCell: { flex: 1, alignItems: 'center', gap: 6 },
+  roadmapDotRow: { flexDirection: 'row', alignItems: 'center', width: '100%' },
+  roadmapHalfLine: { flex: 1, height: 2 },
+  roadmapDot: { width: 24, height: 24, borderRadius: 12, borderWidth: 2, alignItems: 'center', justifyContent: 'center' },
+  roadmapInnerDot: { width: 8, height: 8, borderRadius: 4 },
+  roadmapCellLabel: { fontSize: 10, fontWeight: '700', textAlign: 'center', lineHeight: 13 },
   stateBtn: { flex: 1, alignItems: 'center', paddingVertical: 9, borderRadius: 8, borderWidth: 1, borderColor: '#E2E8F0', backgroundColor: '#F8FAFC' },
   stateBtnText: { color: '#64748B', fontSize: 11, fontWeight: '700' },
   issueBox: { backgroundColor: '#FFFBEB', borderColor: '#FDE68A', borderRadius: 10, borderWidth: 1, padding: 12, gap: 10 },
@@ -1740,14 +2012,15 @@ const s = StyleSheet.create({
   critBtnText: { color: '#475569', fontSize: 12, fontWeight: '700' },
   photoBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, borderWidth: 1, borderColor: '#DBEAFE', backgroundColor: '#EFF6FF', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8, alignSelf: 'flex-start' },
   photoBtnText: { color: '#2563EB', fontSize: 12, fontWeight: '700' },
-  thumbGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  thumbCard: { width: 100, gap: 4 },
+  thumbGrid: { gap: 10 },
+  thumbCard: { flexDirection: 'row', gap: 10, alignItems: 'flex-start' },
+  thumbBody: { flex: 1, gap: 6 },
   thumb: { width: 100, height: 80, borderRadius: 8, backgroundColor: '#F1F5F9' },
   thumbOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', gap: 4, backgroundColor: 'rgba(15,23,42,0.55)', borderRadius: 8 },
   thumbOverlayText: { color: '#FFFFFF', fontSize: 11, fontWeight: '700' },
   thumbBadge: { position: 'absolute', top: 4, right: 4, width: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: '#047857' },
   thumbLabel: { color: '#64748B', fontSize: 11 },
-  thumbInput: { backgroundColor: '#F8FAFC', borderColor: '#E2E8F0', borderRadius: 6, borderWidth: 1, color: '#0F172A', fontSize: 11, padding: 6 },
+  thumbInput: { backgroundColor: '#F8FAFC', borderColor: '#E2E8F0', borderRadius: 10, borderWidth: 1, color: '#0F172A', fontSize: 13, minHeight: 64, padding: 10, textAlignVertical: 'top' },
   removeBtn: { flexDirection: 'row', alignItems: 'center', gap: 3 },
   removeBtnText: { color: '#B91C1C', fontSize: 11, fontWeight: '700' },
 
@@ -1887,16 +2160,30 @@ const s = StyleSheet.create({
   visitModalNote: { color: '#475569', fontSize: 13, fontStyle: 'italic' },
 
   // add-step modal
-  addStepSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: '85%', padding: 20, gap: 12 },
+  addStepSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, maxHeight: '90%', paddingHorizontal: 22, paddingTop: 10, paddingBottom: 28, gap: 18 },
+  addStepGrabber: { alignSelf: 'center', width: 40, height: 4, borderRadius: 999, backgroundColor: '#E2E8F0', marginBottom: 4 },
+  addStepHeader: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  addStepHeaderIcon: { width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: '#EFF6FF' },
+  addStepCloseBtn: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', backgroundColor: '#F1F5F9' },
   addStepTitle: { color: '#0F172A', fontSize: 17, fontWeight: '900' },
-  addStepSub: { color: '#64748B', fontSize: 12, lineHeight: 17 },
-  addStepSearch: { backgroundColor: '#F8FAFC', borderColor: '#CBD5E1', borderRadius: 10, borderWidth: 1, color: '#0F172A', fontSize: 13, minHeight: 42, paddingHorizontal: 12 },
-  addStepList: { maxHeight: 360 },
+  addStepSub: { color: '#64748B', fontSize: 12, lineHeight: 17, marginTop: 2 },
+  addStepSearchWrap: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#F8FAFC', borderColor: '#E2E8F0', borderRadius: 12, borderWidth: 1, paddingHorizontal: 12, minHeight: 44 },
+  addStepSearchInput: { flex: 1, color: '#0F172A', fontSize: 13, paddingVertical: 10 },
+  addStepList: { maxHeight: 480 },
   addStepEmpty: { alignItems: 'center', justifyContent: 'center', paddingVertical: 28, gap: 8 },
   addStepEmptyText: { color: '#64748B', fontSize: 13, textAlign: 'center' },
-  addStepItem: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderRadius: 12, borderWidth: 1, borderColor: '#E2E8F0', backgroundColor: '#FFFFFF' },
-  addStepItemName: { color: '#0F172A', fontSize: 14, fontWeight: '700' },
-  addStepItemMeta: { color: '#64748B', fontSize: 11, marginTop: 2 },
+  addStepGroup: { gap: 14 },
+  addStepGroupHeader: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, paddingHorizontal: 4 },
+  addStepGroupDot: { width: 10, height: 10, borderRadius: 5 },
+  addStepGroupTitle: { color: '#0F172A', fontSize: 14, fontWeight: '800', flex: 1 },
+  addStepGroupCount: { color: '#64748B', fontSize: 12, fontWeight: '700', backgroundColor: '#F1F5F9', borderRadius: 999, paddingHorizontal: 9, paddingVertical: 2, minWidth: 24, textAlign: 'center' },
+  addStepItem: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingVertical: 18, paddingRight: 16, paddingLeft: 0, borderRadius: 14, borderWidth: 1, borderColor: '#E2E8F0', backgroundColor: '#FFFFFF', overflow: 'hidden' },
+  addStepItemBullet: { width: 5, alignSelf: 'stretch', backgroundColor: '#E2E8F0' },
+  addStepItemName: { color: '#0F172A', fontSize: 15, fontWeight: '700', lineHeight: 20 },
+  addStepBadgeRow: { flexDirection: 'row', gap: 6, marginTop: 6 },
+  addStepBadge: { borderRadius: 999, paddingHorizontal: 9, paddingVertical: 3 },
+  addStepBadgeText: { fontSize: 10, fontWeight: '800' },
+  addStepPlusBtn: { width: 34, height: 34, borderRadius: 17, backgroundColor: '#2563EB', alignItems: 'center', justifyContent: 'center' },
 
   // confirm dialogs
   confirmSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 22, gap: 12, alignItems: 'center' },
@@ -1913,7 +2200,7 @@ const s = StyleSheet.create({
   backToTopFab: {
     position: 'absolute', right: 20, width: 44, height: 44, borderRadius: 22,
     alignItems: 'center', justifyContent: 'center',
-    backgroundColor: '#2563EB',
+    backgroundColor: '#64748B',
     shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 6,
   },
 

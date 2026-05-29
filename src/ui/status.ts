@@ -59,7 +59,7 @@ export const checklistConfig: Record<
     label: 'OK',
     color: '#047857',
     background: '#ECFDF5',
-    symbol: 'OK',
+    symbol: 'Ok',
   },
   pending: {
     label: 'Pendente',
@@ -71,12 +71,12 @@ export const checklistConfig: Record<
     label: 'Parcial',
     color: '#B45309',
     background: '#FFFBEB',
-    symbol: '~',
+    symbol: '-',
   },
   notApplicable: {
     label: 'Não se aplica',
     color: '#334155',
     background: '#E2E8F0',
-    symbol: 'N/A',
+    symbol: 'NA',
   },
 };
