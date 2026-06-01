@@ -33,6 +33,7 @@ type ApartmentSummary = {
   checklist: ChecklistItem[];
   maxDelayDays: number;
   mostDelayedService?: string;
+  observationCount: number;
   pendingCount: number;
   progress: number;
   statusKey: ApartmentStatus;
@@ -96,6 +97,7 @@ export default function TowerApartmentsScreen() {
         const checklist = getChecklistForApartment(apartment);
         const pendingCount = checklist.filter((i) => i.state === 'pending' || i.state === 'partial').length;
         const blockedCount = getBlockedServiceGroups(checklist).reduce((t, g) => t + g.blockedServices.length, 0);
+        const observationCount = checklist.filter((i) => i.comment?.trim()).length;
         const scheduleSummary = summarizeApartmentSchedule(apartment);
         const progress = calculateProgress(checklist);
         return {
@@ -104,6 +106,7 @@ export default function TowerApartmentsScreen() {
           checklist,
           maxDelayDays: scheduleSummary.maxDelayDays,
           mostDelayedService: scheduleSummary.mostDelayedService,
+          observationCount,
           pendingCount,
           progress,
           statusKey: calculateStatus(checklist, progress),
@@ -142,7 +145,8 @@ export default function TowerApartmentsScreen() {
     const criticalCount = apartmentSummaries.filter((s) => s.statusKey === 'critical').length;
     const totalPending = apartmentSummaries.reduce((t, s) => t + s.pendingCount, 0);
     const totalBlocked = apartmentSummaries.reduce((t, s) => t + s.blockedCount, 0);
-    return { avgProgress, criticalCount, totalPending, totalBlocked };
+    const totalObservations = apartmentSummaries.reduce((t, s) => t + s.observationCount, 0);
+    return { avgProgress, criticalCount, totalPending, totalBlocked, totalObservations };
   }, [apartmentSummaries]);
 
   const backBar = (
@@ -200,6 +204,7 @@ export default function TowerApartmentsScreen() {
           { icon: 'close-circle-outline', value: towerStats.criticalCount, label: 'Críticos', color: towerStats.criticalCount > 0 ? '#B91C1C' : '#047857', bg: towerStats.criticalCount > 0 ? '#FEE2E2' : '#D1FAE5' },
           { icon: 'alert-outline', value: towerStats.totalPending, label: 'Pendências', color: towerStats.totalPending > 0 ? '#B45309' : '#047857', bg: towerStats.totalPending > 0 ? '#FEF3C7' : '#D1FAE5' },
           { icon: 'lock-outline', value: towerStats.totalBlocked, label: 'Travados', color: towerStats.totalBlocked > 0 ? '#7C3AED' : '#047857', bg: towerStats.totalBlocked > 0 ? '#EDE9FE' : '#D1FAE5' },
+          { icon: 'note-text-outline', value: towerStats.totalObservations, label: 'Observações', color: towerStats.totalObservations > 0 ? '#0891B2' : '#047857', bg: towerStats.totalObservations > 0 ? '#E0F2FE' : '#D1FAE5' },
         ].map((k) => (
           <View key={k.label} style={[s.kpiCard, { backgroundColor: k.bg }]}>
             <MaterialCommunityIcons name={k.icon as any} size={18} color={k.color} />
@@ -314,13 +319,19 @@ export default function TowerApartmentsScreen() {
                           <Text style={[s.metricPillText, { color: '#7C3AED' }]}>{summary.blockedCount} travado(s)</Text>
                         </View>
                       )}
+                      {summary.observationCount > 0 && (
+                        <View style={s.metricPill}>
+                          <MaterialCommunityIcons name="note-text-outline" size={11} color="#0891B2" />
+                          <Text style={[s.metricPillText, { color: '#0891B2' }]}>{summary.observationCount} obs.</Text>
+                        </View>
+                      )}
                       {summary.maxDelayDays > 0 && (
                         <View style={s.metricPill}>
                           <MaterialCommunityIcons name="clock-alert-outline" size={11} color="#B91C1C" />
                           <Text style={[s.metricPillText, { color: '#B91C1C' }]}>{summary.maxDelayDays}d atraso</Text>
                         </View>
                       )}
-                      {summary.pendingCount === 0 && summary.blockedCount === 0 && summary.maxDelayDays === 0 && (
+                      {summary.pendingCount === 0 && summary.blockedCount === 0 && summary.maxDelayDays === 0 && summary.observationCount === 0 && (
                         <View style={s.metricPill}>
                           <MaterialCommunityIcons name="check-circle-outline" size={11} color="#047857" />
                           <Text style={[s.metricPillText, { color: '#047857' }]}>Sem pendências</Text>

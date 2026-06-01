@@ -11,6 +11,7 @@ import { useToast } from '@/src/ui/Toast';
 import * as db from '@/src/data/db';
 import type { ServiceCategory } from '@/src/data/serviceCategories';
 import type { ServiceUnit } from '@/src/data/serviceUnits';
+import type { Worker } from '@/src/data/serviceWorkers';
 import { useObras } from '@/src/data/ObrasContext';
 
 const CATEGORY_PALETTE = ['#2563EB', '#7C3AED', '#0891B2', '#16A34A', '#D97706', '#DB2777', '#0EA5E9', '#65A30D', '#B45309', '#9333EA'];
@@ -20,7 +21,7 @@ const colorFor = (s: string) => {
   return CATEGORY_PALETTE[hash % CATEGORY_PALETTE.length];
 };
 
-type Tab = 'categorias' | 'unidades';
+type Tab = 'categorias' | 'unidades' | 'colaboradores';
 
 type Item = { id: string; nome: string };
 
@@ -34,7 +35,9 @@ export default function CatalogosScreen() {
   const { tab: initialTab } = useLocalSearchParams<{ tab?: string }>();
   const { refreshServiceCategories, refreshServiceUnits, refreshServiceStages } = useObras();
 
-  const [tab, setTab] = useState<Tab>(initialTab === 'unidades' ? 'unidades' : 'categorias');
+  const [tab, setTab] = useState<Tab>(
+    initialTab === 'unidades' ? 'unidades' : initialTab === 'colaboradores' ? 'colaboradores' : 'categorias'
+  );
 
   return (
     <>
@@ -59,6 +62,12 @@ export default function CatalogosScreen() {
             label="Unidades"
             onPress={() => setTab('unidades')}
           />
+          <ToggleBtn
+            active={tab === 'colaboradores'}
+            icon="account-hard-hat-outline"
+            label="Colaboradores"
+            onPress={() => setTab('colaboradores')}
+          />
         </View>
       </View>
 
@@ -77,7 +86,7 @@ export default function CatalogosScreen() {
             await refreshServiceStages();
           }}
         />
-      ) : (
+      ) : tab === 'unidades' ? (
         <CatalogPanel
           key="unit"
           title="unidade"
@@ -92,6 +101,8 @@ export default function CatalogosScreen() {
             await refreshServiceStages();
           }}
         />
+      ) : (
+        <WorkerPanel key="workers" />
       )}
     </>
   );
@@ -364,6 +375,230 @@ function CatalogPanel({
   );
 }
 
+function WorkerPanel() {
+  const toast = useToast();
+  const [workers, setWorkers] = useState<Worker[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [draftNome, setDraftNome] = useState('');
+  const [draftFuncao, setDraftFuncao] = useState('');
+  const [editingId, setEditingId] = useState<string | undefined>();
+  const [editingOriginalNome, setEditingOriginalNome] = useState('');
+  const [errors, setErrors] = useState<{ nome?: string; funcao?: string }>({});
+  const [deleteTarget, setDeleteTarget] = useState<Worker | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const reload = useCallback(async () => {
+    const data = await db.loadWorkers();
+    setWorkers(data.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR')));
+  }, []);
+
+  useFocusEffect(useCallback(() => {
+    setLoading(true);
+    const started = Date.now();
+    reload().finally(() => {
+      const elapsed = Date.now() - started;
+      const finish = () => setLoading(false);
+      if (elapsed >= 300) finish();
+      else setTimeout(finish, 300 - elapsed);
+    });
+  }, [reload]));
+
+  const cancelEdit = () => {
+    setEditingId(undefined);
+    setEditingOriginalNome('');
+    setDraftNome('');
+    setDraftFuncao('');
+    setErrors({});
+  };
+
+  const doSave = async () => {
+    const nome = draftNome.trim();
+    const funcao = draftFuncao.trim();
+    const nextErrors: typeof errors = {};
+    if (!nome) nextErrors.nome = 'Informe o nome do colaborador';
+    if (!funcao) nextErrors.funcao = 'Informe a função';
+    if (Object.keys(nextErrors).length) { setErrors(nextErrors); return; }
+
+    setBusy(true);
+    toast.saving(editingId ? 'Atualizando colaborador…' : 'Criando colaborador…');
+    try {
+      await db.saveWorker({ id: editingId ?? '', nome, funcao });
+      await reload();
+      cancelEdit();
+      toast.saved(editingId ? 'Colaborador atualizado' : 'Colaborador criado');
+    } catch {
+      toast.error(editingId ? 'Erro ao atualizar colaborador' : 'Erro ao criar colaborador');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startEdit = (w: Worker) => {
+    setEditingId(w.id);
+    setEditingOriginalNome(w.nome);
+    setDraftNome(w.nome);
+    setDraftFuncao(w.funcao);
+    setErrors({});
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    setBusy(true);
+    toast.saving('Excluindo colaborador…');
+    try {
+      await db.deleteWorker(deleteTarget.id);
+      await reload();
+      if (editingId === deleteTarget.id) cancelEdit();
+      setDeleteTarget(null);
+      toast.saved('Colaborador excluído');
+    } catch {
+      toast.error('Erro ao excluir colaborador');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <ScrollView style={s.scroll} contentContainerStyle={s.container}>
+        <View style={[s.section, s.sectionPurple, editingId !== undefined && s.sectionEditing]}>
+          <View style={s.formHeader}>
+            <Text style={[s.sectionTitle, { color: '#6D28D9' }]}>
+              {editingId !== undefined ? 'Editar colaborador' : 'Novo colaborador'}
+            </Text>
+            {editingId !== undefined && (
+              <View style={s.editingBadge}>
+                <MaterialCommunityIcons name="pencil" size={12} color="#6D28D9" />
+                <Text style={s.editingBadgeText} numberOfLines={1}>Editando "{editingOriginalNome}"</Text>
+              </View>
+            )}
+          </View>
+
+          <View style={s.fieldGroup}>
+            <Text style={[s.fieldLabel, errors.nome && s.fieldLabelError]}>Nome{errors.nome ? ' *' : ''}</Text>
+            <TextInput
+              autoCapitalize="words"
+              onChangeText={(v) => { setDraftNome(v); if (errors.nome) setErrors((e) => ({ ...e, nome: undefined })); }}
+              placeholder="Nome do colaborador"
+              placeholderTextColor={errors.nome ? '#FCA5A5' : '#94A3B8'}
+              style={[s.input, errors.nome && s.inputError]}
+              value={draftNome}
+            />
+            {errors.nome ? <Text style={s.fieldErrorText}>{errors.nome}</Text> : null}
+          </View>
+
+          <View style={s.fieldGroup}>
+            <Text style={[s.fieldLabel, errors.funcao && s.fieldLabelError]}>Função{errors.funcao ? ' *' : ''}</Text>
+            <TextInput
+              autoCapitalize="sentences"
+              onChangeText={(v) => { setDraftFuncao(v); if (errors.funcao) setErrors((e) => ({ ...e, funcao: undefined })); }}
+              placeholder="Ex.: Pedreiro, Azulejista, Eletricista…"
+              placeholderTextColor={errors.funcao ? '#FCA5A5' : '#94A3B8'}
+              style={[s.input, errors.funcao && s.inputError]}
+              value={draftFuncao}
+            />
+            {errors.funcao ? <Text style={s.fieldErrorText}>{errors.funcao}</Text> : null}
+          </View>
+
+          <View style={s.actionRow}>
+            <Pressable disabled={busy} onPress={doSave} style={[s.btnPrimary, busy && { opacity: 0.6 }]}>
+              <MaterialCommunityIcons name={editingId !== undefined ? 'content-save' : 'plus'} size={16} color="#FFFFFF" />
+              <Text style={s.btnPrimaryText}>{editingId !== undefined ? 'Salvar edição' : 'Criar colaborador'}</Text>
+            </Pressable>
+            {editingId !== undefined && (
+              <Pressable onPress={cancelEdit} style={s.btnSecondary}>
+                <Text style={s.btnSecondaryText}>Cancelar</Text>
+              </Pressable>
+            )}
+          </View>
+        </View>
+
+        <View style={[s.section, s.sectionBlue]}>
+          <Text style={[s.sectionTitle, { color: '#1D4ED8' }]}>Colaboradores cadastrados</Text>
+          {loading ? (
+            <View style={s.itemList}>
+              <WorkerSkeletonRow first />
+              <WorkerSkeletonRow />
+              <WorkerSkeletonRow />
+            </View>
+          ) : workers.length === 0 ? (
+            <View style={s.emptyWrap}>
+              <MaterialCommunityIcons name="account-off-outline" size={28} color="#CBD5E1" />
+              <Text style={s.emptyText}>Nenhum colaborador cadastrado ainda</Text>
+            </View>
+          ) : (
+            <View style={s.itemList}>
+              {workers.map((w, idx) => {
+                const isEditing = editingId === w.id;
+                return (
+                  <View key={w.id} style={[s.itemRow, idx === 0 && s.itemRowFirst, isEditing && s.itemRowEditing]}>
+                    <View style={[s.workerAvatar, { backgroundColor: colorFor(w.nome) }]}>
+                      <Text style={s.workerAvatarText}>{w.nome.charAt(0).toUpperCase()}</Text>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.itemName} numberOfLines={1}>{w.nome}</Text>
+                      <Text style={s.workerFuncao} numberOfLines={1}>{w.funcao}</Text>
+                    </View>
+                    <View style={s.itemIconActions}>
+                      <Pressable onPress={() => startEdit(w)} style={s.iconBtn} hitSlop={6}>
+                        <MaterialCommunityIcons name="pencil-outline" size={16} color="#1D4ED8" />
+                      </Pressable>
+                      <Pressable onPress={() => setDeleteTarget(w)} style={[s.iconBtn, s.iconBtnDanger]} hitSlop={6}>
+                        <MaterialCommunityIcons name="trash-can-outline" size={16} color="#B91C1C" />
+                      </Pressable>
+                    </View>
+                  </View>
+                );
+              })}
+            </View>
+          )}
+        </View>
+      </ScrollView>
+
+      <Modal animationType="fade" transparent visible={!!deleteTarget} onRequestClose={() => setDeleteTarget(null)}>
+        <Pressable style={s.modalBackdrop} onPress={() => setDeleteTarget(null)}>
+          <Pressable style={s.modalCard} onPress={() => {}}>
+            <View style={s.modalIconWrap}>
+              <MaterialCommunityIcons name="account-remove-outline" size={28} color="#B91C1C" />
+            </View>
+            {deleteTarget && (
+              <>
+                <Text style={s.modalTitle}>Excluir colaborador?</Text>
+                <Text style={s.modalBody}>
+                  "{deleteTarget.nome}" será removido permanentemente. Atribuições existentes serão desvinculadas.
+                </Text>
+                <View style={s.modalActions}>
+                  <Pressable onPress={() => setDeleteTarget(null)} style={s.modalCancel}>
+                    <Text style={s.modalCancelText}>Cancelar</Text>
+                  </Pressable>
+                  <Pressable disabled={busy} onPress={confirmDelete} style={[s.modalConfirm, busy && { opacity: 0.6 }]}>
+                    <MaterialCommunityIcons name="trash-can-outline" size={16} color="#FFFFFF" />
+                    <Text style={s.modalConfirmText}>Excluir</Text>
+                  </Pressable>
+                </View>
+              </>
+            )}
+          </Pressable>
+        </Pressable>
+      </Modal>
+    </>
+  );
+}
+
+function WorkerSkeletonRow({ first }: { first?: boolean }) {
+  return (
+    <View style={[s.itemRow, first && s.itemRowFirst]}>
+      <Skeleton width={32} height={32} radius={16} />
+      <View style={{ flex: 1, gap: 4 }}>
+        <Skeleton height={12} width="50%" radius={4} />
+        <Skeleton height={10} width="30%" radius={4} />
+      </View>
+      <Skeleton width={28} height={28} radius={8} />
+      <Skeleton width={28} height={28} radius={8} />
+    </View>
+  );
+}
+
 function SkeletonRow({ first }: { first?: boolean }) {
   return (
     <View style={[s.itemRow, first && s.itemRowFirst]}>
@@ -424,6 +659,9 @@ const s = StyleSheet.create({
 
   emptyWrap: { alignItems: 'center', justifyContent: 'center', paddingVertical: 24, gap: 8 },
   emptyText: { color: '#94A3B8', fontSize: 12, fontStyle: 'italic' },
+  workerAvatar: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  workerAvatarText: { color: '#FFFFFF', fontSize: 13, fontWeight: '900' },
+  workerFuncao: { color: '#64748B', fontSize: 11, fontWeight: '600', marginTop: 1 },
 
   btnPrimary: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#6D28D9', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10 },
   btnPrimaryText: { color: '#FFFFFF', fontSize: 13, fontWeight: '700' },

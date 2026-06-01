@@ -6,6 +6,7 @@ import type { InspectionPhoto } from '@/src/data/localInspectionPhotos';
 import type { ServiceStage } from '@/src/data/serviceStages';
 import type { ServiceCategory } from '@/src/data/serviceCategories';
 import type { ServiceUnit } from '@/src/data/serviceUnits';
+import type { Worker } from '@/src/data/serviceWorkers';
 import type { ScheduleFields } from '@/src/data/schedule';
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
@@ -566,5 +567,79 @@ export async function countStagesUsingUnit(nome: string): Promise<number> {
 
 export async function deleteServiceUnit(id: string): Promise<void> {
   const { error } = await supabase.from('service_units').delete().eq('id', id);
+  if (error) throw error;
+}
+
+// ─── Workers ──────────────────────────────────────────────────────────────────
+
+function mapWorker(row: Record<string, unknown>): Worker {
+  return { id: row.id as string, nome: row.nome as string, funcao: row.funcao as string };
+}
+
+export async function loadWorkers(): Promise<Worker[]> {
+  const { data, error } = await supabase
+    .from('workers')
+    .select('id, nome, funcao')
+    .eq('obra_id', OBRA_ID)
+    .order('nome');
+  if (error) throw error;
+  return (data ?? []).map(mapWorker);
+}
+
+export async function saveWorker(worker: Worker): Promise<void> {
+  const id = worker.id || `worker-${Date.now()}`;
+  const { error } = await supabase.from('workers').upsert({
+    id,
+    obra_id: OBRA_ID,
+    nome: worker.nome,
+    funcao: worker.funcao,
+  });
+  if (error) throw error;
+}
+
+export async function deleteWorker(id: string): Promise<void> {
+  const { error } = await supabase.from('workers').delete().eq('id', id);
+  if (error) throw error;
+}
+
+// ─── Step assignments ─────────────────────────────────────────────────────────
+
+export async function loadStepAssignments(apartmentId: string): Promise<Record<string, string[]>> {
+  const { data, error } = await supabase
+    .from('step_assignments')
+    .select('item_id, worker_id')
+    .eq('obra_id', OBRA_ID)
+    .eq('apartment_id', apartmentId);
+  if (error) throw error;
+  const result: Record<string, string[]> = {};
+  for (const row of data ?? []) {
+    const itemId = row.item_id as string;
+    const workerId = row.worker_id as string;
+    if (!result[itemId]) result[itemId] = [];
+    result[itemId].push(workerId);
+  }
+  return result;
+}
+
+export async function setStepAssignments(
+  apartmentId: string,
+  itemId: string,
+  workerIds: string[],
+): Promise<void> {
+  await supabase
+    .from('step_assignments')
+    .delete()
+    .eq('obra_id', OBRA_ID)
+    .eq('apartment_id', apartmentId)
+    .eq('item_id', itemId);
+  if (workerIds.length === 0) return;
+  const rows = workerIds.map((workerId) => ({
+    id: `assign-${apartmentId}-${itemId}-${workerId}`,
+    obra_id: OBRA_ID,
+    apartment_id: apartmentId,
+    item_id: itemId,
+    worker_id: workerId,
+  }));
+  const { error } = await supabase.from('step_assignments').insert(rows);
   if (error) throw error;
 }

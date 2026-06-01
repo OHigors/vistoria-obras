@@ -32,6 +32,7 @@ import type { ScheduleFields } from '@/src/data/schedule';
 import { formatDateBr, getScheduleRows, isValidBrDate, maskDateBr } from '@/src/data/schedule';
 import { getBlockedServiceGroups } from '@/src/data/serviceBlockers';
 import { defaultServiceDependencies, isServiceActiveForFeature } from '@/src/data/serviceStages';
+import type { Worker } from '@/src/data/serviceWorkers';
 import { checklistConfig, getProgressColor, statusConfig } from '@/src/ui/status';
 
 const checklistOptions: ChecklistState[] = ['ok', 'pending', 'partial', 'notApplicable'];
@@ -74,6 +75,9 @@ const GROUP_STEP_CHILDREN: Record<string, string[]> = {
     'Impermeabilização da cozinha',
   ],
 };
+
+// Flat set of all labels that are sub-steps of any group (used to hide them from the main list).
+const ALL_GROUP_SUB_STEP_LABELS = new Set(Object.values(GROUP_STEP_CHILDREN).flat());
 
 const applyGroupStepStates = (items: EditableChecklistItem[]): EditableChecklistItem[] => {
   const stateByLabel = new Map(items.map((i) => [i.label, i.state]));
@@ -164,6 +168,16 @@ export default function ApartmentDetailScreen() {
   const [showBackToTop, setShowBackToTop] = useState(false);
   const [collapsedChecklistGroups, setCollapsedChecklistGroups] = useState<Record<string, boolean>>({});
   const [collapsedAddStepGroups, setCollapsedAddStepGroups] = useState<Record<string, boolean>>({});
+  const [expandedGroupSteps, setExpandedGroupSteps] = useState<Record<string, boolean>>({});
+  const [expandedComments, setExpandedComments] = useState<Record<string, boolean>>({});
+  const [draftComments, setDraftComments] = useState<Record<string, string>>({});
+  const [visitsLoading, setVisitsLoading] = useState(true);
+  const [workers, setWorkers] = useState<Worker[]>([]);
+  const [assignments, setAssignments] = useState<Record<string, string[]>>({});
+  const [workerPickerItem, setWorkerPickerItem] = useState<EditableChecklistItem | null>(null);
+  const [draftWorkerIds, setDraftWorkerIds] = useState<string[]>([]);
+  const [workerSearch, setWorkerSearch] = useState('');
+  const [savingAssignment, setSavingAssignment] = useState(false);
   const scrollRef = useRef<ScrollView | null>(null);
 
   // ── save batching + visible feedback ─────────────────────────────────────
@@ -175,6 +189,7 @@ export default function ApartmentDetailScreen() {
   const toastAnim = useRef(new Animated.Value(0)).current;
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const draftCommentsRef = useRef<Record<string, string>>({});
   const pendingRef = useRef<{
     checklistItems: Map<string, EditableChecklistItem>;
     photos: Map<string, InspectionPhoto>;
@@ -234,8 +249,14 @@ export default function ApartmentDetailScreen() {
     setSelectedVisit(undefined);
     dbApi.loadMeasurements(apartamentoId).then(setMeasurements);
     dbApi.loadPhotos(apartamentoId).then(setPhotos);
-    dbApi.loadVisits(apartamentoId).then(setVisits);
+    setVisitsLoading(true);
+    dbApi.loadVisits(apartamentoId).then((v) => { setVisits(v); setVisitsLoading(false); });
+    dbApi.loadStepAssignments(apartamentoId).then(setAssignments);
   }, [apartamentoId, apartment?.checklist]);
+
+  useEffect(() => {
+    dbApi.loadWorkers().then(setWorkers);
+  }, []);
 
   // ── per-apartment extra steps (catalog → this apartment) ──────────────────
   // These hooks must live above the early return so React always sees the
@@ -259,26 +280,6 @@ export default function ApartmentDetailScreen() {
   useEffect(() => {
     if (addStepOpen) refreshServiceStages();
   }, [addStepOpen, refreshServiceStages]);
-
-  if (!apartment || !tower) {
-    return (
-      <View style={[s.empty, { paddingTop: insets.top + 16 }]}>
-        <Pressable onPress={goBackToTower} style={s.emptyBack}>
-          <MaterialCommunityIcons name="chevron-left" size={28} color="#0F172A" />
-          <Text style={s.emptyBackText}>Voltar</Text>
-        </Pressable>
-        <View style={s.emptyCenter}>
-          <MaterialCommunityIcons name={loading ? 'progress-clock' : 'home-alert-outline'} size={48} color="#CBD5E1" />
-          <Text style={s.emptyTitle}>{loading ? 'Carregando apartamento…' : 'Apartamento não encontrado'}</Text>
-        </View>
-      </View>
-    );
-  }
-
-  const progress = calculateProgress(checklist);
-  const okCount = checklist.filter((i) => i.state === 'ok' || i.state === 'notApplicable').length;
-  const currentStatusKey = calculateApartmentStatus(checklist, progress);
-  const status = statusConfig[currentStatusKey];
 
   const categoryByLabel = useMemo(() => {
     const map = new Map<string, string>();
@@ -306,11 +307,8 @@ export default function ApartmentDetailScreen() {
       return next;
     });
   }, [checklistGroups]);
-  // Reverse dependency map: step label → blocker labels that must be 'ok' first.
-  // Merges the hardcoded defaultServiceDependencies with any user-configured
-  // servicosDependentes so both sources are respected.
+
   const blockedBy = useMemo(() => {
-    // Build forward map (blocker → what it blocks), starting from defaults
     const forward = new Map<string, string[]>(
       Object.entries(defaultServiceDependencies).map(([k, v]) => [k.toLowerCase(), v.map((s) => s.toLowerCase())])
     );
@@ -322,7 +320,6 @@ export default function ApartmentDetailScreen() {
         forward.set(key, merged);
       }
     }
-    // Invert to: blocked label → list of blocker labels
     const map = new Map<string, string[]>();
     for (const [blocker, blocked] of forward) {
       for (const dep of blocked) {
@@ -338,6 +335,26 @@ export default function ApartmentDetailScreen() {
     for (const item of checklist) map.set(item.label.toLowerCase(), item.state);
     return map;
   }, [checklist]);
+
+  if (!apartment || !tower) {
+    return (
+      <View style={[s.empty, { paddingTop: insets.top + 16 }]}>
+        <Pressable onPress={goBackToTower} style={s.emptyBack}>
+          <MaterialCommunityIcons name="chevron-left" size={28} color="#0F172A" />
+          <Text style={s.emptyBackText}>Voltar</Text>
+        </Pressable>
+        <View style={s.emptyCenter}>
+          <MaterialCommunityIcons name={loading ? 'progress-clock' : 'home-alert-outline'} size={48} color="#CBD5E1" />
+          <Text style={s.emptyTitle}>{loading ? 'Carregando apartamento…' : 'Apartamento não encontrado'}</Text>
+        </View>
+      </View>
+    );
+  }
+
+  const progress = calculateProgress(checklist);
+  const okCount = checklist.filter((i) => i.state === 'ok' || i.state === 'notApplicable').length;
+  const currentStatusKey = calculateApartmentStatus(checklist, progress);
+  const status = statusConfig[currentStatusKey];
 
   const measurableItems = checklist.filter((i) => i.state === 'ok' && isServiceActiveForFeature(i.label, 'medicao'));
   const blockedServiceGroups = getBlockedServiceGroups(checklist);
@@ -763,6 +780,62 @@ export default function ApartmentDetailScreen() {
     showToast('saved');
   };
 
+  // ── worker assignment ─────────────────────────────────────────────────────
+
+  const openComment = (itemId: string, currentComment: string) => {
+    draftCommentsRef.current[itemId] = currentComment;
+    setDraftComments((cur) => ({ ...cur, [itemId]: currentComment }));
+    setExpandedComments((cur) => ({ ...cur, [itemId]: true }));
+  };
+
+  const closeComment = (itemId: string, saveDraft = false) => {
+    if (saveDraft) {
+      const comment = (draftCommentsRef.current[itemId] ?? '').trim();
+      if (apartamentoId) {
+        const existing = checklist.find((i) => i.id === itemId);
+        if (existing) {
+          const next = checklist.map((i) => i.id === itemId ? { ...i, comment } : i);
+          setChecklist(next);
+          // Keep the shared context in sync so navigating away and back doesn't
+          // overwrite the saved comment with stale data from ObrasContext.
+          const np = calculateProgress(next);
+          updateApartmentLocal(apartamentoId, np, calculateApartmentStatus(next, np), next);
+          showToast('saving');
+          dbApi.upsertChecklistItem({ ...existing, comment, apartmentId: apartamentoId })
+            .then(() => showToast('saved'))
+            .catch(() => showToast('error'));
+        }
+      }
+    }
+    setExpandedComments((cur) => ({ ...cur, [itemId]: false }));
+  };
+
+  const openWorkerPicker = (item: EditableChecklistItem) => {
+    setWorkerPickerItem(item);
+    setDraftWorkerIds(assignments[item.id] ?? []);
+    setWorkerSearch('');
+  };
+
+  const toggleWorker = (workerId: string) => {
+    setDraftWorkerIds((cur) =>
+      cur.includes(workerId) ? cur.filter((id) => id !== workerId) : [...cur, workerId],
+    );
+  };
+
+  const saveWorkerAssignment = async () => {
+    if (!workerPickerItem || !apartamentoId) return;
+    setSavingAssignment(true);
+    try {
+      await dbApi.setStepAssignments(apartamentoId, workerPickerItem.id, draftWorkerIds);
+      setAssignments((cur) => ({ ...cur, [workerPickerItem.id]: draftWorkerIds }));
+      setWorkerPickerItem(null);
+    } catch {
+      // keep modal open so the user can retry
+    } finally {
+      setSavingAssignment(false);
+    }
+  };
+
   // ── tab icon map ──────────────────────────────────────────────────────────
 
   const TAB_ICONS: Record<DetailTab, string> = {
@@ -885,29 +958,45 @@ export default function ApartmentDetailScreen() {
               <Text style={s.cardTitle}>Evolução</Text>
               <View style={s.evoRow}>
                 <View style={s.evoStat}>
-                  <Text style={s.evoValue}>{previousProgress}%</Text>
+                  {visitsLoading ? <View style={s.skelValue} /> : <Text style={s.evoValue}>{previousProgress}%</Text>}
                   <Text style={s.evoLabel}>Anterior</Text>
                 </View>
                 <MaterialCommunityIcons name="arrow-right" size={20} color="#CBD5E1" />
                 <View style={s.evoStat}>
-                  <Text style={[s.evoValue, { color: status.color }]}>{progress}%</Text>
+                  {visitsLoading ? <View style={s.skelValue} /> : <Text style={[s.evoValue, { color: status.color }]}>{progress}%</Text>}
                   <Text style={s.evoLabel}>Atual</Text>
                 </View>
-                <View style={[s.evoBadge, { backgroundColor: unitProgressVariation >= 0 ? '#D1FAE5' : '#FEE2E2' }]}>
-                  <MaterialCommunityIcons
-                    name={unitProgressVariation >= 0 ? 'trending-up' : 'trending-down'}
-                    size={13}
-                    color={getVariationColor(unitProgressVariation)}
-                  />
-                  <Text style={[s.evoBadgeText, { color: getVariationColor(unitProgressVariation) }]}>
-                    {getVariationLabel(unitProgressVariation)}
-                  </Text>
-                </View>
+                {visitsLoading ? (
+                  <View style={[s.evoBadge, { backgroundColor: '#F1F5F9' }]}>
+                    <View style={s.skelBadge} />
+                  </View>
+                ) : (
+                  <View style={[s.evoBadge, { backgroundColor: unitProgressVariation >= 0 ? '#D1FAE5' : '#FEE2E2' }]}>
+                    <MaterialCommunityIcons
+                      name={unitProgressVariation >= 0 ? 'trending-up' : 'trending-down'}
+                      size={13}
+                      color={getVariationColor(unitProgressVariation)}
+                    />
+                    <Text style={[s.evoBadgeText, { color: getVariationColor(unitProgressVariation) }]}>
+                      {getVariationLabel(unitProgressVariation)}
+                    </Text>
+                  </View>
+                )}
               </View>
               <View style={s.evoMeta}>
-                <Text style={s.evoMetaText}><Text style={s.evoMetaBold}>Visitas:</Text> {visits.length}</Text>
-                <Text style={s.evoMetaText}><Text style={s.evoMetaBold}>Primeira:</Text> {firstVisit ? formatPhotoDateTime(firstVisit.date) : '—'}</Text>
-                <Text style={s.evoMetaText}><Text style={s.evoMetaBold}>Última:</Text> {latestVisit ? formatPhotoDateTime(latestVisit.date) : '—'}</Text>
+                {visitsLoading ? (
+                  <>
+                    <View style={s.skelLine} />
+                    <View style={s.skelLine} />
+                    <View style={s.skelLine} />
+                  </>
+                ) : (
+                  <>
+                    <Text style={s.evoMetaText}><Text style={s.evoMetaBold}>Visitas:</Text> {visits.length}</Text>
+                    <Text style={s.evoMetaText}><Text style={s.evoMetaBold}>Primeira:</Text> {firstVisit ? formatPhotoDateTime(firstVisit.date) : '—'}</Text>
+                    <Text style={s.evoMetaText}><Text style={s.evoMetaBold}>Última:</Text> {latestVisit ? formatPhotoDateTime(latestVisit.date) : '—'}</Text>
+                  </>
+                )}
               </View>
             </View>
 
@@ -981,7 +1070,31 @@ export default function ApartmentDetailScreen() {
             {checklistGroups.map(([cat, groupItems]) => {
               const color = categoryColor(cat);
               const collapsed = collapsedChecklistGroups[cat] === true;
-              const okInGroup = groupItems.filter((i) => i.state === 'ok' || i.state === 'notApplicable').length;
+              // Sub-steps are hidden from the main list; only count non-sub-step items for the header.
+              const visibleItems = groupItems.filter((i) => !ALL_GROUP_SUB_STEP_LABELS.has(i.label));
+              const okInGroup = visibleItems.filter((i) => i.state === 'ok' || i.state === 'notApplicable').length;
+              // Build ordered render list. Top-level entries are ordered by state
+              // (Parcial, Pendente, Não se aplica, OK) so completed steps sink to the
+              // bottom. Group-step sub-steps stay attached to their parent in roadmap order.
+              const stateOrder: Record<string, number> = { partial: 0, pending: 1, notApplicable: 2, ok: 3 };
+              type RenderRow = { item: EditableChecklistItem; indented: boolean };
+              const blocks: Array<{ sortKey: number; rows: RenderRow[] }> = [];
+              for (const item of groupItems) {
+                if (item.label in GROUP_STEP_CHILDREN) {
+                  const rows: RenderRow[] = [{ item, indented: false }];
+                  if (expandedGroupSteps[item.label]) {
+                    for (const childLabel of GROUP_STEP_CHILDREN[item.label]) {
+                      const child = groupItems.find((i) => i.label === childLabel);
+                      if (child) rows.push({ item: child, indented: true });
+                    }
+                  }
+                  blocks.push({ sortKey: stateOrder[item.state] ?? 1, rows });
+                } else if (!ALL_GROUP_SUB_STEP_LABELS.has(item.label)) {
+                  blocks.push({ sortKey: stateOrder[item.state] ?? 1, rows: [{ item, indented: false }] });
+                }
+              }
+              blocks.sort((a, b) => a.sortKey - b.sortKey);
+              const renderItems: RenderRow[] = blocks.flatMap((b) => b.rows);
               return (
                 <View key={`chk-grp-${cat}`} style={s.checklistGroup}>
                   <Pressable
@@ -990,60 +1103,93 @@ export default function ApartmentDetailScreen() {
                     <MaterialCommunityIcons name={collapsed ? 'chevron-right' : 'chevron-down'} size={18} color="#64748B" />
                     <View style={[s.checklistGroupDot, { backgroundColor: color }]} />
                     <Text style={s.checklistGroupTitle}>{cat}</Text>
-                    <Text style={s.checklistGroupCount}>{okInGroup}/{groupItems.length} OK</Text>
+                    <Text style={s.checklistGroupCount}>{okInGroup}/{visibleItems.length} OK</Text>
                   </Pressable>
-                  {!collapsed && groupItems.map((item) => {
+                  {!collapsed && renderItems.map(({ item, indented }) => {
                     const cfg = checklistConfig[item.state];
                     const itemPhotos = photosByServiceId[item.id] ?? [];
                     const isPending = item.state === 'pending' || item.state === 'partial';
                     const blockerLabels = blockedBy.get(item.label.toLowerCase()) ?? [];
-                    const activeBlockers = blockerLabels.filter((b) => checklistStateByLabel.get(b) !== 'ok');
+                    const activeBlockers = blockerLabels.filter((b) => {
+                      const st = checklistStateByLabel.get(b);
+                      return st !== 'ok' && st !== 'partial' && st !== 'notApplicable';
+                    });
                     const isLocked = activeBlockers.length > 0;
-                    const isGroupStep = item.label in GROUP_STEP_CHILDREN;
+                    const isGroupStep = !indented && item.label in GROUP_STEP_CHILDREN;
+                    const isExpanded = isGroupStep && !!expandedGroupSteps[item.label];
                     const subStepNames = isGroupStep ? GROUP_STEP_CHILDREN[item.label] : [];
                     const subStepItems = subStepNames.map((name) => checklist.find((i) => i.label === name));
                     return (
-                      <View key={item.id} style={[s.checkCard, { borderLeftColor: isLocked ? '#B45309' : isGroupStep ? '#0891B2' : cfg.color }, isLocked && s.checkCardLocked]}>
-                  <View style={s.checkCardTop}>
-                    <View style={[s.checkIcon, { backgroundColor: isGroupStep ? '#E0F2FE' : cfg.background }]}>
-                      {isGroupStep
-                        ? <MaterialCommunityIcons name="layers-outline" size={18} color="#0891B2" />
-                        : <Text style={[s.checkIconSymbol, { color: cfg.color }]}>{cfg.symbol}</Text>
-                      }
+                      <View key={`${item.id}-${indented}`} style={[s.checkCard, { borderLeftColor: isLocked ? '#B45309' : isGroupStep ? '#0891B2' : cfg.color }, isLocked && s.checkCardLocked, indented && s.checkCardIndented]}>
+                  {isGroupStep ? (
+                    <View style={s.checkCardTop}>
+                      <Pressable
+                        onPress={() => setExpandedGroupSteps((cur) => ({ ...cur, [item.label]: !isExpanded }))}
+                        style={s.checkCardTopMain}>
+                        <View style={[s.checkIcon, { backgroundColor: '#E0F2FE' }]}>
+                          <MaterialCommunityIcons name="layers-outline" size={18} color="#0891B2" />
+                        </View>
+                        <View style={s.checkCardInfo}>
+                          <View style={s.checkLabelRow}>
+                            <Text style={s.checkLabel}>{item.label}</Text>
+                            <View style={s.groupBadge}>
+                              <MaterialCommunityIcons name="layers-outline" size={10} color="#0891B2" />
+                              <Text style={s.groupBadgeText}>Grupo</Text>
+                            </View>
+                          </View>
+                          <Text style={[s.checkStatus, { color: '#0891B2' }]}>
+                            {subStepItems.filter((s) => s?.state === 'ok' || s?.state === 'notApplicable').length}/{subStepNames.length} sub-etapas OK
+                          </Text>
+                          {(assignments[item.id]?.length ?? 0) > 0 && (
+                            <Text style={s.assignedWorkersBadge}>
+                              {assignments[item.id].length} colaborador(es)
+                            </Text>
+                          )}
+                        </View>
+                        <MaterialCommunityIcons name={isExpanded ? 'chevron-up' : 'chevron-down'} size={20} color="#0891B2" />
+                      </Pressable>
+                      <Pressable onPress={() => openWorkerPicker(item)} style={s.menuDotsBtn} hitSlop={8}>
+                        <MaterialCommunityIcons name="account-plus-outline" size={20} color="#94A3B8" />
+                      </Pressable>
                     </View>
-                    <View style={s.checkCardInfo}>
-                      <View style={s.checkLabelRow}>
-                        <Text style={s.checkLabel}>{item.label}</Text>
-                        {isGroupStep && (
-                          <View style={s.groupBadge}>
-                            <MaterialCommunityIcons name="layers-outline" size={10} color="#0891B2" />
-                            <Text style={s.groupBadgeText}>Grupo</Text>
-                          </View>
+                  ) : (
+                    <View style={s.checkCardTop}>
+                      <View style={[s.checkIcon, { backgroundColor: cfg.background }]}>
+                        <Text style={[s.checkIconSymbol, { color: cfg.color }]}>{cfg.symbol}</Text>
+                      </View>
+                      <View style={s.checkCardInfo}>
+                        <View style={s.checkLabelRow}>
+                          <Text style={s.checkLabel}>{item.label}</Text>
+                          {isExtraStep(item.label) && (
+                            <View style={s.extraBadge}>
+                              <MaterialCommunityIcons name="star-outline" size={10} color="#7C3AED" />
+                              <Text style={s.extraBadgeText}>Extra</Text>
+                            </View>
+                          )}
+                        </View>
+                        {itemPhotos.length > 0 && (
+                          <Text style={s.checkPhotoCount}>· {itemPhotos.length} foto(s)</Text>
                         )}
-                        {isExtraStep(item.label) && (
-                          <View style={s.extraBadge}>
-                            <MaterialCommunityIcons name="star-outline" size={10} color="#7C3AED" />
-                            <Text style={s.extraBadgeText}>Extra</Text>
-                          </View>
+                        {(assignments[item.id]?.length ?? 0) > 0 && (
+                          <Text style={s.assignedWorkersBadge}>
+                            {assignments[item.id].length} colaborador(es)
+                          </Text>
                         )}
                       </View>
-                      <Text style={[s.checkStatus, { color: isGroupStep ? '#0891B2' : cfg.color }]}>
-                        {isGroupStep
-                          ? `${subStepItems.filter((s) => s?.state === 'ok' || s?.state === 'notApplicable').length}/${subStepNames.length} sub-etapas OK`
-                          : `${cfg.label}${itemPhotos.length > 0 ? ` · ${itemPhotos.length} foto(s)` : ''}`
-                        }
-                      </Text>
-                    </View>
-                    {isExtraStep(item.label) && (
-                      <Pressable
-                        onPress={() => requestRemoveStep(item)}
-                        style={s.removeStepBtn}
-                        testID={`remove-step-${item.id}`}
-                        hitSlop={8}>
-                        <MaterialCommunityIcons name="close" size={16} color="#94A3B8" />
+                      <Pressable onPress={() => openWorkerPicker(item)} style={s.menuDotsBtn} hitSlop={8}>
+                        <MaterialCommunityIcons name="account-plus-outline" size={20} color="#94A3B8" />
                       </Pressable>
-                    )}
-                  </View>
+                      {isExtraStep(item.label) && (
+                        <Pressable
+                          onPress={() => requestRemoveStep(item)}
+                          style={s.removeStepBtn}
+                          testID={`remove-step-${item.id}`}
+                          hitSlop={8}>
+                          <MaterialCommunityIcons name="close" size={16} color="#94A3B8" />
+                        </Pressable>
+                      )}
+                    </View>
+                  )}
 
                   {isLocked ? (
                     <View style={s.lockBanner}>
@@ -1063,8 +1209,11 @@ export default function ApartmentDetailScreen() {
                         const subIsOk = subState === 'ok' || subState === 'notApplicable';
                         const subIsPartial = subState === 'partial';
                         const subBlockers = blockedBy.get(name.toLowerCase()) ?? [];
-                        const subIsLocked = subBlockers.some((b) => checklistStateByLabel.get(b) !== 'ok');
-                        const dotColor = subIsLocked ? '#B45309' : subIsOk ? '#047857' : subIsPartial ? '#D97706' : '#94A3B8';
+                        const subIsLocked = subBlockers.some((b) => {
+                          const st = checklistStateByLabel.get(b);
+                          return st !== 'ok' && st !== 'partial' && st !== 'notApplicable';
+                        });
+                        const dotColor = subIsLocked ? '#B45309' : subIsOk ? '#047857' : '#D97706';
                         const prevSub = idx > 0 ? subStepItems[idx - 1] : null;
                         const prevIsOk = prevSub ? (prevSub.state === 'ok' || prevSub.state === 'notApplicable') : false;
                         const leftLineColor = idx === 0 ? 'transparent' : prevIsOk ? '#047857' : '#E2E8F0';
@@ -1082,9 +1231,7 @@ export default function ApartmentDetailScreen() {
                                   ? <MaterialCommunityIcons name="lock" size={9} color="#B45309" />
                                   : subIsOk
                                   ? <MaterialCommunityIcons name="check" size={11} color="#FFFFFF" />
-                                  : subIsPartial
-                                  ? <View style={[s.roadmapInnerDot, { backgroundColor: dotColor }]} />
-                                  : null
+                                  : <View style={[s.roadmapInnerDot, { backgroundColor: dotColor }]} />
                                 }
                               </View>
                               <View style={[s.roadmapHalfLine, { backgroundColor: rightLineColor }]} />
@@ -1112,15 +1259,6 @@ export default function ApartmentDetailScreen() {
                         })}
                       </View>
 
-                      <TextInput
-                        multiline
-                        onChangeText={(v) => updateItemComment(item.id, v)}
-                        placeholder="Comentário..."
-                        placeholderTextColor="#94A3B8"
-                        style={s.textarea}
-                        value={item.comment}
-                      />
-
                       {isPending && (
                         <View style={s.issueBox}>
                           <Text style={s.issueBoxTitle}>Criticidade da pendência</Text>
@@ -1138,21 +1276,68 @@ export default function ApartmentDetailScreen() {
                               );
                             })}
                           </View>
-                          <TextInput
-                            multiline
-                            onChangeText={(v) => updateItemIssue(item.id, 'issueComment', v)}
-                            placeholder="Descreva a pendência..."
-                            placeholderTextColor="#94A3B8"
-                            style={s.textarea}
-                            value={item.issueComment ?? ''}
-                          />
                         </View>
                       )}
 
-                      <Pressable onPress={() => addPhotoToItem(item)} style={s.photoBtn} testID={`add-photo-${item.id}`}>
-                        <MaterialCommunityIcons name="camera-plus-outline" size={15} color="#2563EB" />
-                        <Text style={s.photoBtnText}>{itemPhotos.length > 0 ? 'Mais fotos' : 'Adicionar foto'}</Text>
-                      </Pressable>
+                      {item.comment?.trim() && !expandedComments[item.id] && (
+                        <Pressable
+                          onPress={() => openComment(item.id, item.comment ?? '')}
+                          style={s.obsPreview}>
+                          <MaterialCommunityIcons name="note-text-outline" size={13} color="#2563EB" />
+                          <Text style={s.obsPreviewText} numberOfLines={2}>{item.comment}</Text>
+                          <MaterialCommunityIcons name="pencil-outline" size={13} color="#94A3B8" />
+                        </Pressable>
+                      )}
+
+                      {expandedComments[item.id] && (
+                        <View style={s.obsBox}>
+                          <TextInput
+                            multiline
+                            onChangeText={(v) => {
+                              draftCommentsRef.current[item.id] = v;
+                              setDraftComments((cur) => ({ ...cur, [item.id]: v }));
+                            }}
+                            placeholder="Adicione uma observação..."
+                            placeholderTextColor="#94A3B8"
+                            style={s.obsTextarea}
+                            value={draftComments[item.id] ?? ''}
+                          />
+                          <View style={s.obsBoxFooter}>
+                            {(draftComments[item.id] ?? '').trim() ? (
+                              <Pressable onPress={() => { draftCommentsRef.current[item.id] = ''; setDraftComments((cur) => ({ ...cur, [item.id]: '' })); }} style={s.obsClearBtn}>
+                                <MaterialCommunityIcons name="trash-can-outline" size={13} color="#B91C1C" />
+                                <Text style={s.obsClearBtnText}>Limpar</Text>
+                              </Pressable>
+                            ) : <View />}
+                            <Pressable onPress={() => closeComment(item.id, true)} style={s.obsDoneBtn}>
+                              <Text style={s.obsDoneBtnText}>Concluído</Text>
+                            </Pressable>
+                          </View>
+                        </View>
+                      )}
+
+                      <View style={s.cardActions}>
+                        <Pressable onPress={() => addPhotoToItem(item)} style={s.cardActionBtn} testID={`add-photo-${item.id}`}>
+                          <MaterialCommunityIcons name="camera-plus-outline" size={15} color="#64748B" />
+                          <Text style={s.cardActionBtnText}>
+                            {itemPhotos.length > 0 ? `Fotos (${itemPhotos.length})` : 'Foto'}
+                          </Text>
+                        </Pressable>
+                        <Pressable
+                          onPress={() => expandedComments[item.id]
+                            ? closeComment(item.id, false)
+                            : openComment(item.id, item.comment ?? '')}
+                          style={[s.cardActionBtn, item.comment?.trim() && s.cardActionBtnObs]}>
+                          <MaterialCommunityIcons
+                            name={item.comment?.trim() ? 'note-text' : 'note-plus-outline'}
+                            size={15}
+                            color={item.comment?.trim() ? '#2563EB' : '#64748B'}
+                          />
+                          <Text style={[s.cardActionBtnText, item.comment?.trim() && { color: '#2563EB', fontWeight: '700' as const }]}>
+                            Observação
+                          </Text>
+                        </Pressable>
+                      </View>
 
                       {itemPhotos.length > 0 && (
                         <View style={s.thumbGrid}>
@@ -1844,6 +2029,90 @@ export default function ApartmentDetailScreen() {
         </Pressable>
       </Modal>
 
+      {/* WORKER ASSIGNMENT PICKER */}
+      <Modal
+        animationType="slide"
+        transparent
+        visible={!!workerPickerItem}
+        onRequestClose={() => setWorkerPickerItem(null)}>
+        <Pressable style={s.modalBackdrop} onPress={() => setWorkerPickerItem(null)}>
+          <Pressable style={s.workerPickerSheet} onPress={() => {}}>
+            <View style={s.workerPickerHandle} />
+            <View style={s.workerPickerHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={s.workerPickerTitle}>Colaboradores</Text>
+                {workerPickerItem && (
+                  <Text style={s.workerPickerSub} numberOfLines={1}>{workerPickerItem.label}</Text>
+                )}
+              </View>
+              <Pressable onPress={() => setWorkerPickerItem(null)} style={s.addStepCloseBtn}>
+                <MaterialCommunityIcons name="close" size={18} color="#64748B" />
+              </Pressable>
+            </View>
+
+            <View style={s.workerSearchWrap}>
+              <MaterialCommunityIcons name="magnify" size={16} color="#94A3B8" />
+              <TextInput
+                onChangeText={setWorkerSearch}
+                placeholder="Buscar colaborador…"
+                placeholderTextColor="#94A3B8"
+                style={s.workerSearchInput}
+                value={workerSearch}
+              />
+            </View>
+
+            <ScrollView style={s.workerList} showsVerticalScrollIndicator={false}>
+              {workers.length === 0 ? (
+                <View style={s.workerEmpty}>
+                  <MaterialCommunityIcons name="account-off-outline" size={32} color="#CBD5E1" />
+                  <Text style={s.workerEmptyText}>Nenhum colaborador cadastrado</Text>
+                  <Text style={s.workerEmptySub}>Adicione na tela Catálogos → Colaboradores</Text>
+                </View>
+              ) : (
+                workers
+                  .filter((w) => {
+                    const q = workerSearch.trim().toLocaleLowerCase('pt-BR');
+                    return !q || w.nome.toLocaleLowerCase('pt-BR').includes(q) || w.funcao.toLocaleLowerCase('pt-BR').includes(q);
+                  })
+                  .map((w) => {
+                    const selected = draftWorkerIds.includes(w.id);
+                    return (
+                      <Pressable key={w.id} onPress={() => toggleWorker(w.id)} style={[s.workerRow, selected && s.workerRowSelected]}>
+                        <View style={[s.workerAvatar, { backgroundColor: selected ? '#6D28D9' : '#E2E8F0' }]}>
+                          <Text style={[s.workerAvatarText, { color: selected ? '#FFFFFF' : '#64748B' }]}>
+                            {w.nome.charAt(0).toUpperCase()}
+                          </Text>
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={s.workerName}>{w.nome}</Text>
+                          <Text style={s.workerFuncao}>{w.funcao}</Text>
+                        </View>
+                        <MaterialCommunityIcons
+                          name={selected ? 'checkbox-marked-circle' : 'checkbox-blank-circle-outline'}
+                          size={22}
+                          color={selected ? '#6D28D9' : '#CBD5E1'}
+                        />
+                      </Pressable>
+                    );
+                  })
+              )}
+            </ScrollView>
+
+            <Pressable
+              disabled={savingAssignment}
+              onPress={saveWorkerAssignment}
+              style={[s.workerSaveBtn, savingAssignment && { opacity: 0.6 }]}>
+              <MaterialCommunityIcons name="content-save-outline" size={18} color="#FFFFFF" />
+              <Text style={s.workerSaveBtnText}>
+                {draftWorkerIds.length === 0
+                  ? 'Salvar (sem colaboradores)'
+                  : `Salvar ${draftWorkerIds.length} colaborador(es)`}
+              </Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       {/* BACK-TO-TOP FAB — appears after scrolling, sits above the save toast */}
       {showBackToTop && (
         <Pressable
@@ -1960,6 +2229,25 @@ const s = StyleSheet.create({
   pendingCrit: { fontSize: 11, fontWeight: '800' },
   moreText: { color: '#94A3B8', fontSize: 12, textAlign: 'center' },
   textarea: { backgroundColor: '#F8FAFC', borderColor: '#E2E8F0', borderRadius: 10, borderWidth: 1, color: '#0F172A', fontSize: 13, minHeight: 64, padding: 10, textAlignVertical: 'top' },
+  // skeleton
+  skelValue: { backgroundColor: '#E2E8F0', borderRadius: 8, height: 30, width: 54 },
+  skelBadge: { backgroundColor: '#CBD5E1', borderRadius: 6, height: 14, width: 56 },
+  skelLine: { backgroundColor: '#E2E8F0', borderRadius: 6, height: 13, width: '70%' as const },
+  // observation
+  obsPreview: { alignItems: 'center', backgroundColor: '#EFF6FF', borderColor: '#BFDBFE', borderRadius: 8, borderWidth: 1, flexDirection: 'row', gap: 8, paddingHorizontal: 10, paddingVertical: 8 },
+  obsPreviewText: { color: '#1E40AF', flex: 1, fontSize: 12 },
+  obsBox: { backgroundColor: '#F8FAFC', borderColor: '#E2E8F0', borderRadius: 10, borderWidth: 1, gap: 8, padding: 10 },
+  obsTextarea: { borderColor: 'transparent', borderRadius: 6, borderWidth: 1, color: '#0F172A', fontSize: 13, minHeight: 72, textAlignVertical: 'top' },
+  obsBoxFooter: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' },
+  obsClearBtn: { alignItems: 'center', flexDirection: 'row', gap: 4 },
+  obsClearBtnText: { color: '#B91C1C', fontSize: 12, fontWeight: '600' },
+  obsDoneBtn: { backgroundColor: '#2563EB', borderRadius: 8, paddingHorizontal: 14, paddingVertical: 6 },
+  obsDoneBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: '700' },
+  // card actions row
+  cardActions: { borderTopColor: '#F1F5F9', borderTopWidth: 1, flexDirection: 'row', gap: 4, paddingTop: 8 },
+  cardActionBtn: { alignItems: 'center', borderColor: '#E2E8F0', borderRadius: 8, borderWidth: 1, flexDirection: 'row', gap: 6, paddingHorizontal: 12, paddingVertical: 7, flex: 1, justifyContent: 'center' },
+  cardActionBtnObs: { borderColor: '#BFDBFE', backgroundColor: '#EFF6FF' },
+  cardActionBtnText: { color: '#64748B', fontSize: 12, fontWeight: '600' },
 
   // checklist
   checklistGroup: { gap: 10, paddingHorizontal: 16 },
@@ -1984,9 +2272,14 @@ const s = StyleSheet.create({
   checkIconSymbol: { fontSize: 17, fontWeight: '900' },
   checkCardInfo: { flex: 1 },
   checkLabel: { color: '#0F172A', fontSize: 14, fontWeight: '700' },
-  checkStatus: { fontSize: 12, fontWeight: '600', marginTop: 2 },
+  checkStatus: { fontSize: 12, fontWeight: '600', marginTop: 6 },
+  checkPhotoCount: { color: '#64748B', fontSize: 11, marginTop: 3 },
   stateRow: { flexDirection: 'row', gap: 6 },
   checkCardLocked: { opacity: 0.75, backgroundColor: '#FFFBEB' },
+  checkCardIndented: { marginLeft: 20, backgroundColor: '#F0F9FF', borderLeftColor: '#0891B2' },
+  checkCardTopMain: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  menuDotsBtn: { padding: 4 },
+  assignedWorkersBadge: { color: '#7C3AED', fontSize: 11, fontWeight: '700', marginTop: 2 },
   lockBanner: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, backgroundColor: '#FEF3C7', borderColor: '#FCD34D', borderWidth: 1, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10 },
   lockTitle: { color: '#92400E', fontSize: 12, fontWeight: '800', marginBottom: 2 },
   lockText: { color: '#B45309', fontSize: 12, fontWeight: '600' },
@@ -1994,6 +2287,27 @@ const s = StyleSheet.create({
   // group step badge
   groupBadge: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#E0F2FE', borderColor: '#BAE6FD', borderWidth: 1, borderRadius: 999, paddingHorizontal: 6, paddingVertical: 2 },
   groupBadgeText: { color: '#0891B2', fontSize: 10, fontWeight: '800', letterSpacing: 0.3 },
+
+  // worker assignment picker
+  workerPickerSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, maxHeight: '88%', paddingHorizontal: 20, paddingTop: 10, paddingBottom: 28, gap: 14 },
+  workerPickerHandle: { alignSelf: 'center', width: 40, height: 4, borderRadius: 999, backgroundColor: '#E2E8F0', marginBottom: 2 },
+  workerPickerHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
+  workerPickerTitle: { color: '#0F172A', fontSize: 17, fontWeight: '900' },
+  workerPickerSub: { color: '#64748B', fontSize: 12, marginTop: 2 },
+  workerSearchWrap: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#F8FAFC', borderColor: '#E2E8F0', borderRadius: 12, borderWidth: 1, paddingHorizontal: 12, minHeight: 44 },
+  workerSearchInput: { flex: 1, color: '#0F172A', fontSize: 13, paddingVertical: 10 },
+  workerList: { maxHeight: 420 },
+  workerEmpty: { alignItems: 'center', justifyContent: 'center', paddingVertical: 32, gap: 8 },
+  workerEmptyText: { color: '#475569', fontSize: 14, fontWeight: '700' },
+  workerEmptySub: { color: '#94A3B8', fontSize: 12, textAlign: 'center' },
+  workerRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, borderRadius: 12, paddingHorizontal: 4 },
+  workerRowSelected: { backgroundColor: '#F5F3FF' },
+  workerAvatar: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
+  workerAvatarText: { fontSize: 15, fontWeight: '900' },
+  workerName: { color: '#0F172A', fontSize: 14, fontWeight: '700' },
+  workerFuncao: { color: '#64748B', fontSize: 12, marginTop: 1 },
+  workerSaveBtn: { backgroundColor: '#6D28D9', borderRadius: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 14 },
+  workerSaveBtnText: { color: '#FFFFFF', fontSize: 14, fontWeight: '900' },
 
   // roadmap (sub-step progress line)
   roadmapTrack: { flexDirection: 'row', paddingTop: 2 },
