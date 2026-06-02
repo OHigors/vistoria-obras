@@ -7,6 +7,8 @@ export type ChecklistItem = {
   label: string;
   state: ChecklistState;
   comment?: string;
+  area?: string;
+  isExtra?: boolean;
 };
 
 export type Apartment = {

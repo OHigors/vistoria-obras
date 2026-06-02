@@ -47,6 +47,8 @@ type DbChecklistRow = {
   actual_start: string | null;
   actual_end: string | null;
   sort_order: number;
+  area: string | null;
+  is_extra: boolean | null;
 };
 
 function mapChecklistItem(row: DbChecklistRow): ChecklistItem & ScheduleFields {
@@ -59,6 +61,8 @@ function mapChecklistItem(row: DbChecklistRow): ChecklistItem & ScheduleFields {
     plannedEnd: toBrDate(row.planned_end),
     actualStart: toBrDate(row.actual_start),
     actualEnd: toBrDate(row.actual_end),
+    area: row.area ?? 'Interior',
+    isExtra: row.is_extra ?? false,
   };
 }
 
@@ -287,6 +291,8 @@ export async function upsertChecklistItem(
     planned_end: toIsoDate(item.plannedEnd),
     actual_start: toIsoDate(item.actualStart),
     actual_end: toIsoDate(item.actualEnd),
+    area: item.area ?? 'Interior',
+    is_extra: item.isExtra ?? false,
   });
 }
 
@@ -474,7 +480,7 @@ export async function loadServiceCategories(): Promise<ServiceCategory[]> {
 }
 
 export async function saveServiceCategory(category: ServiceCategory): Promise<void> {
-  const id = category.id || `cat-${Date.now()}`;
+  const id = category.id || crypto.randomUUID();
   const { error } = await supabase.from('service_categories').upsert({
     id,
     obra_id: OBRA_ID,
@@ -531,7 +537,7 @@ export async function loadServiceUnits(): Promise<ServiceUnit[]> {
 }
 
 export async function saveServiceUnit(unit: ServiceUnit): Promise<void> {
-  const id = unit.id || `unit-${Date.now()}`;
+  const id = unit.id || crypto.randomUUID();
   const { error } = await supabase.from('service_units').upsert({
     id,
     obra_id: OBRA_ID,
@@ -587,7 +593,7 @@ export async function loadWorkers(): Promise<Worker[]> {
 }
 
 export async function saveWorker(worker: Worker): Promise<void> {
-  const id = worker.id || `worker-${Date.now()}`;
+  const id = worker.id || crypto.randomUUID();
   const { error } = await supabase.from('workers').upsert({
     id,
     obra_id: OBRA_ID,
@@ -634,7 +640,7 @@ export async function setStepAssignments(
     .eq('item_id', itemId);
   if (workerIds.length === 0) return;
   const rows = workerIds.map((workerId) => ({
-    id: `assign-${apartmentId}-${itemId}-${workerId}`,
+    id: crypto.randomUUID(),
     obra_id: OBRA_ID,
     apartment_id: apartmentId,
     item_id: itemId,

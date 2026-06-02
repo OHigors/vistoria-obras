@@ -177,7 +177,7 @@ export const getChecklistItemsForFeature = (
 };
 
 export const createEmptyServiceStage = (order: number): ServiceStage => ({
-  id: `etapa-${Date.now()}`,
+  id: '',
   nome: '',
   categoria: '',
   unidadeMedicao: '',
