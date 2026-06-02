@@ -39,6 +39,11 @@ expo-web*.log
 # local db backups
 /backups/
 
+# db scripts, local migrations, and supabase CLI project (contain schema + seeds)
+/scripts/
+/migrations/
+/supabase/
+
 # typescript
 *.tsbuildinfo
 

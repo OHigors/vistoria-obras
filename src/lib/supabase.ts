@@ -5,4 +5,6 @@ export const supabase = createClient(
   process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY!,
 );
 
-export const OBRA_ID = 'residencial-cagliari';
+export const OBRA_ID = process.env.EXPO_PUBLIC_OBRA_ID!;
+
+

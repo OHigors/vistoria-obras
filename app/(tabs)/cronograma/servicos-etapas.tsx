@@ -268,7 +268,7 @@ export default function ServiceStagesScreen() {
       return;
     }
     setErrors({});
-    const normalized: ServiceStage = { ...draft, id: draft.id || `etapa-${Date.now()}`, nome: draft.nome.trim(), categoria: draft.categoria.trim(), unidadeMedicao: draft.unidadeMedicao.trim(), observacao: draft.observacao.trim() };
+    const normalized: ServiceStage = { ...draft, id: draft.id || crypto.randomUUID(), nome: draft.nome.trim(), categoria: draft.categoria.trim(), unidadeMedicao: draft.unidadeMedicao.trim(), observacao: draft.observacao.trim() };
     const updated = editingId ? stages.map((s) => (s.id === editingId ? normalized : s)) : [...stages, normalized];
     const ordered = updated.map((s, i) => ({ ...s, ordemExecucao: i + 1 })).sort((a, b) => a.ordemExecucao - b.ordemExecucao);
     setStages(ordered);

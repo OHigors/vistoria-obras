@@ -7,7 +7,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 
 import type { ApartmentStatus, ChecklistItem, ChecklistState } from '@/src/data/mockObras';
-import { checklistLabels } from '@/src/data/mockObras';
+import { useAreaFilter } from '@/src/data/AreaFilterContext';
 import type { InspectionPhoto } from '@/src/data/localInspectionPhotos';
 import type { InspectionVisit, VisitChecklistCounts } from '@/src/data/localInspectionVisits';
 import { localResponsible } from '@/src/data/localInspectionVisits';
@@ -141,6 +141,7 @@ export default function ApartmentDetailScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { getApartmentById, getTowerById, updateApartmentLocal, serviceStages, refreshServiceStages, project, loading } = useObras();
+  const { areaFilter, setAreaFilter } = useAreaFilter();
   const apartment = getApartmentById(apartamentoId);
   const tower = apartment ? getTowerById(apartment.towerId) : undefined;
 
@@ -258,11 +259,7 @@ export default function ApartmentDetailScreen() {
     dbApi.loadWorkers().then(setWorkers);
   }, []);
 
-  // ── per-apartment extra steps (catalog → this apartment) ──────────────────
-  // These hooks must live above the early return so React always sees the
-  // same hook order on every render (Rules of Hooks).
-  const generalLabels = useMemo(() => new Set<string>(checklistLabels), []);
-  const isExtraStep = useCallback((label: string) => !generalLabels.has(label), [generalLabels]);
+  const isExtraStep = useCallback((item: EditableChecklistItem) => item.isExtra === true, []);
 
   // Catalog stages available to add: active, marked for checklist, and not
   // already on this apartment.
@@ -290,15 +287,20 @@ export default function ApartmentDetailScreen() {
     return map;
   }, [serviceStages]);
 
+  const areaChecklist = useMemo(
+    () => checklist.filter((i) => (i.area ?? 'Interior') === areaFilter),
+    [checklist, areaFilter],
+  );
+
   const checklistGroups = useMemo(() => {
     const map = new Map<string, EditableChecklistItem[]>();
-    for (const item of checklist) {
+    for (const item of areaChecklist) {
       const cat = categoryByLabel.get(item.label) || 'Sem categoria';
       if (!map.has(cat)) map.set(cat, []);
       map.get(cat)!.push(item);
     }
     return [...map.entries()].sort(([a], [b]) => a.localeCompare(b, 'pt-BR'));
-  }, [checklist, categoryByLabel]);
+  }, [areaChecklist, categoryByLabel]);
 
   useEffect(() => {
     setCollapsedChecklistGroups((cur) => {
@@ -353,6 +355,7 @@ export default function ApartmentDetailScreen() {
 
   const progress = calculateProgress(checklist);
   const okCount = checklist.filter((i) => i.state === 'ok' || i.state === 'notApplicable').length;
+  const areaOkCount = areaChecklist.filter((i) => i.state === 'ok' || i.state === 'notApplicable').length;
   const currentStatusKey = calculateApartmentStatus(checklist, progress);
   const status = statusConfig[currentStatusKey];
 
@@ -518,7 +521,7 @@ export default function ApartmentDetailScreen() {
 
     const item = checklist.find((i) => i.id === photoPickerTarget.itemId);
     if (!item) return;
-    const photoId = `${apartment.id}-${item.id}-${Date.now()}`;
+    const photoId = crypto.randomUUID();
     const storagePath = `${apartment.id}/${item.id}/${photoId}.jpg`;
 
     // Optimistic insert with the local URI so the thumb shows immediately.
@@ -636,7 +639,7 @@ export default function ApartmentDetailScreen() {
       const now = new Date().toISOString();
       const statusAfter = calculateApartmentStatus(checklist, progress);
       const newVisit = {
-        id: `${apartment.id}-visita-${Date.now()}`, apartmentId: apartment.id, apartamentoId: apartment.id,
+        id: crypto.randomUUID(), apartmentId: apartment.id, apartamentoId: apartment.id,
         date: now, startedAt: now, dataInicio: now,
         responsible: localResponsible, responsavel: localResponsible,
         progressBefore: progress, percentualAntes: progress, progressAfter: progress, percentualDepois: progress,
@@ -678,7 +681,7 @@ export default function ApartmentDetailScreen() {
     const periodEnd = normalizeMeasurementPeriod(draft.periodEnd);
     if (!isMeasurementPeriodValid(periodStart, periodEnd)) { setMeasurementAlert('Período inválido.'); return; }
     const m = {
-      id: `${apartment.id}-${item.id}-${Date.now()}`, obraId: apartment.obraId, towerId: tower?.id,
+      id: crypto.randomUUID(), obraId: apartment.obraId, towerId: tower?.id,
       apartmentId: apartment.id, serviceId: item.id, contractorId, service: item.label, contractor,
       quantity, unit: draft.unit.trim() || 'un', unitPrice, totalValue: quantity * unitPrice,
       periodStart, periodEnd, status: draft.status, comment: draft.comment.trim(),
@@ -700,19 +703,18 @@ export default function ApartmentDetailScreen() {
     setMeasurementAlert('');
   };
 
-  // (extra-step hooks moved above the early return; handlers stay here)
-  // A step is "general" if its label is in the seeded checklistLabels set;
-  // anything else was added individually to this apartment from the catalog.
-
   const addStepToApartment = (stageLabel: string) => {
     if (!apartamentoId || !apartment) return;
+    const stage = serviceStages.find((s) => s.nome === stageLabel);
     const newItem: EditableChecklistItem = {
-      id: `${apartamentoId}-extra-${Date.now()}`,
+      id: crypto.randomUUID(),
       label: stageLabel,
       state: 'pending',
       comment: '',
       issueCriticality: 'Média',
       issueComment: '',
+      area: stage?.observacao || areaFilter,
+      isExtra: true,
     };
     const prev = checklist;
     const next = [...prev, newItem];
@@ -732,7 +734,7 @@ export default function ApartmentDetailScreen() {
 
   // Opening the modal is the user's "intent"; the confirm step does the work.
   const requestRemoveStep = (item: EditableChecklistItem) => {
-    if (!isExtraStep(item.label)) return;
+    if (!isExtraStep(item)) return;
     setConfirmRemoveStep(item);
   };
 
@@ -1043,7 +1045,7 @@ export default function ApartmentDetailScreen() {
         {activeTab === 'Checklist' && (
           <>
             <View style={s.checklistHeader}>
-              <Text style={s.checklistProgress}>{okCount} / {checklist.length} concluídos</Text>
+              <Text style={s.checklistProgress}>{areaOkCount} / {areaChecklist.length} concluídos</Text>
               <View style={s.checklistHeaderActions}>
                 <Pressable
                   onPress={() => {
@@ -1067,6 +1069,21 @@ export default function ApartmentDetailScreen() {
                 </Pressable>
               </View>
             </View>
+            <View style={s.checklistAreaRow}>
+              <Pressable
+                onPress={() => setAreaFilter('Exterior')}
+                style={[s.checklistAreaBtn, areaFilter === 'Exterior' && s.checklistAreaBtnExterior]}>
+                <MaterialCommunityIcons name="domain" size={13} color={areaFilter === 'Exterior' ? '#D97706' : '#94A3B8'} />
+                <Text style={[s.checklistAreaBtnText, areaFilter === 'Exterior' && s.checklistAreaBtnTextExterior]}>Exterior</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => setAreaFilter('Interior')}
+                style={[s.checklistAreaBtn, areaFilter === 'Interior' && s.checklistAreaBtnInterior]}>
+                <MaterialCommunityIcons name="floor-plan" size={13} color={areaFilter === 'Interior' ? '#0891B2' : '#94A3B8'} />
+                <Text style={[s.checklistAreaBtnText, areaFilter === 'Interior' && s.checklistAreaBtnTextInterior]}>Interior</Text>
+              </Pressable>
+            </View>
+
             {checklistGroups.map(([cat, groupItems]) => {
               const color = categoryColor(cat);
               const collapsed = collapsedChecklistGroups[cat] === true;
@@ -1160,7 +1177,7 @@ export default function ApartmentDetailScreen() {
                       <View style={s.checkCardInfo}>
                         <View style={s.checkLabelRow}>
                           <Text style={s.checkLabel}>{item.label}</Text>
-                          {isExtraStep(item.label) && (
+                          {isExtraStep(item) && (
                             <View style={s.extraBadge}>
                               <MaterialCommunityIcons name="star-outline" size={10} color="#7C3AED" />
                               <Text style={s.extraBadgeText}>Extra</Text>
@@ -1179,7 +1196,7 @@ export default function ApartmentDetailScreen() {
                       <Pressable onPress={() => openWorkerPicker(item)} style={s.menuDotsBtn} hitSlop={8}>
                         <MaterialCommunityIcons name="account-plus-outline" size={20} color="#94A3B8" />
                       </Pressable>
-                      {isExtraStep(item.label) && (
+                      {isExtraStep(item) && (
                         <Pressable
                           onPress={() => requestRemoveStep(item)}
                           style={s.removeStepBtn}
@@ -2258,6 +2275,13 @@ const s = StyleSheet.create({
   checklistHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, gap: 8 },
   checklistHeaderActions: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   checklistProgress: { color: '#475569', fontSize: 13, fontWeight: '700' },
+  checklistAreaRow: { flexDirection: 'row', gap: 6, paddingHorizontal: 16, paddingBottom: 8 },
+  checklistAreaBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, paddingVertical: 8, borderRadius: 10, backgroundColor: '#F1F5F9' },
+  checklistAreaBtnExterior: { backgroundColor: '#FEF3C7' },
+  checklistAreaBtnInterior: { backgroundColor: '#E0F2FE' },
+  checklistAreaBtnText: { fontSize: 12, fontWeight: '700', color: '#94A3B8' },
+  checklistAreaBtnTextExterior: { color: '#B45309' },
+  checklistAreaBtnTextInterior: { color: '#0369A1' },
   addStepBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, borderWidth: 1, borderColor: '#DBEAFE', backgroundColor: '#EFF6FF', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 },
   addStepBtnText: { color: '#2563EB', fontSize: 11, fontWeight: '800' },
   resetBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 },

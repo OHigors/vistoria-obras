@@ -19,6 +19,7 @@ import {
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ObrasProvider } from '@/src/data/ObrasContext';
+import { AreaFilterProvider } from '@/src/data/AreaFilterContext';
 import { ToastProvider } from '@/src/ui/Toast';
 
 SplashScreen.preventAutoHideAsync();
@@ -48,6 +49,7 @@ export default function RootLayout() {
 
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+      <AreaFilterProvider>
       <ObrasProvider>
         <ToastProvider>
           <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: '#F8FAFC' } }}>
@@ -57,6 +59,7 @@ export default function RootLayout() {
           <StatusBar style="light" />
         </ToastProvider>
       </ObrasProvider>
+      </AreaFilterProvider>
     </ThemeProvider>
   );
 }
