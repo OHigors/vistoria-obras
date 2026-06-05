@@ -14,6 +14,7 @@ export type ServiceStage = {
   travaLiberacao: boolean;
   ativo: boolean;
   servicosDependentes: string[];
+  area: string;
   observacao: string;
   dataInicio: string;
   dataFim: string;
@@ -99,6 +100,7 @@ const createStage = (name: string, index: number): ServiceStage => ({
   travaLiberacao: name.includes('Limpeza') || name.includes('Vistoria') || name.includes('Shaft'),
   ativo: true,
   servicosDependentes: defaultServiceDependencies[name] ?? [],
+  area: 'Interior',
   observacao: '',
   dataInicio: '',
   dataFim: '',
@@ -127,6 +129,7 @@ const normalizeStage = (stage: Partial<ServiceStage>, index: number): ServiceSta
     travaLiberacao: Boolean(stage.travaLiberacao),
     ativo: stage.ativo !== false,
     servicosDependentes: Array.isArray(stage.servicosDependentes) ? stage.servicosDependentes : [],
+    area: typeof stage.area === 'string' ? stage.area : 'Interior',
     observacao: typeof stage.observacao === 'string' ? stage.observacao : '',
     dataInicio: typeof stage.dataInicio === 'string' ? stage.dataInicio : '',
     dataFim: typeof stage.dataFim === 'string' ? stage.dataFim : '',
@@ -189,6 +192,7 @@ export const createEmptyServiceStage = (order: number): ServiceStage => ({
   travaLiberacao: false,
   ativo: true,
   servicosDependentes: [],
+  area: 'Interior',
   observacao: '',
   dataInicio: '',
   dataFim: '',

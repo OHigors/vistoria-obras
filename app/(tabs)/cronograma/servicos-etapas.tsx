@@ -201,7 +201,7 @@ const categoryColor = (cat: string) => {
 export default function ServiceStagesScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { refreshServiceStages, serviceCategories, serviceUnits } = useObras();
+  const { refreshServiceStages, refreshData, serviceCategories, serviceUnits } = useObras();
   const toast = useToast();
   const scrollRef = useRef<ScrollView | null>(null);
   const [stages, setStages] = useState<ServiceStage[]>([]);
@@ -279,7 +279,8 @@ export default function ServiceStagesScreen() {
     const wasEditing = !!editingId;
     toast.saving(wasEditing ? 'Atualizando etapa…' : 'Criando etapa…');
     db.saveServiceStages(ordered)
-      .then(() => refreshServiceStages())
+      .then(() => wasEditing ? Promise.resolve() : db.propagateStageToApartments(normalized))
+      .then(() => Promise.all([refreshServiceStages(), refreshData()]))
       .then(() => toast.saved(wasEditing ? 'Etapa atualizada' : 'Etapa criada'))
       .catch(() => toast.error(wasEditing ? 'Erro ao atualizar etapa' : 'Erro ao criar etapa'));
   };
@@ -490,6 +491,16 @@ export default function ServiceStagesScreen() {
                           <Text style={[s.metricChipText, m.on ? s.metricChipTextOn : s.metricChipTextOff]}>{m.label}</Text>
                         </View>
                       ))}
+                      <View style={[s.metricChip, stage.area === 'Exterior' ? s.areaChipExt : s.areaChipInt]}>
+                        <MaterialCommunityIcons
+                          name={stage.area === 'Exterior' ? 'domain' : 'floor-plan'}
+                          size={10}
+                          color={stage.area === 'Exterior' ? '#92400E' : '#0369A1'}
+                        />
+                        <Text style={[s.metricChipText, stage.area === 'Exterior' ? s.areaChipExtText : s.areaChipIntText]}>
+                          {stage.area === 'Exterior' ? 'Exterior' : 'Interior'}
+                        </Text>
+                      </View>
                     </View>
 
                     {stage.servicosDependentes.length > 0 && (
@@ -498,7 +509,6 @@ export default function ServiceStagesScreen() {
                         <Text style={s.blocksText}>Trava: {stage.servicosDependentes.join(', ')}</Text>
                       </View>
                     )}
-                    {stage.observacao ? <Text style={s.observacaoText}>{stage.observacao}</Text> : null}
                   </View>
 
                   <View style={s.actionRow}>
@@ -509,7 +519,7 @@ export default function ServiceStagesScreen() {
                     ) : (
                       <Pressable onPress={() => reactivate(stage)} style={s.btnReactivate}>
                         <MaterialCommunityIcons name="restart" size={13} color="#047857" />
-                        <Text style={s.btnReactivateText}>Reativar</Text>
+                        <Text style={s.btnReactivateText}>Ativar</Text>
                       </Pressable>
                     )}
                     <Pressable onPress={() => editStage(stage)} style={s.btnSecondary}>
@@ -584,6 +594,24 @@ export default function ServiceStagesScreen() {
                   manageIcon="ruler"
                   error={errors.unidadeMedicao}
                 />
+
+                <View style={s.fieldGroup}>
+                  <Text style={s.fieldLabel}>Área da obra</Text>
+                  <View style={s.areaPickerRow}>
+                    <Pressable
+                      onPress={() => updateDraft('area', 'Exterior')}
+                      style={[s.areaPicker, draft.area === 'Exterior' && s.areaPickerExteriorActive]}>
+                      <MaterialCommunityIcons name="domain" size={15} color={draft.area === 'Exterior' ? '#FFFFFF' : '#94A3B8'} />
+                      <Text style={[s.areaPickerText, draft.area === 'Exterior' && s.areaPickerTextActiveExt]}>Exterior</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => updateDraft('area', 'Interior')}
+                      style={[s.areaPicker, draft.area !== 'Exterior' && s.areaPickerInteriorActive]}>
+                      <MaterialCommunityIcons name="floor-plan" size={15} color={draft.area !== 'Exterior' ? '#FFFFFF' : '#94A3B8'} />
+                      <Text style={[s.areaPickerText, draft.area !== 'Exterior' && s.areaPickerTextActiveInt]}>Interior</Text>
+                    </Pressable>
+                  </View>
+                </View>
               </View>
 
               <View style={s.durationBox}>
@@ -814,7 +842,6 @@ const s = StyleSheet.create({
   metricChipTextOff: { color: '#94A3B8' },
   blocksRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   blocksText: { color: '#B45309', fontSize: 12, fontWeight: '600', flex: 1 },
-  observacaoText: { color: '#64748B', fontSize: 12, lineHeight: 17 },
 
   // buttons
   btnPrimary: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#6D28D9', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10 },
@@ -847,6 +874,21 @@ const s = StyleSheet.create({
   depGroupCount: { color: '#94A3B8', fontSize: 11, fontWeight: '700' },
   depGroupSelPill: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#FEF3C7', borderRadius: 999, paddingHorizontal: 7, paddingVertical: 2 },
   depGroupSelText: { color: '#B45309', fontSize: 10, fontWeight: '800' },
+
+  // area picker (form)
+  areaPickerRow: { flexDirection: 'row', gap: 8 },
+  areaPicker: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 11, borderRadius: 10, backgroundColor: '#F1F5F9' },
+  areaPickerExteriorActive: { backgroundColor: '#D97706' },
+  areaPickerInteriorActive: { backgroundColor: '#0891B2' },
+  areaPickerText: { color: '#94A3B8', fontSize: 13, fontWeight: '700' },
+  areaPickerTextActiveExt: { color: '#FFFFFF' },
+  areaPickerTextActiveInt: { color: '#FFFFFF' },
+
+  // area chip (card)
+  areaChipExt: { backgroundColor: '#FEF3C7', borderColor: '#FDE68A' },
+  areaChipInt: { backgroundColor: '#E0F2FE', borderColor: '#BAE6FD' },
+  areaChipExtText: { color: '#92400E' },
+  areaChipIntText: { color: '#0369A1' },
 
   // field errors
   fieldLabelError: { color: '#B91C1C' },

@@ -713,7 +713,7 @@ export default function ApartmentDetailScreen() {
       comment: '',
       issueCriticality: 'Média',
       issueComment: '',
-      area: stage?.observacao || areaFilter,
+      area: stage?.area || areaFilter,
       isExtra: true,
     };
     const prev = checklist;
