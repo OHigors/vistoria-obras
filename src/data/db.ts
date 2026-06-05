@@ -216,7 +216,8 @@ function mapServiceStage(row: Record<string, unknown>): ServiceStage {
     travaLiberacao: row.trava_liberacao as boolean,
     ativo: row.ativo as boolean,
     servicosDependentes: (row.servicos_dependentes as string[]) ?? [],
-    observacao: row.observacao as string,
+    area: (row.area as string) ?? 'Interior',
+    observacao: (row.observacao as string) ?? '',
     dataInicio: (row.data_inicio as string | null) ?? '',
     dataFim: (row.data_fim as string | null) ?? '',
   };
@@ -452,6 +453,7 @@ export async function saveServiceStages(stages: ServiceStage[]): Promise<void> {
     trava_liberacao: stage.travaLiberacao,
     ativo: stage.ativo,
     servicos_dependentes: stage.servicosDependentes,
+    area: stage.area ?? 'Interior',
     observacao: stage.observacao,
     data_inicio: stage.dataInicio || null,
     data_fim: stage.dataFim || null,
@@ -461,6 +463,86 @@ export async function saveServiceStages(stages: ServiceStage[]): Promise<void> {
 
 export async function deleteServiceStage(id: string): Promise<void> {
   await supabase.from('service_stages').delete().eq('id', id);
+}
+
+export async function propagateStageToApartments(stage: ServiceStage): Promise<void> {
+  const { data: apts } = await supabase
+    .from('apartments')
+    .select('id')
+    .eq('obra_id', OBRA_ID);
+  if (!apts?.length) return;
+
+  const { data: existing } = await supabase
+    .from('checklist_items')
+    .select('apartment_id')
+    .eq('obra_id', OBRA_ID)
+    .eq('label', stage.nome);
+
+  const existingAptIds = new Set((existing ?? []).map((r) => r.apartment_id as string));
+  const newRows = apts
+    .filter((apt) => !existingAptIds.has(apt.id as string))
+    .map((apt) => ({
+      id: crypto.randomUUID(),
+      obra_id: OBRA_ID,
+      apartment_id: apt.id as string,
+      label: stage.nome,
+      state: 'pending',
+      comment: '',
+      sort_order: stage.ordemExecucao,
+      area: stage.area ?? 'Interior',
+      is_extra: false,
+    }));
+
+  if (!newRows.length) return;
+
+  const BATCH = 200;
+  for (let i = 0; i < newRows.length; i += BATCH) {
+    const { error } = await supabase.from('checklist_items').insert(newRows.slice(i, i + BATCH));
+    if (error) throw error;
+  }
+}
+
+export async function addStageToApartments(stage: ServiceStage, apartmentIds: string[]): Promise<void> {
+  if (!apartmentIds.length) return;
+  const { data: existing } = await supabase
+    .from('checklist_items')
+    .select('apartment_id')
+    .eq('obra_id', OBRA_ID)
+    .eq('label', stage.nome)
+    .in('apartment_id', apartmentIds);
+  const existingIds = new Set((existing ?? []).map((r) => r.apartment_id as string));
+  const missing = apartmentIds.filter((id) => !existingIds.has(id));
+  if (!missing.length) return;
+  const rows = missing.map((aptId) => ({
+    id: crypto.randomUUID(),
+    obra_id: OBRA_ID,
+    apartment_id: aptId,
+    label: stage.nome,
+    state: 'pending',
+    comment: '',
+    sort_order: stage.ordemExecucao,
+    area: stage.area ?? 'Interior',
+    is_extra: false,
+  }));
+  const BATCH = 200;
+  for (let i = 0; i < rows.length; i += BATCH) {
+    const { error } = await supabase.from('checklist_items').insert(rows.slice(i, i + BATCH));
+    if (error) throw error;
+  }
+}
+
+export async function removeStageFromApartments(stageName: string, apartmentIds: string[]): Promise<void> {
+  if (!apartmentIds.length) return;
+  const BATCH = 100;
+  for (let i = 0; i < apartmentIds.length; i += BATCH) {
+    const { error } = await supabase
+      .from('checklist_items')
+      .delete()
+      .eq('obra_id', OBRA_ID)
+      .eq('label', stageName)
+      .in('apartment_id', apartmentIds.slice(i, i + BATCH));
+    if (error) throw error;
+  }
 }
 
 // ─── Service categories ───────────────────────────────────────────────────────
