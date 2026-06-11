@@ -51,6 +51,25 @@ export const getProgressBackground = (progress: number): string => {
   return [...progressBands].reverse().find((b) => p >= b.min)!.soft;
 };
 
+// Friendly, low-contrast heatmap palette for the tower "Mapa" overview. A wall of
+// saturated red on a freshly-started tower reads as alarming rather than
+// informative, so low progress is a calm neutral and higher progress warms toward
+// green. Each band carries a tinted background, a readable foreground, and a border.
+const progressMapBands: { min: number; bg: string; fg: string; border: string }[] = [
+  { min: 0,  bg: '#F1F5F9', fg: '#64748B', border: '#E2E8F0' }, // neutral — barely started
+  { min: 20, bg: '#FFEDD5', fg: '#C2620C', border: '#FED7AA' }, // soft orange
+  { min: 40, bg: '#FEF3C7', fg: '#B45309', border: '#FDE68A' }, // soft amber
+  { min: 60, bg: '#DBEAFE', fg: '#2563EB', border: '#BFDBFE' }, // soft blue
+  { min: 80, bg: '#D1FAE5', fg: '#047857', border: '#A7F3D0' }, // soft green
+];
+
+export const getProgressMapStyle = (
+  progress: number,
+): { bg: string; fg: string; border: string } => {
+  const p = Math.max(0, Math.min(100, progress));
+  return [...progressMapBands].reverse().find((b) => p >= b.min)!;
+};
+
 export const checklistConfig: Record<
   ChecklistState,
   { label: string; color: string; background: string; symbol: string }

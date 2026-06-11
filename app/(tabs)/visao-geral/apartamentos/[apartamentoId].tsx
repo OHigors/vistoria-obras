@@ -5,6 +5,7 @@ import { Animated, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Te
 import { Text } from '@/src/ui/Text';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 
 import type { ApartmentStatus, ChecklistItem, ChecklistState } from '@/src/data/mockObras';
 import { useAreaFilter } from '@/src/data/AreaFilterContext';
@@ -31,9 +32,9 @@ import * as dbApi from '@/src/data/db';
 import type { ScheduleFields } from '@/src/data/schedule';
 import { formatDateBr, getScheduleRows, isValidBrDate, maskDateBr } from '@/src/data/schedule';
 import { getBlockedServiceGroups } from '@/src/data/serviceBlockers';
-import { defaultServiceDependencies, isServiceActiveForFeature } from '@/src/data/serviceStages';
+import { defaultServiceDependencies, getGroupStepChildren, isServiceActiveForFeature } from '@/src/data/serviceStages';
 import type { Worker } from '@/src/data/serviceWorkers';
-import { checklistConfig, getProgressColor, statusConfig } from '@/src/ui/status';
+import { checklistConfig, getProgressMapStyle, statusConfig } from '@/src/ui/status';
 
 const checklistOptions: ChecklistState[] = ['ok', 'pending', 'partial', 'notApplicable'];
 
@@ -58,6 +59,7 @@ const scheduleStatusStyles: Record<string, { background: string; color: string }
 
 type EditableChecklistItem = ChecklistItem & {
   comment: string;
+  emergency: string;
   issueCriticality?: IssueCriticality;
   issueComment?: string;
 } & ScheduleFields;
@@ -65,24 +67,16 @@ type EditableChecklistItem = ChecklistItem & {
 const isIssueCriticality = (v: unknown): v is IssueCriticality =>
   criticalityOptions.includes(v as IssueCriticality);
 
-// Group step configuration: parent step name → sub-step names.
-// When all sub-steps are 'ok' the parent auto-resolves to 'ok'.
-// Add more entries here to create more group steps.
-const GROUP_STEP_CHILDREN: Record<string, string[]> = {
-  Impermeabilização: [
-    'Impermeabilização do banheiro',
-    'Impermeabilização da área de serviço',
-    'Impermeabilização da cozinha',
-  ],
-};
-
-// Flat set of all labels that are sub-steps of any group (used to hide them from the main list).
-const ALL_GROUP_SUB_STEP_LABELS = new Set(Object.values(GROUP_STEP_CHILDREN).flat());
-
-const applyGroupStepStates = (items: EditableChecklistItem[]): EditableChecklistItem[] => {
+// Group steps are configured per stage in "Serviços e Etapas" (a stage that
+// declares sub-steps). When all sub-steps are 'ok'/'NA' the parent auto-resolves
+// to 'ok'. The parent→children map is derived from the live catalog at runtime.
+const applyGroupStepStates = (
+  items: EditableChecklistItem[],
+  groupChildren: Record<string, string[]>,
+): EditableChecklistItem[] => {
   const stateByLabel = new Map(items.map((i) => [i.label, i.state]));
   return items.map((item) => {
-    const children = GROUP_STEP_CHILDREN[item.label];
+    const children = groupChildren[item.label];
     if (!children) return item;
     const childStates = children.map((name) => stateByLabel.get(name) ?? 'pending');
     const allDone = childStates.every((s) => s === 'ok' || s === 'notApplicable');
@@ -96,6 +90,7 @@ const getInitialChecklist = (items?: ChecklistItem[]): EditableChecklistItem[] =
   (items ?? []).filter((item) => isServiceActiveForFeature(item.label, 'checklist')).map((item) => ({
     ...item,
     comment: item.comment ?? '',
+    emergency: item.emergency ?? '',
     issueCriticality: item.state === 'pending' || item.state === 'partial' ? 'Média' : undefined,
     issueComment: '',
   }));
@@ -164,14 +159,18 @@ export default function ApartmentDetailScreen() {
   const [photoPickerTarget, setPhotoPickerTarget] = useState<{ itemId: string; forMeasurement?: boolean } | null>(null);
   const [addStepOpen, setAddStepOpen] = useState(false);
   const [addStepSearch, setAddStepSearch] = useState('');
+  const [addStepArea, setAddStepArea] = useState<'Interior' | 'Exterior'>('Interior');
   const [confirmRemoveStep, setConfirmRemoveStep] = useState<EditableChecklistItem | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
   const [showBackToTop, setShowBackToTop] = useState(false);
+  const [tabArrows, setTabArrows] = useState({ left: false, right: false });
   const [collapsedChecklistGroups, setCollapsedChecklistGroups] = useState<Record<string, boolean>>({});
   const [collapsedAddStepGroups, setCollapsedAddStepGroups] = useState<Record<string, boolean>>({});
   const [expandedGroupSteps, setExpandedGroupSteps] = useState<Record<string, boolean>>({});
   const [expandedComments, setExpandedComments] = useState<Record<string, boolean>>({});
   const [draftComments, setDraftComments] = useState<Record<string, string>>({});
+  const [expandedEmergencies, setExpandedEmergencies] = useState<Record<string, boolean>>({});
+  const [draftEmergencies, setDraftEmergencies] = useState<Record<string, string>>({});
   const [visitsLoading, setVisitsLoading] = useState(true);
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [assignments, setAssignments] = useState<Record<string, string[]>>({});
@@ -180,6 +179,19 @@ export default function ApartmentDetailScreen() {
   const [workerSearch, setWorkerSearch] = useState('');
   const [savingAssignment, setSavingAssignment] = useState(false);
   const scrollRef = useRef<ScrollView | null>(null);
+  const tabScrollRef = useRef<ScrollView | null>(null);
+  const tabScrollX = useRef(0);
+  const tabLayoutW = useRef(0);
+  const tabContentW = useRef(0);
+  const updateTabArrows = useCallback((x: number) => {
+    tabScrollX.current = x;
+    const left = x > 4;
+    const right = x + tabLayoutW.current < tabContentW.current - 4;
+    setTabArrows((cur) => (cur.left === left && cur.right === right ? cur : { left, right }));
+  }, []);
+  const scrollTabsBy = useCallback((delta: number) => {
+    tabScrollRef.current?.scrollTo({ x: Math.max(0, tabScrollX.current + delta), animated: true });
+  }, []);
 
   // ── save batching + visible feedback ─────────────────────────────────────
   // We batch writes (checklist items, photo comments, open visit) and show a
@@ -191,6 +203,7 @@ export default function ApartmentDetailScreen() {
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const draftCommentsRef = useRef<Record<string, string>>({});
+  const draftEmergenciesRef = useRef<Record<string, string>>({});
   const pendingRef = useRef<{
     checklistItems: Map<string, EditableChecklistItem>;
     photos: Map<string, InspectionPhoto>;
@@ -210,7 +223,12 @@ export default function ApartmentDetailScreen() {
 
   const flushSaves = useCallback(async () => {
     const { checklistItems, photos: pendingPhotos, visits: pendingVisits } = pendingRef.current;
-    if (checklistItems.size === 0 && pendingPhotos.size === 0 && pendingVisits.size === 0) return;
+    if (checklistItems.size === 0 && pendingPhotos.size === 0 && pendingVisits.size === 0) {
+      // Nothing actually changed (e.g. tapping the current status again). Resolve
+      // the "Salvando…" toast instead of leaving it spinning forever.
+      showToast('saved');
+      return;
+    }
     pendingRef.current = { checklistItems: new Map(), photos: new Map(), visits: new Map() };
     try {
       await Promise.all([
@@ -338,6 +356,13 @@ export default function ApartmentDetailScreen() {
     return map;
   }, [checklist]);
 
+  // Group-step definitions come from the live catalog (Serviços e Etapas).
+  const groupStepChildren = useMemo(() => getGroupStepChildren(serviceStages), [serviceStages]);
+  const allGroupSubStepLabels = useMemo(
+    () => new Set(Object.values(groupStepChildren).flat()),
+    [groupStepChildren],
+  );
+
   if (!apartment || !tower) {
     return (
       <View style={[s.empty, { paddingTop: insets.top + 16 }]}>
@@ -362,7 +387,16 @@ export default function ApartmentDetailScreen() {
   const measurableItems = checklist.filter((i) => i.state === 'ok' && isServiceActiveForFeature(i.label, 'medicao'));
   const blockedServiceGroups = getBlockedServiceGroups(checklist);
   const scheduleRows = getScheduleRows(checklist);
-  const totalBlockedServices = blockedServiceGroups.reduce((t, g) => t + g.blockedServices.length, 0);
+  // Count steps currently locked by an active blocker — same predicate the
+  // checklist uses to show the "Etapa travada" banner, so the KPI always matches
+  // what's visible (including user-configured dependencies, not just defaults).
+  const lockedStepsCount = checklist.filter((item) => {
+    const blockerLabels = blockedBy.get(item.label.toLowerCase()) ?? [];
+    return blockerLabels.some((b) => {
+      const st = checklistStateByLabel.get(b);
+      return st !== 'ok' && st !== 'partial' && st !== 'notApplicable';
+    });
+  }).length;
   const totalMeasuredValue = measurements.reduce((t, m) => t + m.totalValue, 0);
   const pendingItems = checklist.filter((i) => i.state === 'pending' || i.state === 'partial');
   const finalizedVisits = sortVisitsDesc(visits.filter((v) => v.finalized));
@@ -429,7 +463,7 @@ export default function ApartmentDetailScreen() {
       ? { ...i, state, issueCriticality: state === 'pending' || state === 'partial' ? i.issueCriticality ?? 'Média' : undefined, issueComment: state === 'pending' || state === 'partial' ? i.issueComment ?? '' : '' }
       : i);
     // Re-derive group step parent states whenever a sub-step changes.
-    const next = applyGroupStepStates(baseNext);
+    const next = applyGroupStepStates(baseNext, groupStepChildren);
     setChecklist(next);
     if (apartamentoId) {
       // Queue every item whose state changed (direct edit + any auto-updated parent).
@@ -439,7 +473,7 @@ export default function ApartmentDetailScreen() {
       }
       const np = calculateProgress(next);
       const ns = calculateApartmentStatus(next, np);
-      dbApi.updateApartmentStats(apartamentoId, np, ns);
+      dbApi.updateApartmentStats(apartamentoId, np, ns).catch(() => showToast('error'));
       updateApartmentLocal(apartamentoId, np, ns, next);
     }
     registerVisitUpdate({ changedItemId: itemId, nextChecklist: next, nextPhotos: photos, progressBeforeFallback: calculateProgress(prev) });
@@ -509,7 +543,10 @@ export default function ApartmentDetailScreen() {
 
     if (result.canceled || !result.assets?.[0]) return;
     const asset = result.assets[0];
-    const localUri = Platform.OS === 'web' ? `data:image/jpeg;base64,${asset.base64}` : asset.uri;
+    const pickedUri = Platform.OS === 'web' ? `data:image/jpeg;base64,${asset.base64}` : asset.uri;
+    // Re-encode to strip EXIF metadata (GPS, device info) before anything is stored.
+    const stripped = await manipulateAsync(pickedUri, [], { compress: 0.85, format: SaveFormat.JPEG });
+    const localUri = stripped.uri;
     const createdAt = new Date().toISOString();
     const fileName = asset.fileName ?? `foto-${Date.now()}.jpg`;
 
@@ -543,9 +580,9 @@ export default function ApartmentDetailScreen() {
     // Upload to Storage, then persist the row pointing at the storage path.
     (async () => {
       try {
-        await dbApi.uploadInspectionPhoto(localUri, storagePath, asset.mimeType ?? 'image/jpeg');
-        const publicUrl = dbApi.getInspectionPhotoUrl(storagePath);
-        const persisted = { ...optimisticPhoto, uri: publicUrl, storagePath };
+        await dbApi.uploadInspectionPhoto(localUri, storagePath, 'image/jpeg');
+        const signedUrl = await dbApi.getInspectionPhotoUrl(storagePath);
+        const persisted = { ...optimisticPhoto, uri: signedUrl, storagePath };
         await dbApi.savePhoto(persisted);
         setPhotos((cur) => cur.map((p) => (p.id === photoId ? persisted : p)));
         setUploadStatus((u) => ({ ...u, [photoId]: 'uploaded' }));
@@ -580,7 +617,7 @@ export default function ApartmentDetailScreen() {
     setPhotos((cur) => {
       const target = cur.find((p) => p.id === photoId);
       // Delete is a single discrete intent — fire it now so the user knows it's gone.
-      dbApi.deletePhoto(photoId, target?.storagePath);
+      dbApi.deletePhoto(photoId, target?.storagePath).catch(() => showToast('error'));
       const next = cur.filter((p) => p.id !== photoId);
       pendingRef.current.photos.delete(photoId);
       registerVisitUpdate({ changedItemId: target?.serviceId, nextChecklist: checklist, nextPhotos: next, progressBeforeFallback: progress });
@@ -624,8 +661,8 @@ export default function ApartmentDetailScreen() {
         generalNote: open.generalNote ?? '', observacaoGeral: open.observacaoGeral ?? open.generalNote ?? '',
         changedItemIds: open.changedItemIds ?? [], addedPhotoIds, issueItemIds: pendingItems.map((i) => i.id),
       };
-      dbApi.saveVisit(finalized);
-      dbApi.updateApartmentStats(apartment.id, progress, statusAfter);
+      dbApi.saveVisit(finalized).catch(() => showToast('error'));
+      dbApi.updateApartmentStats(apartment.id, progress, statusAfter).catch(() => showToast('error'));
       updateApartmentLocal(apartment.id, progress, statusAfter);
       return cur.map((v) => (v.id === open.id ? finalized : v));
     });
@@ -648,7 +685,7 @@ export default function ApartmentDetailScreen() {
         statusAfter, statusFinal: statusAfter, generalNote: '', observacaoGeral: '',
         changedItemIds: [], addedPhotoIds: [], issueItemIds: pendingItems.map((i) => i.id), finalized: false,
       };
-      dbApi.saveVisit(newVisit);
+      dbApi.saveVisit(newVisit).catch(() => showToast('error'));
       return [...cur, newVisit];
     });
   };
@@ -690,14 +727,14 @@ export default function ApartmentDetailScreen() {
       launchedAt: new Date().toISOString(),
       approvedAt: draft.status === 'Aprovado para pagamento' ? new Date().toISOString() : undefined,
     };
-    dbApi.saveMeasurement(m);
+    dbApi.saveMeasurement(m).catch(() => showToast('error'));
     setMeasurements((prev) => [...prev, m]);
     setMeasurementAlert('');
     setMeasurementDrafts((cur) => ({ ...cur, [item.id]: createEmptyMeasurementDraft() }));
   };
 
   const clearApartmentMeasurements = () => {
-    measurements.forEach((m) => dbApi.deleteMeasurement(m.id));
+    measurements.forEach((m) => dbApi.deleteMeasurement(m.id).catch(() => showToast('error')));
     setMeasurements([]);
     setMeasurementDrafts({});
     setMeasurementAlert('');
@@ -705,15 +742,16 @@ export default function ApartmentDetailScreen() {
 
   const addStepToApartment = (stageLabel: string) => {
     if (!apartamentoId || !apartment) return;
-    const stage = serviceStages.find((s) => s.nome === stageLabel);
     const newItem: EditableChecklistItem = {
       id: crypto.randomUUID(),
       label: stageLabel,
       state: 'pending',
       comment: '',
+      emergency: '',
       issueCriticality: 'Média',
       issueComment: '',
-      area: stage?.area || areaFilter,
+      // Area is chosen in the add-step popup — the catalog stage carries no area.
+      area: addStepArea,
       isExtra: true,
     };
     const prev = checklist;
@@ -724,17 +762,17 @@ export default function ApartmentDetailScreen() {
     setChecklist(next);
     // External side-effects happen AFTER the local setState so we never call
     // another component's setState during this render.
-    dbApi.updateApartmentStats(apartamentoId, np, ns);
+    dbApi.updateApartmentStats(apartamentoId, np, ns).catch(() => showToast('error'));
     updateApartmentLocal(apartamentoId, np, ns, next);
     registerVisitUpdate({ changedItemId: newItem.id, nextChecklist: next, nextPhotos: photos, progressBeforeFallback: calculateProgress(prev) });
     scheduleSave();
+    // Land on the area the step was added to so it's immediately visible.
+    if (areaFilter !== addStepArea) setAreaFilter(addStepArea);
     setAddStepOpen(false);
     setAddStepSearch('');
   };
 
-  // Opening the modal is the user's "intent"; the confirm step does the work.
   const requestRemoveStep = (item: EditableChecklistItem) => {
-    if (!isExtraStep(item)) return;
     setConfirmRemoveStep(item);
   };
 
@@ -743,9 +781,9 @@ export default function ApartmentDetailScreen() {
     if (!target || !apartamentoId || !apartment) return;
     setConfirmRemoveStep(null);
 
-    // Cascade photos: Storage object + inspection_photos row.
+    // Cascade photos: soft-delete the inspection_photos rows (Storage objects kept for restore).
     const itemPhotos = photos.filter((p) => p.serviceId === target.id || p.itemId === target.id);
-    itemPhotos.forEach((p) => dbApi.deletePhoto(p.id, p.storagePath));
+    itemPhotos.forEach((p) => dbApi.deletePhoto(p.id, p.storagePath).catch(() => showToast('error')));
     const nextPhotos = itemPhotos.length > 0
       ? photos.filter((p) => p.serviceId !== target.id && p.itemId !== target.id)
       : photos;
@@ -753,12 +791,12 @@ export default function ApartmentDetailScreen() {
 
     // Cascade measurements: any medição launched for this checklist item.
     const itemMeasurements = measurements.filter((m) => m.serviceId === target.id);
-    itemMeasurements.forEach((m) => dbApi.deleteMeasurement(m.id));
+    itemMeasurements.forEach((m) => dbApi.deleteMeasurement(m.id).catch(() => showToast('error')));
     if (itemMeasurements.length > 0) {
       setMeasurements((cur) => cur.filter((m) => m.serviceId !== target.id));
     }
 
-    dbApi.deleteChecklistItem(target.id);
+    dbApi.deleteChecklistItem(target.id).catch(() => showToast('error'));
     pendingRef.current.checklistItems.delete(target.id);
     const prev = checklist;
     const next = prev.filter((i) => i.id !== target.id);
@@ -766,7 +804,7 @@ export default function ApartmentDetailScreen() {
     const ns = calculateApartmentStatus(next, np);
     setChecklist(next);
     // All cross-component setState happens AFTER local setState.
-    dbApi.updateApartmentStats(apartamentoId, np, ns);
+    dbApi.updateApartmentStats(apartamentoId, np, ns).catch(() => showToast('error'));
     updateApartmentLocal(apartamentoId, np, ns, next);
     registerVisitUpdate({ changedItemId: target.id, nextChecklist: next, nextPhotos, progressBeforeFallback: calculateProgress(prev) });
     showToast('saved');
@@ -775,8 +813,8 @@ export default function ApartmentDetailScreen() {
   const confirmResetNow = () => {
     if (!apartment) return;
     setConfirmReset(false);
-    // Delete every photo from this apartment — Storage + DB row.
-    photos.forEach((p) => dbApi.deletePhoto(p.id, p.storagePath));
+    // Soft-delete every photo row from this apartment (Storage objects kept for restore).
+    photos.forEach((p) => dbApi.deletePhoto(p.id, p.storagePath).catch(() => showToast('error')));
     setPhotos([]);
     setChecklist(initialChecklist);
     showToast('saved');
@@ -810,6 +848,32 @@ export default function ApartmentDetailScreen() {
       }
     }
     setExpandedComments((cur) => ({ ...cur, [itemId]: false }));
+  };
+
+  const openEmergency = (itemId: string, currentEmergency: string) => {
+    draftEmergenciesRef.current[itemId] = currentEmergency;
+    setDraftEmergencies((cur) => ({ ...cur, [itemId]: currentEmergency }));
+    setExpandedEmergencies((cur) => ({ ...cur, [itemId]: true }));
+  };
+
+  const closeEmergency = (itemId: string, saveDraft = false) => {
+    if (saveDraft) {
+      const emergency = (draftEmergenciesRef.current[itemId] ?? '').trim();
+      if (apartamentoId) {
+        const existing = checklist.find((i) => i.id === itemId);
+        if (existing) {
+          const next = checklist.map((i) => i.id === itemId ? { ...i, emergency } : i);
+          setChecklist(next);
+          const np = calculateProgress(next);
+          updateApartmentLocal(apartamentoId, np, calculateApartmentStatus(next, np), next);
+          showToast('saving');
+          dbApi.upsertChecklistItem({ ...existing, emergency, apartmentId: apartamentoId })
+            .then(() => showToast('saved'))
+            .catch(() => showToast('error'));
+        }
+      }
+    }
+    setExpandedEmergencies((cur) => ({ ...cur, [itemId]: false }));
   };
 
   const openWorkerPicker = (item: EditableChecklistItem) => {
@@ -867,7 +931,7 @@ export default function ApartmentDetailScreen() {
         }}>
 
         {/* STATUS HEADER */}
-        <View style={[s.header, { backgroundColor: getProgressColor(progress), paddingTop: insets.top + 12 }]}>
+        <View style={[s.header, { paddingTop: insets.top + 12, backgroundColor: getProgressMapStyle(progress).fg }]}>
           <Pressable onPress={goBackToTower} style={s.headerBack}>
             <MaterialCommunityIcons name="chevron-left" size={26} color="rgba(255,255,255,0.9)" />
             <Text style={s.headerBackText}>{tower.name}</Text>
@@ -889,14 +953,7 @@ export default function ApartmentDetailScreen() {
           <View style={s.headerMeta}>
             <View style={s.headerMetaItem}>
               <MaterialCommunityIcons name="checkbox-marked-circle-outline" size={13} color="rgba(255,255,255,0.8)" />
-              <Text style={s.headerMetaText}>{okCount}/{checklist.length} OK</Text>
-            </View>
-            <View style={s.headerMetaItem}>
-              <MaterialCommunityIcons name="alert-outline" size={13} color="rgba(255,255,255,0.8)" />
-              <Text style={s.headerMetaText}>{pendingItems.length} pendência(s)</Text>
-            </View>
-            <View style={s.statusPill}>
-              <Text style={[s.statusPillText, { color: status.color }]}>{status.label}</Text>
+              <Text style={s.headerMetaText}>{okCount} de {checklist.length} etapas concluídas</Text>
             </View>
           </View>
         </View>
@@ -927,12 +984,12 @@ export default function ApartmentDetailScreen() {
         {/* KPI ROW */}
         <View style={s.kpiRow}>
           {[
-            { icon: 'alert-circle-outline', value: pendingItems.length, label: 'Pendências', color: pendingItems.length > 0 ? '#B91C1C' : '#047857' },
-            { icon: 'lock-outline', value: totalBlockedServices, label: 'Travados', color: totalBlockedServices > 0 ? '#B45309' : '#047857' },
-            { icon: 'camera-outline', value: photos.length, label: 'Fotos', color: '#2563EB' },
-            { icon: 'ruler', value: measurements.length, label: 'Medições', color: '#7C3AED' },
+            { icon: 'clipboard-list-outline', value: pendingItems.length, label: 'Pendências', color: '#4a5565', borderColor: undefined },
+            { icon: 'lock-outline', value: lockedStepsCount, label: 'Travados', color: '#B45309' },
+            { icon: 'camera-outline', value: photos.length, label: 'Fotos', color: '#2563EB', borderColor: undefined },
+            { icon: 'ruler', value: measurements.length, label: 'Medições', color: '#7C3AED', borderColor: undefined },
           ].map((k) => (
-            <View key={k.label} style={s.kpiCard}>
+            <View key={k.label} style={[s.kpiCard, k.borderColor ? { borderColor: k.borderColor } : undefined]}>
               <MaterialCommunityIcons name={k.icon as any} size={20} color={k.color} />
               <Text style={[s.kpiValue, { color: k.color }]}>{k.value}</Text>
               <Text style={s.kpiLabel}>{k.label}</Text>
@@ -941,17 +998,47 @@ export default function ApartmentDetailScreen() {
         </View>
 
         {/* TAB BAR */}
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.tabBar}>
-          {detailTabs.map((tab) => {
-            const active = activeTab === tab;
-            return (
-              <Pressable key={tab} onPress={() => setActiveTab(tab)} style={[s.tabBtn, active && s.tabBtnActive]}>
-                <MaterialCommunityIcons name={TAB_ICONS[tab] as any} size={14} color={active ? '#2563EB' : '#94A3B8'} />
-                <Text style={[s.tabBtnText, active && s.tabBtnTextActive]}>{tab}</Text>
-              </Pressable>
-            );
-          })}
-        </ScrollView>
+        <View style={s.tabBarWrap}>
+          <ScrollView
+            ref={tabScrollRef}
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={s.tabBar}
+            scrollEventThrottle={32}
+            onLayout={(e) => { tabLayoutW.current = e.nativeEvent.layout.width; updateTabArrows(tabScrollX.current); }}
+            onContentSizeChange={(w) => { tabContentW.current = w; updateTabArrows(tabScrollX.current); }}
+            onScroll={(e) => updateTabArrows(e.nativeEvent.contentOffset.x)}>
+            {detailTabs.map((tab) => {
+              const active = activeTab === tab;
+              return (
+                <Pressable key={tab} onPress={() => setActiveTab(tab)} style={[s.tabBtn, active && s.tabBtnActive]}>
+                  <MaterialCommunityIcons name={TAB_ICONS[tab] as any} size={14} color={active ? '#2563EB' : '#94A3B8'} />
+                  <Text style={[s.tabBtnText, active && s.tabBtnTextActive]}>{tab}</Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+          {tabArrows.left && (
+            <Pressable
+              onPress={() => scrollTabsBy(-160)}
+              style={[s.tabArrow, s.tabArrowLeft]}
+              accessibilityRole="button"
+              accessibilityLabel="Ver abas anteriores"
+              hitSlop={6}>
+              <MaterialCommunityIcons name="chevron-left" size={20} color="#64748B" />
+            </Pressable>
+          )}
+          {tabArrows.right && (
+            <Pressable
+              onPress={() => scrollTabsBy(160)}
+              style={[s.tabArrow, s.tabArrowRight]}
+              accessibilityRole="button"
+              accessibilityLabel="Ver mais abas"
+              hitSlop={6}>
+              <MaterialCommunityIcons name="chevron-right" size={20} color="#64748B" />
+            </Pressable>
+          )}
+        </View>
 
         {/* ── RESUMO ── */}
         {activeTab === 'Resumo' && (
@@ -1050,6 +1137,7 @@ export default function ApartmentDetailScreen() {
                 <Pressable
                   onPress={() => {
                     setAddStepSearch('');
+                    setAddStepArea(areaFilter);
                     const cats: Record<string, boolean> = {};
                     for (const stg of serviceStages) {
                       const cat = stg.categoria?.trim() || 'Sem categoria';
@@ -1062,10 +1150,6 @@ export default function ApartmentDetailScreen() {
                   testID="add-step-btn">
                   <MaterialCommunityIcons name="plus-circle-outline" size={14} color="#2563EB" />
                   <Text style={s.addStepBtnText}>Adicionar etapa</Text>
-                </Pressable>
-                <Pressable onPress={() => setConfirmReset(true)} style={s.resetBtn}>
-                  <MaterialCommunityIcons name="refresh" size={13} color="#64748B" />
-                  <Text style={s.resetBtnText}>Resetar</Text>
                 </Pressable>
               </View>
             </View>
@@ -1088,7 +1172,7 @@ export default function ApartmentDetailScreen() {
               const color = categoryColor(cat);
               const collapsed = collapsedChecklistGroups[cat] === true;
               // Sub-steps are hidden from the main list; only count non-sub-step items for the header.
-              const visibleItems = groupItems.filter((i) => !ALL_GROUP_SUB_STEP_LABELS.has(i.label));
+              const visibleItems = groupItems.filter((i) => !allGroupSubStepLabels.has(i.label));
               const okInGroup = visibleItems.filter((i) => i.state === 'ok' || i.state === 'notApplicable').length;
               // Build ordered render list. Top-level entries are ordered by state
               // (Parcial, Pendente, Não se aplica, OK) so completed steps sink to the
@@ -1097,16 +1181,20 @@ export default function ApartmentDetailScreen() {
               type RenderRow = { item: EditableChecklistItem; indented: boolean };
               const blocks: Array<{ sortKey: number; rows: RenderRow[] }> = [];
               for (const item of groupItems) {
-                if (item.label in GROUP_STEP_CHILDREN) {
+                if (item.label in groupStepChildren) {
                   const rows: RenderRow[] = [{ item, indented: false }];
                   if (expandedGroupSteps[item.label]) {
-                    for (const childLabel of GROUP_STEP_CHILDREN[item.label]) {
-                      const child = groupItems.find((i) => i.label === childLabel);
+                    for (const childLabel of groupStepChildren[item.label]) {
+                      // Resolve against the full checklist: sub-steps belong to the
+                      // group regardless of their own category or area, so they must
+                      // all appear nested under the parent even when the parent's
+                      // area differs from the sub-step's area.
+                      const child = checklist.find((i) => i.label === childLabel);
                       if (child) rows.push({ item: child, indented: true });
                     }
                   }
                   blocks.push({ sortKey: stateOrder[item.state] ?? 1, rows });
-                } else if (!ALL_GROUP_SUB_STEP_LABELS.has(item.label)) {
+                } else if (!allGroupSubStepLabels.has(item.label)) {
                   blocks.push({ sortKey: stateOrder[item.state] ?? 1, rows: [{ item, indented: false }] });
                 }
               }
@@ -1132,9 +1220,9 @@ export default function ApartmentDetailScreen() {
                       return st !== 'ok' && st !== 'partial' && st !== 'notApplicable';
                     });
                     const isLocked = activeBlockers.length > 0;
-                    const isGroupStep = !indented && item.label in GROUP_STEP_CHILDREN;
+                    const isGroupStep = !indented && item.label in groupStepChildren;
                     const isExpanded = isGroupStep && !!expandedGroupSteps[item.label];
-                    const subStepNames = isGroupStep ? GROUP_STEP_CHILDREN[item.label] : [];
+                    const subStepNames = isGroupStep ? groupStepChildren[item.label] : [];
                     const subStepItems = subStepNames.map((name) => checklist.find((i) => i.label === name));
                     return (
                       <View key={`${item.id}-${indented}`} style={[s.checkCard, { borderLeftColor: isLocked ? '#B45309' : isGroupStep ? '#0891B2' : cfg.color }, isLocked && s.checkCardLocked, indented && s.checkCardIndented]}>
@@ -1196,15 +1284,13 @@ export default function ApartmentDetailScreen() {
                       <Pressable onPress={() => openWorkerPicker(item)} style={s.menuDotsBtn} hitSlop={8}>
                         <MaterialCommunityIcons name="account-plus-outline" size={20} color="#94A3B8" />
                       </Pressable>
-                      {isExtraStep(item) && (
-                        <Pressable
-                          onPress={() => requestRemoveStep(item)}
-                          style={s.removeStepBtn}
-                          testID={`remove-step-${item.id}`}
-                          hitSlop={8}>
-                          <MaterialCommunityIcons name="close" size={16} color="#94A3B8" />
-                        </Pressable>
-                      )}
+                      <Pressable
+                        onPress={() => requestRemoveStep(item)}
+                        style={s.removeStepBtn}
+                        testID={`remove-step-${item.id}`}
+                        hitSlop={8}>
+                        <MaterialCommunityIcons name="close" size={16} color="#94A3B8" />
+                      </Pressable>
                     </View>
                   )}
 
@@ -1212,7 +1298,7 @@ export default function ApartmentDetailScreen() {
                     <View style={s.lockBanner}>
                       <MaterialCommunityIcons name="lock" size={14} color="#B45309" />
                       <View style={{ flex: 1 }}>
-                        <Text style={s.lockTitle}>Etapa bloqueada</Text>
+                        <Text style={s.lockTitle}>Etapa travada</Text>
                         <Text style={s.lockText} numberOfLines={3}>
                           Aguardando conclusão de: {activeBlockers.join(', ')}
                         </Text>
@@ -1276,22 +1362,44 @@ export default function ApartmentDetailScreen() {
                         })}
                       </View>
 
-                      {isPending && (
-                        <View style={s.issueBox}>
-                          <Text style={s.issueBoxTitle}>Criticidade da pendência</Text>
-                          <View style={s.critRow}>
-                            {criticalityOptions.map((c) => {
-                              const sel = item.issueCriticality === c;
-                              const cc = c === 'Crítica' ? '#B91C1C' : c === 'Alta' ? '#B45309' : c === 'Média' ? '#D97706' : '#64748B';
-                              return (
-                                <Pressable
-                                  key={c}
-                                  onPress={() => updateItemIssue(item.id, 'issueCriticality', c)}
-                                  style={[s.critBtn, sel && { backgroundColor: cc, borderColor: cc }]}>
-                                  <Text style={[s.critBtnText, sel && { color: '#FFF' }]}>{c}</Text>
-                                </Pressable>
-                              );
-                            })}
+                      {item.emergency?.trim() && !expandedEmergencies[item.id] && (
+                        <Pressable
+                          onPress={() => openEmergency(item.id, item.emergency ?? '')}
+                          style={s.emergencyPreview}>
+                          <MaterialCommunityIcons name="alert" size={13} color="#DC2626" />
+                          <Text style={s.emergencyPreviewText} numberOfLines={2}>{item.emergency}</Text>
+                          <MaterialCommunityIcons name="pencil-outline" size={13} color="#94A3B8" />
+                        </Pressable>
+                      )}
+
+                      {expandedEmergencies[item.id] && (
+                        <View style={s.emergencyBox}>
+                          <TextInput
+                            multiline
+                            onChangeText={(v) => {
+                              draftEmergenciesRef.current[item.id] = v;
+                              setDraftEmergencies((cur) => ({ ...cur, [item.id]: v }));
+                            }}
+                            placeholder="Descreva a emergência..."
+                            placeholderTextColor="#94A3B8"
+                            style={s.emergencyTextarea}
+                            value={draftEmergencies[item.id] ?? ''}
+                          />
+                          <View style={s.obsBoxFooter}>
+                            {(draftEmergencies[item.id] ?? '').trim() ? (
+                              <Pressable onPress={() => { draftEmergenciesRef.current[item.id] = ''; setDraftEmergencies((cur) => ({ ...cur, [item.id]: '' })); }} style={s.obsClearBtn}>
+                                <MaterialCommunityIcons name="trash-can-outline" size={13} color="#B91C1C" />
+                                <Text style={s.obsClearBtnText}>Limpar</Text>
+                              </Pressable>
+                            ) : <View />}
+                            <View style={s.obsBoxFooterRight}>
+                              <Pressable onPress={() => closeEmergency(item.id, false)} style={s.obsCancelBtn}>
+                                <Text style={s.obsCancelBtnText}>Cancelar</Text>
+                              </Pressable>
+                              <Pressable onPress={() => closeEmergency(item.id, true)} style={s.obsDoneBtn}>
+                                <Text style={s.obsDoneBtnText}>Salvar</Text>
+                              </Pressable>
+                            </View>
                           </View>
                         </View>
                       )}
@@ -1326,32 +1434,39 @@ export default function ApartmentDetailScreen() {
                                 <Text style={s.obsClearBtnText}>Limpar</Text>
                               </Pressable>
                             ) : <View />}
-                            <Pressable onPress={() => closeComment(item.id, true)} style={s.obsDoneBtn}>
-                              <Text style={s.obsDoneBtnText}>Concluído</Text>
-                            </Pressable>
+                            <View style={s.obsBoxFooterRight}>
+                              <Pressable onPress={() => closeComment(item.id, false)} style={s.obsCancelBtn}>
+                                <Text style={s.obsCancelBtnText}>Cancelar</Text>
+                              </Pressable>
+                              <Pressable onPress={() => closeComment(item.id, true)} style={s.obsDoneBtn}>
+                                <Text style={s.obsDoneBtnText}>Salvar</Text>
+                              </Pressable>
+                            </View>
                           </View>
                         </View>
                       )}
 
                       <View style={s.cardActions}>
-                        <Pressable onPress={() => addPhotoToItem(item)} style={s.cardActionBtn} testID={`add-photo-${item.id}`}>
-                          <MaterialCommunityIcons name="camera-plus-outline" size={15} color="#64748B" />
-                          <Text style={s.cardActionBtnText}>
-                            {itemPhotos.length > 0 ? `Fotos (${itemPhotos.length})` : 'Foto'}
-                          </Text>
+                        <Pressable
+                          onPress={() => expandedEmergencies[item.id]
+                            ? closeEmergency(item.id, false)
+                            : openEmergency(item.id, item.emergency ?? '')}
+                          style={s.cardActionBtn}>
+                          <MaterialCommunityIcons name="alert-outline" size={15} color="#64748B" />
+                          <Text style={s.cardActionBtnText}>Emergência</Text>
                         </Pressable>
                         <Pressable
                           onPress={() => expandedComments[item.id]
                             ? closeComment(item.id, false)
                             : openComment(item.id, item.comment ?? '')}
-                          style={[s.cardActionBtn, item.comment?.trim() && s.cardActionBtnObs]}>
-                          <MaterialCommunityIcons
-                            name={item.comment?.trim() ? 'note-text' : 'note-plus-outline'}
-                            size={15}
-                            color={item.comment?.trim() ? '#2563EB' : '#64748B'}
-                          />
-                          <Text style={[s.cardActionBtnText, item.comment?.trim() && { color: '#2563EB', fontWeight: '700' as const }]}>
-                            Observação
+                          style={s.cardActionBtn}>
+                          <MaterialCommunityIcons name="note-plus-outline" size={15} color="#64748B" />
+                          <Text style={s.cardActionBtnText}>Observação</Text>
+                        </Pressable>
+                        <Pressable onPress={() => addPhotoToItem(item)} style={s.cardActionBtn} testID={`add-photo-${item.id}`}>
+                          <MaterialCommunityIcons name="camera-plus-outline" size={15} color="#64748B" />
+                          <Text style={s.cardActionBtnText}>
+                            {itemPhotos.length > 0 ? `Fotos (${itemPhotos.length})` : 'Foto'}
                           </Text>
                         </Pressable>
                       </View>
@@ -1979,6 +2094,23 @@ export default function ApartmentDetailScreen() {
                 </Pressable>
               ) : null}
             </View>
+            <View style={s.addStepAreaField}>
+              <Text style={s.addStepAreaLabel}>Adicionar como</Text>
+              <View style={s.addStepAreaRow}>
+                <Pressable
+                  onPress={() => setAddStepArea('Interior')}
+                  style={[s.addStepAreaBtn, addStepArea === 'Interior' && s.addStepAreaBtnInt]}>
+                  <MaterialCommunityIcons name="floor-plan" size={15} color={addStepArea === 'Interior' ? '#FFFFFF' : '#94A3B8'} />
+                  <Text style={[s.addStepAreaBtnText, addStepArea === 'Interior' && s.addStepAreaBtnTextActive]}>Interior</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => setAddStepArea('Exterior')}
+                  style={[s.addStepAreaBtn, addStepArea === 'Exterior' && s.addStepAreaBtnExt]}>
+                  <MaterialCommunityIcons name="domain" size={15} color={addStepArea === 'Exterior' ? '#FFFFFF' : '#94A3B8'} />
+                  <Text style={[s.addStepAreaBtnText, addStepArea === 'Exterior' && s.addStepAreaBtnTextActive]}>Exterior</Text>
+                </Pressable>
+              </View>
+            </View>
             <ScrollView style={s.addStepList} contentContainerStyle={{ gap: 20, paddingBottom: 12 }} showsVerticalScrollIndicator={false}>
               {availableStages.length === 0 ? (
                 <View style={s.addStepEmpty}>
@@ -2177,7 +2309,7 @@ const s = StyleSheet.create({
   emptyTitle: { color: '#0F172A', fontSize: 18, fontWeight: '700' },
 
   // header
-  header: { paddingHorizontal: 20, paddingBottom: 20, gap: 10 },
+  header: { backgroundColor: '#4a5565', paddingHorizontal: 20, paddingBottom: 20, gap: 10 },
   headerBack: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', marginLeft: -4, marginBottom: 2, gap: 2 },
   headerBackText: { color: 'rgba(255,255,255,0.9)', fontSize: 15, fontWeight: '600' },
   headerRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
@@ -2214,7 +2346,11 @@ const s = StyleSheet.create({
   kpiLabel: { color: '#64748B', fontSize: 10, fontWeight: '700', textAlign: 'center' },
 
   // tab bar
+  tabBarWrap: { justifyContent: 'center' },
   tabBar: { flexDirection: 'row', gap: 6, paddingHorizontal: 16, paddingBottom: 2 },
+  tabArrow: { position: 'absolute', top: '50%', marginTop: -15, width: 30, height: 30, borderRadius: 15, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#E2E8F0', alignItems: 'center', justifyContent: 'center', shadowColor: '#0F172A', shadowOpacity: 0.12, shadowRadius: 4, shadowOffset: { width: 0, height: 1 }, elevation: 3 },
+  tabArrowLeft: { left: 8 },
+  tabArrowRight: { right: 8 },
   tabBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 12, paddingVertical: 9, borderRadius: 999, borderWidth: 1, borderColor: '#E2E8F0', backgroundColor: '#FFFFFF' },
   tabBtnActive: { backgroundColor: '#EFF6FF', borderColor: '#2563EB' },
   tabBtnText: { color: '#94A3B8', fontSize: 12, fontWeight: '700' },
@@ -2256,15 +2392,22 @@ const s = StyleSheet.create({
   obsBox: { backgroundColor: '#F8FAFC', borderColor: '#E2E8F0', borderRadius: 10, borderWidth: 1, gap: 8, padding: 10 },
   obsTextarea: { borderColor: 'transparent', borderRadius: 6, borderWidth: 1, color: '#0F172A', fontSize: 13, minHeight: 72, textAlignVertical: 'top' },
   obsBoxFooter: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' },
+  obsBoxFooterRight: { alignItems: 'center', flexDirection: 'row', gap: 8 },
   obsClearBtn: { alignItems: 'center', flexDirection: 'row', gap: 4 },
   obsClearBtnText: { color: '#B91C1C', fontSize: 12, fontWeight: '600' },
+  obsCancelBtn: { backgroundColor: '#F1F5F9', borderColor: '#E2E8F0', borderWidth: 1, borderRadius: 8, paddingHorizontal: 14, paddingVertical: 6 },
+  obsCancelBtnText: { color: '#475569', fontSize: 12, fontWeight: '700' },
   obsDoneBtn: { backgroundColor: '#2563EB', borderRadius: 8, paddingHorizontal: 14, paddingVertical: 6 },
   obsDoneBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: '700' },
+  // emergency
+  emergencyPreview: { alignItems: 'center', backgroundColor: '#FEF2F2', borderColor: '#FECACA', borderRadius: 8, borderWidth: 1, flexDirection: 'row', gap: 8, paddingHorizontal: 10, paddingVertical: 8 },
+  emergencyPreviewText: { color: '#DC2626', flex: 1, fontSize: 12, fontWeight: '600' },
+  emergencyBox: { backgroundColor: '#F8FAFC', borderColor: '#E2E8F0', borderRadius: 10, borderWidth: 1, gap: 8, padding: 10 },
+  emergencyTextarea: { borderColor: 'transparent', borderRadius: 6, borderWidth: 1, color: '#0F172A', fontSize: 13, minHeight: 72, textAlignVertical: 'top' },
   // card actions row
   cardActions: { borderTopColor: '#F1F5F9', borderTopWidth: 1, flexDirection: 'row', gap: 4, paddingTop: 8 },
-  cardActionBtn: { alignItems: 'center', borderColor: '#E2E8F0', borderRadius: 8, borderWidth: 1, flexDirection: 'row', gap: 6, paddingHorizontal: 12, paddingVertical: 7, flex: 1, justifyContent: 'center' },
-  cardActionBtnObs: { borderColor: '#BFDBFE', backgroundColor: '#EFF6FF' },
-  cardActionBtnText: { color: '#64748B', fontSize: 12, fontWeight: '600' },
+  cardActionBtn: { alignItems: 'center', borderColor: '#E2E8F0', borderRadius: 8, borderWidth: 1, flexDirection: 'row', gap: 6, paddingHorizontal: 8, paddingVertical: 7, flex: 1, justifyContent: 'center' },
+  cardActionBtnText: { color: '#64748B', fontSize: 11, fontWeight: '600' },
 
   // checklist
   checklistGroup: { gap: 10, paddingHorizontal: 16 },
@@ -2289,6 +2432,14 @@ const s = StyleSheet.create({
   checkLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
   extraBadge: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#F5F3FF', borderColor: '#DDD6FE', borderWidth: 1, borderRadius: 999, paddingHorizontal: 6, paddingVertical: 2 },
   extraBadgeText: { color: '#7C3AED', fontSize: 10, fontWeight: '800', letterSpacing: 0.3 },
+  addStepAreaField: { gap: 6, marginTop: 10 },
+  addStepAreaLabel: { color: '#475569', fontSize: 12, fontWeight: '700' },
+  addStepAreaRow: { flexDirection: 'row', gap: 8 },
+  addStepAreaBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 11, borderRadius: 10, backgroundColor: '#F1F5F9' },
+  addStepAreaBtnInt: { backgroundColor: '#0891B2' },
+  addStepAreaBtnExt: { backgroundColor: '#D97706' },
+  addStepAreaBtnText: { color: '#94A3B8', fontSize: 13, fontWeight: '700' },
+  addStepAreaBtnTextActive: { color: '#FFFFFF' },
   removeStepBtn: { padding: 4 },
   checkCard: { backgroundColor: '#FFFFFF', borderColor: '#E2E8F0', borderWidth: 1, borderRadius: 14, borderLeftWidth: 4, padding: 14, gap: 12 },
   checkCardTop: { flexDirection: 'row', alignItems: 'center', gap: 10 },
