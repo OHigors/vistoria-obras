@@ -4,6 +4,7 @@ import { useCallback, useMemo, useState } from 'react';
 import { Image, Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Text } from '@/src/ui/Text';
+import { useToast } from '@/src/ui/Toast';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import type { Measurement, MeasurementStatus, MeasurementType } from '@/src/data/localMeasurements';
@@ -85,6 +86,7 @@ const STATUS_COLORS: Record<string, { bg: string; text: string; border: string }
 export default function MeasurementsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const toast = useToast();
   const { towers, project, getApartmentById, getTowerById } = useObras();
   const [measurements, setMeasurements] = useState<EnrichedMeasurement[]>([]);
   const [towerFilter, setTowerFilter] = useState(allFilter);
@@ -150,7 +152,7 @@ export default function MeasurementsScreen() {
     } : cur);
     const { apartmentNumber: _an, towerId: _ti, towerLabel: _tl, ...base } = updated.find((m) => m.id === measurement.id)!;
     setMeasurements(updated);
-    db.saveMeasurement(base);
+    db.saveMeasurement(base).catch(() => toast.error('Erro ao salvar medição'));
     cancelEditing();
   };
 
@@ -159,12 +161,12 @@ export default function MeasurementsScreen() {
     const updated = { ...measurement, status, approvedAt };
     setMeasurements((prev) => prev.map((m) => (m.id === measurement.id ? updated : m)));
     const { apartmentNumber: _an, towerId: _ti, towerLabel: _tl, ...base } = updated;
-    db.saveMeasurement(base);
+    db.saveMeasurement(base).catch(() => toast.error('Erro ao salvar medição'));
   };
 
   const deleteMeasurement = (measurement: EnrichedMeasurement) => {
     setMeasurements((prev) => prev.filter((m) => m.id !== measurement.id));
-    db.deleteMeasurement(measurement.id);
+    db.deleteMeasurement(measurement.id).catch(() => toast.error('Erro ao excluir medição'));
     cancelEditing();
   };
 
