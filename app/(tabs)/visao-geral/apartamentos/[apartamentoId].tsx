@@ -32,7 +32,7 @@ import * as dbApi from '@/src/data/db';
 import type { ScheduleFields } from '@/src/data/schedule';
 import { formatDateBr, getScheduleRows, isValidBrDate, maskDateBr } from '@/src/data/schedule';
 import { getBlockedServiceGroups } from '@/src/data/serviceBlockers';
-import { defaultServiceDependencies, getGroupStepChildren, isServiceActiveForFeature } from '@/src/data/serviceStages';
+import { categoryOrderIndex, defaultServiceDependencies, getGroupStepChildren, isServiceActiveForFeature } from '@/src/data/serviceStages';
 import type { Worker } from '@/src/data/serviceWorkers';
 import { checklistConfig, getProgressMapStyle, statusConfig } from '@/src/ui/status';
 
@@ -317,7 +317,7 @@ export default function ApartmentDetailScreen() {
       if (!map.has(cat)) map.set(cat, []);
       map.get(cat)!.push(item);
     }
-    return [...map.entries()].sort(([a], [b]) => a.localeCompare(b, 'pt-BR'));
+    return [...map.entries()].sort(([a], [b]) => categoryOrderIndex(a) - categoryOrderIndex(b) || a.localeCompare(b, 'pt-BR'));
   }, [areaChecklist, categoryByLabel]);
 
   useEffect(() => {
@@ -1200,6 +1200,7 @@ export default function ApartmentDetailScreen() {
               }
               blocks.sort((a, b) => a.sortKey - b.sortKey);
               const renderItems: RenderRow[] = blocks.flatMap((b) => b.rows);
+              if (renderItems.length === 0) return null;
               return (
                 <View key={`chk-grp-${cat}`} style={s.checklistGroup}>
                   <Pressable

@@ -26,6 +26,37 @@ export type ServiceStage = {
 
 export const serviceStagesStorageKey = 'config-etapas-servicos-obra';
 
+export const CATEGORY_ORDER = [
+  'Serviços preliminares / Implantação',
+  'Fundação',
+  'Estrutura de concreto armado',
+  'Alvenaria estrutural',
+  'Alvenaria de vedação',
+  'Instalações hidráulicas',
+  'Instalações elétricas',
+  'Bombeiro / Incêndio',
+  'Impermeabilização',
+  'Contrapiso',
+  'Revestimento interno',
+  'Piso',
+  'Gesso / drywall / forro',
+  'Esquadrias',
+  'Fachada',
+  'Pintura interna',
+  'Louças, metais e acessórios',
+  'Bancadas e pedras',
+  'Gradil, guarda-corpo e corrimão',
+  'Áreas comuns',
+  'Elevadores',
+  'Cobertura / telhado / laje técnica',
+  'Limpeza fina e entrega',
+];
+
+export const categoryOrderIndex = (cat: string): number => {
+  const idx = CATEGORY_ORDER.indexOf(cat);
+  return idx === -1 ? CATEGORY_ORDER.length : idx;
+};
+
 export const defaultServiceDependencies: Record<string, string[]> = {
   'Requadração monocapa da viga da sacada': ['pintura externa', 'acabamento da sacada'],
   'Fechamento da churrasqueira em gesso': ['pintura', 'limpeza fina'],

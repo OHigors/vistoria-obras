@@ -8,7 +8,7 @@ import { Skeleton } from '@/src/ui/Skeleton';
 import { useToast } from '@/src/ui/Toast';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
-import { createEmptyServiceStage, defaultServiceStages } from '@/src/data/serviceStages';
+import { categoryOrderIndex, createEmptyServiceStage, defaultServiceStages } from '@/src/data/serviceStages';
 import type { ServiceStage } from '@/src/data/serviceStages';
 import * as db from '@/src/data/db';
 import { useObras } from '@/src/data/ObrasContext';
@@ -420,7 +420,7 @@ export default function ServiceStagesScreen() {
       if (!map.has(cat)) map.set(cat, []);
       map.get(cat)!.push(item);
     }
-    return [...map.entries()].sort(([a], [b]) => a.localeCompare(b, 'pt-BR'));
+    return [...map.entries()].sort(([a], [b]) => categoryOrderIndex(a) - categoryOrderIndex(b) || a.localeCompare(b, 'pt-BR'));
   };
 
   const dependencyGroups = groupByCategoria(dependencyCandidates);
@@ -437,7 +437,7 @@ export default function ServiceStagesScreen() {
       map.set(cat, cur);
     }
     return [...map.entries()]
-      .sort(([a], [b]) => a.localeCompare(b, 'pt-BR'))
+      .sort(([a], [b]) => categoryOrderIndex(a) - categoryOrderIndex(b) || a.localeCompare(b, 'pt-BR'))
       .map(([nome, counts]) => ({ nome, ...counts }));
   }, [stages]);
 
