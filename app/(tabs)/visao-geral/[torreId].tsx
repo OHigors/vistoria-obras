@@ -12,7 +12,7 @@ import type { ServiceStage } from '@/src/data/serviceStages';
 import { summarizeApartmentSchedule } from '@/src/data/schedule';
 import { getBlockedServiceGroups, getChecklistForApartment } from '@/src/data/serviceBlockers';
 import { isCriticalStageForStatus } from '@/src/data/serviceStages';
-import { getProgressColor, statusConfig } from '@/src/ui/status';
+import { getProgressMapStyle, statusConfig } from '@/src/ui/status';
 
 // ── Color token for this modal ─────────────────────────────────────────────────
 const C = {
@@ -22,7 +22,7 @@ const C = {
   medium:   '#0D9488',   // teal-600 (icons, active text)
 } as const;
 
-const viewModes = ['Lista', 'Mapa'] as const;
+const viewModes = ['Mapa', 'Lista'] as const;
 const filterOptions = [
   'Todos', 'Excelente', 'Bom', 'Atenção', 'Crítico',
   'Com pendência', 'Com atraso', 'Travado',
@@ -101,7 +101,7 @@ export default function TowerApartmentsScreen() {
   // ── Main screen ────────────────────────────────────────────────────────────
   const scrollRef       = useRef<ScrollView | null>(null);
   const [showBackToTop, setShowBackToTop] = useState(false);
-  const [viewMode, setViewMode] = useState<ViewMode>('Lista');
+  const [viewMode, setViewMode] = useState<ViewMode>('Mapa');
   const [search,   setSearch]   = useState('');
   const [filter,   setFilter]   = useState<FilterOption>('Todos');
 
@@ -231,14 +231,23 @@ export default function TowerApartmentsScreen() {
     );
   }, [apartmentSummaries, search, filter]);
 
-  const summariesByFloor = useMemo(
-    () => filteredSummaries.reduce<Record<string, ApartmentSummary[]>>((g, s) => {
+  const summariesByFloor = useMemo(() => {
+    const grouped = filteredSummaries.reduce<Record<string, ApartmentSummary[]>>((g, s) => {
       g[s.apartment.floor] = [...(g[s.apartment.floor] ?? []), s]; return g;
-    }, {}),
-    [filteredSummaries],
-  );
+    }, {});
+    // Within a floor, order units by apartment number (numeric when possible).
+    for (const floor of Object.keys(grouped)) {
+      grouped[floor].sort((a, b) => {
+        const na = Number(a.apartment.number), nb = Number(b.apartment.number);
+        if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb;
+        return a.apartment.number.localeCompare(b.apartment.number, 'pt-BR');
+      });
+    }
+    return grouped;
+  }, [filteredSummaries]);
+  // Ascending floor order: 1º pavimento, 2º pavimento, …
   const orderedFloors = useMemo(
-    () => Object.keys(summariesByFloor).sort((a, b) => getFloorOrder(b) - getFloorOrder(a)),
+    () => Object.keys(summariesByFloor).sort((a, b) => getFloorOrder(a) - getFloorOrder(b)),
     [summariesByFloor],
   );
 
@@ -281,37 +290,39 @@ export default function TowerApartmentsScreen() {
       {/* ── MAIN SCREEN ─────────────────────────────────────────────────────── */}
       <ScrollView
         ref={scrollRef}
-        contentContainerStyle={[s.container, { paddingTop: insets.top + 8 }]}
+        contentContainerStyle={s.container}
         showsVerticalScrollIndicator={false}
         scrollEventThrottle={64}
         onScroll={(e) => setShowBackToTop(e.nativeEvent.contentOffset.y > 400)}
       >
-        {backBar}
-
-        {/* HEADER */}
-        <View style={s.header}>
+        {/* HEADER — colored stripe varies with the tower's average progress, matching the apartment screen */}
+        <View style={[s.header, { paddingTop: insets.top + 12, backgroundColor: getProgressMapStyle(towerStats.avgProgress).fg }]}>
+          <Pressable onPress={() => router.push('/(tabs)/visao-geral' as any)} style={s.headerBack}>
+            <MaterialCommunityIcons name="chevron-left" size={26} color="rgba(255,255,255,0.9)" />
+            <Text style={s.headerBackText}>Visão Geral</Text>
+          </Pressable>
           <View style={s.headerTop}>
-            <MaterialCommunityIcons name="office-building" size={32} color="#2563EB" />
+            <MaterialCommunityIcons name="office-building" size={30} color="#FFFFFF" />
             <View style={s.headerInfo}>
               <Text style={s.headerTitle}>{tower.name}</Text>
               <Text style={s.headerSub}>{`${tower.block} · ${tower.position}`}</Text>
             </View>
-            <View style={s.headerRight}>
-              <View style={s.headerCount}>
-                <Text style={s.headerCountValue}>{towerApartments.length}</Text>
-                <Text style={s.headerCountLabel}>unid.</Text>
-              </View>
-              <Pressable onPress={openModal} style={s.assocTrigger}>
-                <MaterialCommunityIcons name="format-list-checks" size={17} color={C.primary} />
-                <Text style={s.assocTriggerText}>Etapas</Text>
-              </Pressable>
+            <View style={s.headerCount}>
+              <Text style={s.headerCountValue}>{towerApartments.length}</Text>
+              <Text style={s.headerCountLabel}>unid.</Text>
             </View>
           </View>
           {tower.description ? <Text style={s.headerDesc}>{tower.description}</Text> : null}
           <View style={s.headerBar}>
-            <View style={[s.headerBarFill, { width: `${towerStats.avgProgress}%` as `${number}%`, backgroundColor: getProgressColor(towerStats.avgProgress) }]} />
+            <View style={[s.headerBarFill, { width: `${towerStats.avgProgress}%` as `${number}%` }]} />
           </View>
-          <Text style={s.headerBarLabel}>{`${towerStats.avgProgress}% de avanço médio`}</Text>
+          <View style={s.headerMetaRow}>
+            <Text style={s.headerBarLabel}>{`${towerStats.avgProgress}% de avanço médio`}</Text>
+            <Pressable onPress={openModal} style={s.assocTrigger}>
+              <MaterialCommunityIcons name="format-list-checks" size={16} color="#FFFFFF" />
+              <Text style={s.assocTriggerText}>Etapas</Text>
+            </Pressable>
+          </View>
         </View>
 
         {/* KPI ROW */}
@@ -375,7 +386,7 @@ export default function TowerApartmentsScreen() {
           <View style={s.list}>
             {filteredSummaries.map(({ apartment, statusKey, progress, pendingCount, blockedCount, observationCount, maxDelayDays }) => {
               const st = statusConfig[statusKey];
-              const pc = getProgressColor(progress);
+              const pc = getProgressMapStyle(progress).fg;
               return (
                 <Pressable key={apartment.id} onPress={() => router.push({ pathname: '/visao-geral/apartamentos/[apartamentoId]', params: { apartamentoId: apartment.id } })} style={s.aptCard}>
                   <View style={[s.aptCardStripe, { backgroundColor: pc }]} />
@@ -412,12 +423,15 @@ export default function TowerApartmentsScreen() {
         ) : (
           <View style={s.mapPanel}>
             <View style={s.legend}>
-              {[10, 30, 50, 70, 90].map((v) => (
-                <View key={v} style={s.legendItem}>
-                  <View style={[s.legendDot, { backgroundColor: getProgressColor(v) }]} />
-                  <Text style={s.legendText}>{v - 10}–{v + 10}%</Text>
-                </View>
-              ))}
+              {[10, 30, 50, 70, 90].map((v) => {
+                const ms = getProgressMapStyle(v);
+                return (
+                  <View key={v} style={s.legendItem}>
+                    <View style={[s.legendDot, { backgroundColor: ms.bg, borderColor: ms.border }]} />
+                    <Text style={s.legendText}>{v - 10}–{v + 10}%</Text>
+                  </View>
+                );
+              })}
             </View>
             {orderedFloors.map((floor) => (
               <View key={floor} style={s.floorGroup}>
@@ -428,12 +442,12 @@ export default function TowerApartmentsScreen() {
                 </View>
                 <View style={s.compactGrid}>
                   {summariesByFloor[floor].map((sum) => {
-                    const pc = getProgressColor(sum.progress);
+                    const ms = getProgressMapStyle(sum.progress);
                     return (
-                      <Pressable key={`map-${sum.apartment.id}`} onPress={() => router.push({ pathname: '/visao-geral/apartamentos/[apartamentoId]', params: { apartamentoId: sum.apartment.id } })} style={[s.mapUnit, { borderColor: pc }]}>
-                        <Text style={[s.mapUnitNumber, { color: pc }]}>{sum.apartment.number}</Text>
-                        <Text style={[s.mapUnitProgress, { color: pc }]}>{`${sum.progress}%`}</Text>
-                        <View style={[s.mapUnitDot, sum.pendingCount > 0 && { backgroundColor: pc }]} />
+                      <Pressable key={`map-${sum.apartment.id}`} onPress={() => router.push({ pathname: '/visao-geral/apartamentos/[apartamentoId]', params: { apartamentoId: sum.apartment.id } })} style={[s.mapUnit, { borderColor: ms.border, backgroundColor: ms.bg }]}>
+                        <Text style={[s.mapUnitNumber, { color: ms.fg }]}>{sum.apartment.number}</Text>
+                        <Text style={[s.mapUnitProgress, { color: ms.fg }]}>{`${sum.progress}%`}</Text>
+                        <View style={[s.mapUnitDot, sum.pendingCount > 0 && { backgroundColor: ms.fg }]} />
                       </Pressable>
                     );
                   })}
@@ -661,21 +675,23 @@ const s = StyleSheet.create({
   emptyBtn:         { backgroundColor: '#2563EB', borderRadius: 10, paddingHorizontal: 20, paddingVertical: 10 },
   emptyBtnText:     { color: '#FFFFFF', fontSize: 14, fontWeight: '700' },
 
-  header:           { backgroundColor: '#FFFFFF', borderColor: '#E2E8F0', borderBottomWidth: 1, padding: 16, gap: 12 },
+  header:           { paddingHorizontal: 16, paddingBottom: 16, gap: 10 },
+  headerBack:       { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', marginLeft: -4, marginBottom: 2, gap: 2 },
+  headerBackText:   { color: 'rgba(255,255,255,0.9)', fontSize: 15, fontWeight: '600' },
   headerTop:        { flexDirection: 'row', alignItems: 'center', gap: 12 },
   headerInfo:       { flex: 1 },
-  headerTitle:      { color: '#0F172A', fontSize: 22, fontWeight: '900' },
-  headerSub:        { color: '#64748B', fontSize: 13, marginTop: 2 },
-  headerRight:      { alignItems: 'flex-end', gap: 8 },
-  headerCount:      { alignItems: 'center', backgroundColor: '#EFF6FF', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 8 },
-  headerCountValue: { color: '#2563EB', fontSize: 22, fontWeight: '900' },
-  headerCountLabel: { color: '#93C5FD', fontSize: 11, fontWeight: '700' },
-  assocTrigger:     { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: '#F0FDFA', borderColor: '#99F6E4', borderWidth: 1, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 7 },
-  assocTriggerText: { color: C.primary, fontSize: 12, fontWeight: '800' },
-  headerDesc:       { color: '#475569', fontSize: 13, lineHeight: 18 },
-  headerBar:        { backgroundColor: '#E2E8F0', borderRadius: 999, height: 6, overflow: 'hidden' },
-  headerBarFill:    { height: '100%', borderRadius: 999 },
-  headerBarLabel:   { color: '#64748B', fontSize: 12, fontWeight: '600' },
+  headerTitle:      { color: '#FFFFFF', fontSize: 22, fontWeight: '900' },
+  headerSub:        { color: 'rgba(255,255,255,0.7)', fontSize: 13, marginTop: 2, fontWeight: '600' },
+  headerCount:      { alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.18)', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 8 },
+  headerCountValue: { color: '#FFFFFF', fontSize: 22, fontWeight: '900' },
+  headerCountLabel: { color: 'rgba(255,255,255,0.7)', fontSize: 11, fontWeight: '700' },
+  assocTrigger:     { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: 'rgba(255,255,255,0.18)', borderColor: 'rgba(255,255,255,0.35)', borderWidth: 1, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 7 },
+  assocTriggerText: { color: '#FFFFFF', fontSize: 12, fontWeight: '800' },
+  headerDesc:       { color: 'rgba(255,255,255,0.8)', fontSize: 13, lineHeight: 18 },
+  headerBar:        { backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: 999, height: 6, overflow: 'hidden' },
+  headerBarFill:    { height: '100%', borderRadius: 999, backgroundColor: 'rgba(255,255,255,0.85)' },
+  headerBarLabel:   { color: 'rgba(255,255,255,0.85)', fontSize: 12, fontWeight: '700' },
+  headerMetaRow:    { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
 
   kpiRow:           { flexDirection: 'row', gap: 8, paddingHorizontal: 16 },
   kpiCard:          { flex: 1, borderRadius: 12, padding: 10, alignItems: 'center', gap: 3 },
@@ -727,7 +743,7 @@ const s = StyleSheet.create({
   mapPanel:         { backgroundColor: '#FFFFFF', borderColor: '#E2E8F0', borderRadius: 14, borderWidth: 1, marginHorizontal: 16, padding: 14, gap: 16 },
   legend:           { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
   legendItem:       { flexDirection: 'row', alignItems: 'center', gap: 5 },
-  legendDot:        { width: 8, height: 8, borderRadius: 4 },
+  legendDot:        { width: 10, height: 10, borderRadius: 5, borderWidth: 1 },
   legendText:       { color: '#475569', fontSize: 11, fontWeight: '700' },
   floorGroup:       { gap: 8 },
   floorHeader:      { flexDirection: 'row', alignItems: 'center', gap: 6 },

@@ -7,6 +7,7 @@ export type ChecklistItem = {
   label: string;
   state: ChecklistState;
   comment?: string;
+  emergency?: string;
   area?: string;
   isExtra?: boolean;
 };

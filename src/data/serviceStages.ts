@@ -14,6 +14,10 @@ export type ServiceStage = {
   travaLiberacao: boolean;
   ativo: boolean;
   servicosDependentes: string[];
+  // Names of other stages that act as sub-steps of this one. When non-empty this
+  // stage becomes a "group stage": its status is derived from its sub-steps
+  // (auto-completes when all are done) and cannot be edited manually.
+  subEtapas: string[];
   area: string;
   observacao: string;
   dataInicio: string;
@@ -21,6 +25,37 @@ export type ServiceStage = {
 };
 
 export const serviceStagesStorageKey = 'config-etapas-servicos-obra';
+
+export const CATEGORY_ORDER = [
+  'Serviços preliminares / Implantação',
+  'Fundação',
+  'Estrutura de concreto armado',
+  'Alvenaria estrutural',
+  'Alvenaria de vedação',
+  'Instalações hidráulicas',
+  'Instalações elétricas',
+  'Bombeiro / Incêndio',
+  'Impermeabilização',
+  'Contrapiso',
+  'Revestimento interno',
+  'Piso',
+  'Gesso / drywall / forro',
+  'Esquadrias',
+  'Fachada',
+  'Pintura interna',
+  'Louças, metais e acessórios',
+  'Bancadas e pedras',
+  'Gradil, guarda-corpo e corrimão',
+  'Áreas comuns',
+  'Elevadores',
+  'Cobertura / telhado / laje técnica',
+  'Limpeza fina e entrega',
+];
+
+export const categoryOrderIndex = (cat: string): number => {
+  const idx = CATEGORY_ORDER.indexOf(cat);
+  return idx === -1 ? CATEGORY_ORDER.length : idx;
+};
 
 export const defaultServiceDependencies: Record<string, string[]> = {
   'Requadração monocapa da viga da sacada': ['pintura externa', 'acabamento da sacada'],
@@ -100,7 +135,9 @@ const createStage = (name: string, index: number): ServiceStage => ({
   travaLiberacao: name.includes('Limpeza') || name.includes('Vistoria') || name.includes('Shaft'),
   ativo: true,
   servicosDependentes: defaultServiceDependencies[name] ?? [],
-  area: 'Interior',
+  subEtapas: [],
+  // Catalog stages carry no area; it is assigned per-apartment in the checklist.
+  area: '',
   observacao: '',
   dataInicio: '',
   dataFim: '',
@@ -129,7 +166,8 @@ const normalizeStage = (stage: Partial<ServiceStage>, index: number): ServiceSta
     travaLiberacao: Boolean(stage.travaLiberacao),
     ativo: stage.ativo !== false,
     servicosDependentes: Array.isArray(stage.servicosDependentes) ? stage.servicosDependentes : [],
-    area: typeof stage.area === 'string' ? stage.area : 'Interior',
+    subEtapas: Array.isArray(stage.subEtapas) ? stage.subEtapas : [],
+    area: typeof stage.area === 'string' ? stage.area : '',
     observacao: typeof stage.observacao === 'string' ? stage.observacao : '',
     dataInicio: typeof stage.dataInicio === 'string' ? stage.dataInicio : '',
     dataFim: typeof stage.dataFim === 'string' ? stage.dataFim : '',
@@ -192,11 +230,24 @@ export const createEmptyServiceStage = (order: number): ServiceStage => ({
   travaLiberacao: false,
   ativo: true,
   servicosDependentes: [],
-  area: 'Interior',
+  subEtapas: [],
+  area: '',
   observacao: '',
   dataInicio: '',
   dataFim: '',
 });
+
+// Build the "group stage → sub-step names" map from a catalog. A stage that
+// declares sub-steps becomes a group whose status is derived from its children.
+export const getGroupStepChildren = (stages: ServiceStage[]): Record<string, string[]> => {
+  const map: Record<string, string[]> = {};
+  for (const stage of stages) {
+    if (Array.isArray(stage.subEtapas) && stage.subEtapas.length > 0) {
+      map[stage.nome] = stage.subEtapas;
+    }
+  }
+  return map;
+};
 
 export const getServiceDependencyMap = () =>
   getServiceStagesFromStorage().reduce<Record<string, string[]>>((dependencies, stage) => {

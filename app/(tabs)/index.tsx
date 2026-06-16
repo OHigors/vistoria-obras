@@ -9,7 +9,6 @@ import Svg, { Circle, Text as SvgText } from 'react-native-svg';
 
 import { formatCurrency } from '@/src/data/localMeasurements';
 import { useObras } from '@/src/data/ObrasContext';
-import { useAreaFilter } from '@/src/data/AreaFilterContext';
 import { summarizeBottlenecks } from '@/src/data/serviceBlockers';
 import { summarizeSchedule } from '@/src/data/schedule';
 import { getProgressColor } from '@/src/ui/status';
@@ -89,7 +88,6 @@ type DashView = 'kpi' | 'dist';
 export default function DashboardScreen() {
   const insets = useSafeAreaInsets();
   const { apartments, towers, project, measurements, loading } = useObras();
-  const { areaFilter, setAreaFilter } = useAreaFilter();
   const [alertOpen, setAlertOpen] = useState(false);
   const [view, setView] = useState<DashView>('kpi');
 
@@ -276,25 +274,6 @@ export default function DashboardScreen() {
           </View>
         </View>
       )}
-
-      {/* AREA FILTER — controls which checklist steps show in apartments */}
-      <View style={s.areaWrap}>
-        <Text style={s.areaWrapLabel}>Área de vistoria</Text>
-        <View style={s.areaToggle}>
-          <Pressable
-            onPress={() => setAreaFilter('Exterior')}
-            style={[s.areaBtn, areaFilter === 'Exterior' && s.areaBtnExteriorActive]}>
-            <MaterialCommunityIcons name="domain" size={15} color={areaFilter === 'Exterior' ? '#FFFFFF' : '#94A3B8'} />
-            <Text style={[s.areaBtnText, areaFilter === 'Exterior' && s.areaBtnTextActive]}>Exterior</Text>
-          </Pressable>
-          <Pressable
-            onPress={() => setAreaFilter('Interior')}
-            style={[s.areaBtn, areaFilter === 'Interior' && s.areaBtnInteriorActive]}>
-            <MaterialCommunityIcons name="floor-plan" size={15} color={areaFilter === 'Interior' ? '#FFFFFF' : '#94A3B8'} />
-            <Text style={[s.areaBtnText, areaFilter === 'Interior' && s.areaBtnTextActive]}>Interior</Text>
-          </Pressable>
-        </View>
-      </View>
 
       {/* SEGMENTED CONTROL — mirrors the Catálogos toggle */}
       <View style={s.toggleWrap}>
@@ -522,16 +501,6 @@ const s = StyleSheet.create({
   heroStatValue: { color: '#0F172A', fontSize: 20, fontWeight: '900' },
   heroStatLabel: { color: '#94A3B8', fontSize: 11, fontWeight: '600', marginTop: 2 },
   heroStatDivider: { width: 1, height: 32, backgroundColor: '#E2E8F0' },
-
-  // area filter
-  areaWrap: { paddingHorizontal: 16, paddingTop: 16 },
-  areaWrapLabel: { color: '#94A3B8', fontSize: 11, fontWeight: '700', letterSpacing: 0.8, textTransform: 'uppercase', marginBottom: 8 },
-  areaToggle: { flexDirection: 'row', gap: 8 },
-  areaBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 13, borderRadius: 12, backgroundColor: '#F1F5F9' },
-  areaBtnExteriorActive: { backgroundColor: '#D97706' },
-  areaBtnInteriorActive: { backgroundColor: '#0891B2' },
-  areaBtnText: { color: '#94A3B8', fontSize: 13, fontWeight: '700' },
-  areaBtnTextActive: { color: '#FFFFFF' },
 
   // segmented control
   toggleWrap: { paddingHorizontal: 16, paddingTop: 14, paddingBottom: 4 },

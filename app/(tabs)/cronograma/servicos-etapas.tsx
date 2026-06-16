@@ -8,7 +8,7 @@ import { Skeleton } from '@/src/ui/Skeleton';
 import { useToast } from '@/src/ui/Toast';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
-import { createEmptyServiceStage, defaultServiceStages } from '@/src/data/serviceStages';
+import { categoryOrderIndex, createEmptyServiceStage, defaultServiceStages } from '@/src/data/serviceStages';
 import type { ServiceStage } from '@/src/data/serviceStages';
 import * as db from '@/src/data/db';
 import { useObras } from '@/src/data/ObrasContext';
@@ -209,10 +209,17 @@ export default function ServiceStagesScreen() {
   const [editingId, setEditingId] = useState<string>();
   const [draft, setDraft] = useState<ServiceStage>(() => createEmptyServiceStage(1));
   const [depFilter, setDepFilter] = useState('');
+  const [subFilter, setSubFilter] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState<string>('all');
+  const [nameSearch, setNameSearch] = useState('');
+  const [listOpen, setListOpen] = useState(false);
+  const [showSubSection, setShowSubSection] = useState(false);
+  const [showDepSection, setShowDepSection] = useState(false);
   const [errors, setErrors] = useState<Partial<Record<keyof ServiceStage, string>>>({});
   const [formOpen, setFormOpen] = useState(false);
   const [restoreOpen, setRestoreOpen] = useState(false);
   const [openDepGroups, setOpenDepGroups] = useState<Record<string, boolean>>({});
+  const [openSubGroups, setOpenSubGroups] = useState<Record<string, boolean>>({});
   const [collapsedStageGroups, setCollapsedStageGroups] = useState<Record<string, boolean>>({});
   const [stageToDelete, setStageToDelete] = useState<ServiceStage | null>(null);
   const [showBackToTop, setShowBackToTop] = useState(false);
@@ -250,7 +257,9 @@ export default function ServiceStagesScreen() {
     setStages(ordered);
     // Persist and broadcast the new catalog so other screens (apartment "add step"
     // modal in particular) see the change without needing a full app reload.
-    db.saveServiceStages(ordered).then(() => refreshServiceStages());
+    db.saveServiceStages(ordered)
+      .then(() => refreshServiceStages())
+      .catch(() => toast.error('Erro ao salvar etapas'));
   };
 
   const updateDraft = <F extends keyof ServiceStage>(field: F, value: ServiceStage[F]) => {
@@ -260,7 +269,18 @@ export default function ServiceStagesScreen() {
 
   const saveDraft = () => {
     const next: Partial<Record<keyof ServiceStage, string>> = {};
-    if (!draft.nome.trim()) next.nome = 'Informe o nome da etapa';
+    const trimmedName = draft.nome.trim();
+    if (!trimmedName) {
+      next.nome = 'Informe o nome da etapa';
+    } else {
+      // The DB enforces UNIQUE (obra_id, nome); catch duplicates here so the user
+      // gets a clear field error instead of a 409 from the upsert.
+      const nameKey = trimmedName.toLocaleLowerCase('pt-BR');
+      const duplicate = stages.some(
+        (st) => st.id !== draft.id && st.nome.trim().toLocaleLowerCase('pt-BR') === nameKey,
+      );
+      if (duplicate) next.nome = 'Já existe uma etapa com esse nome';
+    }
     if (!draft.categoria.trim()) next.categoria = 'Informe a categoria';
     if (!draft.unidadeMedicao.trim()) next.unidadeMedicao = 'Informe a unidade';
     if (Object.keys(next).length > 0) {
@@ -268,6 +288,7 @@ export default function ServiceStagesScreen() {
       return;
     }
     setErrors({});
+    const prevStages = stages;
     const normalized: ServiceStage = { ...draft, id: draft.id || crypto.randomUUID(), nome: draft.nome.trim(), categoria: draft.categoria.trim(), unidadeMedicao: draft.unidadeMedicao.trim(), observacao: draft.observacao.trim() };
     const updated = editingId ? stages.map((s) => (s.id === editingId ? normalized : s)) : [...stages, normalized];
     const ordered = updated.map((s, i) => ({ ...s, ordemExecucao: i + 1 })).sort((a, b) => a.ordemExecucao - b.ordemExecucao);
@@ -275,20 +296,29 @@ export default function ServiceStagesScreen() {
     setEditingId(undefined);
     setDraft(createEmptyServiceStage(updated.length + 1));
     setDepFilter('');
+    setSubFilter('');
     setFormOpen(false);
     const wasEditing = !!editingId;
     toast.saving(wasEditing ? 'Atualizando etapa…' : 'Criando etapa…');
+    // New stages are NOT auto-added to apartments — a step only enters a checklist
+    // through the add-step popup, where its area (Interior/Exterior) is chosen.
     db.saveServiceStages(ordered)
-      .then(() => wasEditing ? Promise.resolve() : db.propagateStageToApartments(normalized))
       .then(() => Promise.all([refreshServiceStages(), refreshData()]))
       .then(() => toast.saved(wasEditing ? 'Etapa atualizada' : 'Etapa criada'))
-      .catch(() => toast.error(wasEditing ? 'Erro ao atualizar etapa' : 'Erro ao criar etapa'));
+      .catch(() => {
+        // Roll back the optimistic change so a rejected stage doesn't linger.
+        setStages(prevStages);
+        toast.error(wasEditing ? 'Erro ao atualizar etapa' : 'Erro ao criar etapa');
+      });
   };
 
   const editStage = (stage: ServiceStage) => {
     setEditingId(stage.id);
     setDraft(stage);
     setDepFilter('');
+    setSubFilter('');
+    setShowSubSection(stage.subEtapas.length > 0);
+    setShowDepSection(stage.servicosDependentes.length > 0);
     setFormOpen(true);
   };
   const inactivate = (stage: ServiceStage) => persistStages(stages.map((s) => (s.id === stage.id ? { ...s, ativo: false } : s)));
@@ -321,6 +351,26 @@ export default function ServiceStagesScreen() {
     updateDraft('servicosDependentes', deps);
   };
 
+  const toggleSubEtapa = (name: string) => {
+    const subs = draft.subEtapas.includes(name)
+      ? draft.subEtapas.filter((s) => s !== name)
+      : [...draft.subEtapas, name];
+    updateDraft('subEtapas', subs);
+  };
+
+  // The two checkboxes reveal/hide the sub-etapas and "trava" pickers. Unchecking
+  // clears whatever was selected so we never persist hidden data.
+  const toggleSubSection = () => {
+    const next = !showSubSection;
+    setShowSubSection(next);
+    if (!next && draft.subEtapas.length > 0) updateDraft('subEtapas', []);
+  };
+  const toggleDepSection = () => {
+    const next = !showDepSection;
+    setShowDepSection(next);
+    if (!next && draft.servicosDependentes.length > 0) updateDraft('servicosDependentes', []);
+  };
+
   const confirmRestore = () => {
     setRestoreOpen(false);
     persistStages(defaultServiceStages);
@@ -333,6 +383,9 @@ export default function ServiceStagesScreen() {
     setEditingId(undefined);
     setDraft(createEmptyServiceStage(stages.length + 1));
     setDepFilter('');
+    setSubFilter('');
+    setShowSubSection(false);
+    setShowDepSection(false);
     setFormOpen(false);
   };
 
@@ -349,6 +402,17 @@ export default function ServiceStagesScreen() {
     return stripDiacritics(st.nome).includes(normalizedFilter);
   });
 
+  // Candidates that can be sub-steps of the stage being edited. A stage cannot be
+  // its own sub-step, and a stage that itself has sub-steps (a group) cannot be
+  // nested as a sub-step — keeping the hierarchy a single level deep.
+  const normalizedSubFilter = stripDiacritics(subFilter.trim());
+  const subStepCandidates = sortedStages.filter((st) => {
+    if (st.id === draft.id) return false;
+    if (st.subEtapas.length > 0) return false;
+    if (!normalizedSubFilter) return true;
+    return stripDiacritics(st.nome).includes(normalizedSubFilter);
+  });
+
   const groupByCategoria = <T extends { categoria: string }>(list: T[]) => {
     const map = new Map<string, T[]>();
     for (const item of list) {
@@ -356,11 +420,48 @@ export default function ServiceStagesScreen() {
       if (!map.has(cat)) map.set(cat, []);
       map.get(cat)!.push(item);
     }
-    return [...map.entries()].sort(([a], [b]) => a.localeCompare(b, 'pt-BR'));
+    return [...map.entries()].sort(([a], [b]) => categoryOrderIndex(a) - categoryOrderIndex(b) || a.localeCompare(b, 'pt-BR'));
   };
 
   const dependencyGroups = groupByCategoria(dependencyCandidates);
-  const stageGroups = groupByCategoria(sortedStages);
+  const subStepGroups = groupByCategoria(subStepCandidates);
+
+  // Distinct categories (with active/total counts) for the filter strip.
+  const categoryOptions = useMemo(() => {
+    const map = new Map<string, { total: number; active: number }>();
+    for (const st of stages) {
+      const cat = (st.categoria || 'Sem categoria').trim() || 'Sem categoria';
+      const cur = map.get(cat) ?? { total: 0, active: 0 };
+      cur.total += 1;
+      if (st.ativo) cur.active += 1;
+      map.set(cat, cur);
+    }
+    return [...map.entries()]
+      .sort(([a], [b]) => categoryOrderIndex(a) - categoryOrderIndex(b) || a.localeCompare(b, 'pt-BR'))
+      .map(([nome, counts]) => ({ nome, ...counts }));
+  }, [stages]);
+
+  // Keep the active category filter valid as the catalog changes.
+  useEffect(() => {
+    if (categoryFilter !== 'all' && !categoryOptions.some((c) => c.nome === categoryFilter)) {
+      setCategoryFilter('all');
+    }
+  }, [categoryFilter, categoryOptions]);
+
+  // Combined filter: free-text search (name or category) + selected category chip.
+  const normalizedNameSearch = stripDiacritics(nameSearch.trim());
+  const filteredStages = sortedStages.filter((st) => {
+    const cat = (st.categoria || 'Sem categoria').trim() || 'Sem categoria';
+    if (categoryFilter !== 'all' && cat !== categoryFilter) return false;
+    if (!normalizedNameSearch) return true;
+    return (
+      stripDiacritics(st.nome).includes(normalizedNameSearch) ||
+      stripDiacritics(cat).includes(normalizedNameSearch)
+    );
+  });
+  const stageGroups = groupByCategoria(filteredStages);
+  // While searching/filtering, expand groups so matches are visible immediately.
+  const forceGroupsOpen = normalizedNameSearch.length > 0 || categoryFilter !== 'all';
 
   const formatDateBR = (iso: string) => {
     if (!iso) return '—';
@@ -409,6 +510,9 @@ export default function ServiceStagesScreen() {
               setEditingId(undefined);
               setDraft(createEmptyServiceStage(stages.length + 1));
               setDepFilter('');
+              setSubFilter('');
+              setShowSubSection(false);
+              setShowDepSection(false);
               setErrors({});
               setFormOpen(true);
             }}
@@ -426,18 +530,83 @@ export default function ServiceStagesScreen() {
         </View>
       </View>
 
-      {/* STAGES LIST — blue border */}
-      <View style={[s.section, s.sectionBlue]}>
-        <Text style={[s.sectionTitle, { color: '#1D4ED8' }]}>Etapas cadastradas</Text>
-        {loading ? (
-          <>
-            <SkeletonCard />
-            <SkeletonCard />
-            <SkeletonCard />
-          </>
-        ) : stageGroups.map(([cat, items]) => {
+      {/* STAGES LIST — collapsible card */}
+      <View style={s.listCard}>
+        <Pressable onPress={() => setListOpen((o) => !o)} style={s.listCardHeader}>
+          <View style={s.listCardIcon}>
+            <MaterialCommunityIcons name="format-list-bulleted" size={20} color="#1D4ED8" />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={s.listCardTitle}>Etapas cadastradas</Text>
+            {loading ? (
+              <Skeleton height={11} width={140} radius={4} style={{ marginTop: 4 }} />
+            ) : (
+              <Text style={s.listCardSub}>{activeCount} ativas · {stages.length} cadastradas</Text>
+            )}
+          </View>
+          <MaterialCommunityIcons name={listOpen ? 'chevron-up' : 'chevron-down'} size={24} color="#94A3B8" />
+        </Pressable>
+
+        {listOpen && (
+          <View style={s.listCardBody}>
+            <View style={s.searchRow}>
+              <MaterialCommunityIcons name="magnify" size={18} color="#94A3B8" />
+              <TextInput
+                onChangeText={setNameSearch}
+                placeholder="Pesquisar etapa…"
+                placeholderTextColor="#94A3B8"
+                style={s.searchInput}
+                value={nameSearch}
+              />
+              {nameSearch.length > 0 && (
+                <Pressable onPress={() => setNameSearch('')} style={s.searchClear}>
+                  <MaterialCommunityIcons name="close-circle" size={16} color="#94A3B8" />
+                </Pressable>
+              )}
+            </View>
+
+            {categoryOptions.length > 0 && (
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.filterChipRow}>
+                <Pressable
+                  onPress={() => setCategoryFilter('all')}
+                  style={[s.catChip, categoryFilter === 'all' && s.catChipActive]}>
+                  <Text style={[s.catChipText, categoryFilter === 'all' && s.catChipTextActive]}>Todas</Text>
+                  <View style={[s.catChipCount, categoryFilter === 'all' && s.catChipCountActive]}>
+                    <Text style={[s.catChipCountText, categoryFilter === 'all' && s.catChipCountTextActive]}>{stages.length}</Text>
+                  </View>
+                </Pressable>
+                {categoryOptions.map((cat) => {
+                  const active = categoryFilter === cat.nome;
+                  return (
+                    <Pressable
+                      key={cat.nome}
+                      onPress={() => setCategoryFilter(active ? 'all' : cat.nome)}
+                      style={[s.catChip, active && s.catChipActive]}>
+                      <View style={[s.catChipDot, { backgroundColor: categoryColor(cat.nome) }]} />
+                      <Text style={[s.catChipText, active && s.catChipTextActive]} numberOfLines={1}>{cat.nome}</Text>
+                      <View style={[s.catChipCount, active && s.catChipCountActive]}>
+                        <Text style={[s.catChipCountText, active && s.catChipCountTextActive]}>{cat.total}</Text>
+                      </View>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+            )}
+
+            {loading ? (
+              <>
+                <SkeletonCard />
+                <SkeletonCard />
+                <SkeletonCard />
+              </>
+            ) : stageGroups.length === 0 ? (
+              <View style={s.listEmpty}>
+                <MaterialCommunityIcons name="magnify-close" size={28} color="#CBD5E1" />
+                <Text style={s.listEmptyText}>Nenhuma etapa encontrada.</Text>
+              </View>
+            ) : stageGroups.map(([cat, items]) => {
           const color = categoryColor(cat);
-          const collapsed = collapsedStageGroups[cat] === true;
+          const collapsed = !forceGroupsOpen && collapsedStageGroups[cat] === true;
           const activeInGroup = items.filter((it) => it.ativo).length;
           return (
           <View key={`grp-${cat}`} style={s.stageGroup}>
@@ -462,6 +631,12 @@ export default function ServiceStagesScreen() {
                         <Text style={s.stageName}>{stage.nome}</Text>
                         <Text style={s.stageMeta}>{stage.unidadeMedicao}</Text>
                       </View>
+                      {stage.subEtapas.length > 0 && (
+                        <View style={s.groupBadge}>
+                          <MaterialCommunityIcons name="layers-outline" size={11} color="#0891B2" />
+                          <Text style={s.groupBadgeText}>Grupo</Text>
+                        </View>
+                      )}
                       <View style={[s.stagePill, stage.ativo ? s.stagePillActive : s.stagePillInactive]}>
                         <Text style={[s.stagePillText, stage.ativo ? s.stagePillActiveText : s.stagePillInactiveText]}>
                           {stage.ativo ? 'Ativa' : 'Inativa'}
@@ -491,17 +666,16 @@ export default function ServiceStagesScreen() {
                           <Text style={[s.metricChipText, m.on ? s.metricChipTextOn : s.metricChipTextOff]}>{m.label}</Text>
                         </View>
                       ))}
-                      <View style={[s.metricChip, stage.area === 'Exterior' ? s.areaChipExt : s.areaChipInt]}>
-                        <MaterialCommunityIcons
-                          name={stage.area === 'Exterior' ? 'domain' : 'floor-plan'}
-                          size={10}
-                          color={stage.area === 'Exterior' ? '#92400E' : '#0369A1'}
-                        />
-                        <Text style={[s.metricChipText, stage.area === 'Exterior' ? s.areaChipExtText : s.areaChipIntText]}>
-                          {stage.area === 'Exterior' ? 'Exterior' : 'Interior'}
+                    </View>
+
+                    {stage.subEtapas.length > 0 && (
+                      <View style={s.subStepsRow}>
+                        <MaterialCommunityIcons name="layers-outline" size={13} color="#0891B2" />
+                        <Text style={s.subStepsText}>
+                          Conclui ao terminar: {stage.subEtapas.join(', ')}
                         </Text>
                       </View>
-                    </View>
+                    )}
 
                     {stage.servicosDependentes.length > 0 && (
                       <View style={s.blocksRow}>
@@ -537,6 +711,8 @@ export default function ServiceStagesScreen() {
           </View>
           );
         })}
+          </View>
+        )}
       </View>
 
       </ScrollView>
@@ -594,24 +770,6 @@ export default function ServiceStagesScreen() {
                   manageIcon="ruler"
                   error={errors.unidadeMedicao}
                 />
-
-                <View style={s.fieldGroup}>
-                  <Text style={s.fieldLabel}>Área da obra</Text>
-                  <View style={s.areaPickerRow}>
-                    <Pressable
-                      onPress={() => updateDraft('area', 'Exterior')}
-                      style={[s.areaPicker, draft.area === 'Exterior' && s.areaPickerExteriorActive]}>
-                      <MaterialCommunityIcons name="domain" size={15} color={draft.area === 'Exterior' ? '#FFFFFF' : '#94A3B8'} />
-                      <Text style={[s.areaPickerText, draft.area === 'Exterior' && s.areaPickerTextActiveExt]}>Exterior</Text>
-                    </Pressable>
-                    <Pressable
-                      onPress={() => updateDraft('area', 'Interior')}
-                      style={[s.areaPicker, draft.area !== 'Exterior' && s.areaPickerInteriorActive]}>
-                      <MaterialCommunityIcons name="floor-plan" size={15} color={draft.area !== 'Exterior' ? '#FFFFFF' : '#94A3B8'} />
-                      <Text style={[s.areaPickerText, draft.area !== 'Exterior' && s.areaPickerTextActiveInt]}>Interior</Text>
-                    </Pressable>
-                  </View>
-                </View>
               </View>
 
               <View style={s.durationBox}>
@@ -637,7 +795,118 @@ export default function ServiceStagesScreen() {
                 })}
               </View>
 
-              {sortedStages.filter((st) => st.id !== draft.id).length > 0 && (
+              {sortedStages.some((st) => st.id !== draft.id) && (
+                <Pressable
+                  onPress={toggleSubSection}
+                  style={s.checkOption}
+                  accessibilityRole="checkbox"
+                  accessibilityState={{ checked: showSubSection }}>
+                  <MaterialCommunityIcons name={showSubSection ? 'checkbox-marked' : 'checkbox-blank-outline'} size={22} color={showSubSection ? '#0891B2' : '#94A3B8'} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.checkOptionText}>Etapa possui sub-etapas</Text>
+                    <Text style={s.checkOptionHint}>Agrupa outras etapas, conclui automaticamente quando todas terminarem.</Text>
+                  </View>
+                </Pressable>
+              )}
+
+              {showSubSection && (
+                <View style={s.subStepBox}>
+                  <View style={s.subStepHeader}>
+                    <View style={s.subStepHeaderIcon}>
+                      <MaterialCommunityIcons name="layers-triple-outline" size={16} color="#0891B2" />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.subStepTitle}>Sub-etapas</Text>
+                      <Text style={s.subStepHint}>
+                        Agrupe outras etapas dentro desta. Quando todas forem concluídas, esta etapa é concluída automaticamente.
+                      </Text>
+                    </View>
+                  </View>
+
+                  {draft.subEtapas.length > 0 && (
+                    <View style={s.subStepActiveBanner}>
+                      <MaterialCommunityIcons name="information-outline" size={14} color="#0E7490" />
+                      <Text style={s.subStepActiveText}>
+                        {draft.subEtapas.length} sub-etapa{draft.subEtapas.length === 1 ? '' : 's'} · o status desta etapa passa a ser automático, sem marcação manual no checklist.
+                      </Text>
+                    </View>
+                  )}
+
+                  <View style={s.searchWrap}>
+                    <MaterialCommunityIcons name="magnify" size={16} color="#94A3B8" />
+                    <TextInput
+                      onChangeText={setSubFilter}
+                      placeholder="Filtrar etapas…"
+                      placeholderTextColor="#94A3B8"
+                      style={s.searchInput}
+                      value={subFilter}
+                    />
+                    {subFilter ? (
+                      <Pressable onPress={() => setSubFilter('')} style={s.searchClear}>
+                        <MaterialCommunityIcons name="close-circle" size={16} color="#94A3B8" />
+                      </Pressable>
+                    ) : null}
+                  </View>
+                  {subStepCandidates.length === 0 ? (
+                    <Text style={s.emptyDepText}>
+                      {normalizedSubFilter ? 'Nenhuma etapa corresponde ao filtro.' : 'Nenhuma etapa disponível como sub-etapa.'}
+                    </Text>
+                  ) : (
+                    subStepGroups.map(([cat, items]) => {
+                      const forceOpen = Boolean(normalizedSubFilter);
+                      const isOpen = forceOpen || openSubGroups[cat] === true;
+                      const selectedInGroup = items.filter((st) => draft.subEtapas.includes(st.nome)).length;
+                      return (
+                        <View key={`subgrp-${cat}`} style={s.depGroup}>
+                          <Pressable
+                            onPress={() => setOpenSubGroups((cur) => ({ ...cur, [cat]: !isOpen }))}
+                            style={s.depGroupHeader}
+                          >
+                            <MaterialCommunityIcons name={isOpen ? 'chevron-down' : 'chevron-right'} size={16} color="#64748B" />
+                            <View style={[s.depGroupDot, { backgroundColor: categoryColor(cat) }]} />
+                            <Text style={s.depGroupTitle}>{cat}</Text>
+                            {selectedInGroup > 0 ? (
+                              <View style={s.subGroupSelPill}>
+                                <MaterialCommunityIcons name="layers-outline" size={10} color="#0891B2" />
+                                <Text style={s.subGroupSelText}>{selectedInGroup}</Text>
+                              </View>
+                            ) : null}
+                            <Text style={s.depGroupCount}>{items.length}</Text>
+                          </Pressable>
+                          {isOpen && (
+                            <View style={s.toggleRow}>
+                              {items.map((st) => {
+                                const sel = draft.subEtapas.includes(st.nome);
+                                return (
+                                  <Pressable key={`sub-${st.id}`} onPress={() => toggleSubEtapa(st.nome)} style={[s.toggle, sel && s.toggleTeal]}>
+                                    <MaterialCommunityIcons name={sel ? 'layers' : 'layers-outline'} size={13} color={sel ? '#0891B2' : '#94A3B8'} />
+                                    <Text style={[s.toggleText, sel && s.toggleTealText]}>{st.nome}</Text>
+                                  </Pressable>
+                                );
+                              })}
+                            </View>
+                          )}
+                        </View>
+                      );
+                    })
+                  )}
+                </View>
+              )}
+
+              {sortedStages.some((st) => st.id !== draft.id) && (
+                <Pressable
+                  onPress={toggleDepSection}
+                  style={s.checkOption}
+                  accessibilityRole="checkbox"
+                  accessibilityState={{ checked: showDepSection }}>
+                  <MaterialCommunityIcons name={showDepSection ? 'checkbox-marked' : 'checkbox-blank-outline'} size={22} color={showDepSection ? '#B45309' : '#94A3B8'} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.checkOptionText}>Etapa trava outros serviços</Text>
+                  </View>
+                </Pressable>
+              )}
+
+              {showDepSection && (
                 <View style={s.dependencyBox}>
                   <Text style={s.fieldLabel}>Serviços que esta etapa trava</Text>
                   <View style={s.searchWrap}>
@@ -874,6 +1143,59 @@ const s = StyleSheet.create({
   depGroupCount: { color: '#94A3B8', fontSize: 11, fontWeight: '700' },
   depGroupSelPill: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#FEF3C7', borderRadius: 999, paddingHorizontal: 7, paddingVertical: 2 },
   depGroupSelText: { color: '#B45309', fontSize: 10, fontWeight: '800' },
+
+  // category filter strip
+  filterBar: { backgroundColor: '#FFFFFF', borderRadius: 14, borderWidth: 1, borderColor: '#E2E8F0', padding: 12, gap: 10 },
+  filterBarHeader: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  filterBarTitle: { color: '#475569', fontSize: 12, fontWeight: '800', flex: 1 },
+  filterClearBtn: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#F5F3FF', borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
+  filterClearText: { color: '#6D28D9', fontSize: 11, fontWeight: '800' },
+  filterChipRow: { flexDirection: 'row', gap: 8, paddingRight: 4 },
+  catChip: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#F8FAFC', borderColor: '#E2E8F0', borderWidth: 1, borderRadius: 999, paddingLeft: 12, paddingRight: 8, paddingVertical: 7, maxWidth: 200 },
+  catChipActive: { backgroundColor: '#EDE9FE', borderColor: '#8B5CF6' },
+  catChipDot: { width: 9, height: 9, borderRadius: 5 },
+  catChipText: { color: '#475569', fontSize: 12, fontWeight: '700', flexShrink: 1 },
+  catChipTextActive: { color: '#6D28D9' },
+  catChipCount: { backgroundColor: '#E2E8F0', borderRadius: 999, minWidth: 20, paddingHorizontal: 6, paddingVertical: 1, alignItems: 'center' },
+  catChipCountActive: { backgroundColor: '#DDD6FE' },
+  catChipCountText: { color: '#64748B', fontSize: 10, fontWeight: '800' },
+  catChipCountTextActive: { color: '#6D28D9' },
+
+  // collapsible "Etapas cadastradas" card
+  listCard: { backgroundColor: '#FFFFFF', borderRadius: 16, borderWidth: 2, borderColor: '#3B82F6', overflow: 'hidden' },
+  listCardHeader: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 16 },
+  listCardIcon: { width: 40, height: 40, borderRadius: 10, backgroundColor: '#EFF6FF', alignItems: 'center', justifyContent: 'center' },
+  listCardTitle: { color: '#0F172A', fontSize: 16, fontWeight: '900' },
+  listCardSub: { color: '#64748B', fontSize: 12, marginTop: 2, fontWeight: '600' },
+  listCardBody: { gap: 12, paddingHorizontal: 16, paddingBottom: 16, borderTopWidth: 1, borderTopColor: '#EFF6FF', paddingTop: 14 },
+  listEmpty: { alignItems: 'center', gap: 8, paddingVertical: 28 },
+  listEmptyText: { color: '#94A3B8', fontSize: 13, fontWeight: '600' },
+  searchRow: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#F8FAFC', borderColor: '#E2E8F0', borderRadius: 12, borderWidth: 1, paddingHorizontal: 12, minHeight: 44 },
+
+  // config checkboxes (form)
+  configChecks: { gap: 8 },
+  checkOption: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, backgroundColor: '#F8FAFC', borderColor: '#E2E8F0', borderWidth: 1, borderRadius: 10, padding: 12 },
+  checkOptionText: { color: '#0F172A', fontSize: 13, fontWeight: '700' },
+  checkOptionHint: { color: '#64748B', fontSize: 11, lineHeight: 15, marginTop: 2 },
+
+  // group stage badge + sub-steps (card)
+  groupBadge: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#E0F2FE', borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
+  groupBadgeText: { color: '#0891B2', fontSize: 10, fontWeight: '800' },
+  subStepsRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  subStepsText: { color: '#0E7490', fontSize: 12, fontWeight: '600', flex: 1 },
+
+  // sub-step picker (form)
+  subStepBox: { backgroundColor: '#F0FDFA', borderColor: '#99F6E4', borderRadius: 10, borderWidth: 1, gap: 10, padding: 12 },
+  subStepHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
+  subStepHeaderIcon: { width: 30, height: 30, borderRadius: 8, backgroundColor: '#CFFAFE', alignItems: 'center', justifyContent: 'center' },
+  subStepTitle: { color: '#0F172A', fontSize: 13, fontWeight: '800' },
+  subStepHint: { color: '#0E7490', fontSize: 11, lineHeight: 15, marginTop: 2 },
+  subStepActiveBanner: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#CFFAFE', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 8 },
+  subStepActiveText: { color: '#0E7490', fontSize: 11, fontWeight: '700', flex: 1, lineHeight: 15 },
+  subGroupSelPill: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#CFFAFE', borderRadius: 999, paddingHorizontal: 7, paddingVertical: 2 },
+  subGroupSelText: { color: '#0891B2', fontSize: 10, fontWeight: '800' },
+  toggleTeal: { backgroundColor: '#CFFAFE', borderColor: '#67E8F9' },
+  toggleTealText: { color: '#0E7490' },
 
   // area picker (form)
   areaPickerRow: { flexDirection: 'row', gap: 8 },

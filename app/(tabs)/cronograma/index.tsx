@@ -157,6 +157,7 @@ export default function CronogramaScreen() {
       <View style={s.linksSection}>
         {[
           { href: '/cronograma/diagnostico', icon: 'stethoscope', label: 'Diagnóstico do MVP', sub: 'Análise completa do estado da obra', color: '#1D4ED8', border: '#3B82F6', bg: '#EFF6FF' },
+          { href: '/cronograma/pavimentos', icon: 'stairs', label: 'Mapa de Pavimentos', sub: 'Avanço por andar e suas unidades', color: '#4F46E5', border: '#6366F1', bg: '#EEF2FF' },
           { href: '/cronograma/servicos-etapas', icon: 'cog-outline', label: 'Serviços e Etapas', sub: 'Configure checklist, cronograma e medições', color: '#6D28D9', border: '#8B5CF6', bg: '#F5F3FF' },
           { href: '/cronograma/medicoes', icon: 'ruler', label: 'Medições', sub: 'Registros financeiros por serviço', color: '#047857', border: '#10B981', bg: '#F0FDF4' },
         ].map((item) => (

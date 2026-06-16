@@ -42,6 +42,7 @@ type DbChecklistRow = {
   label: string;
   state: ChecklistState;
   comment: string | null;
+  emergency: string | null;
   planned_start: string | null;
   planned_end: string | null;
   actual_start: string | null;
@@ -57,6 +58,7 @@ function mapChecklistItem(row: DbChecklistRow): ChecklistItem & ScheduleFields {
     label: row.label,
     state: row.state,
     comment: row.comment || undefined,
+    emergency: row.emergency || undefined,
     plannedStart: toBrDate(row.planned_start),
     plannedEnd: toBrDate(row.planned_end),
     actualStart: toBrDate(row.actual_start),
@@ -155,11 +157,19 @@ function isLegacyPhotoUri(value: string): boolean {
   return /^(data:|https?:|file:|blob:)/i.test(value);
 }
 
-export function getInspectionPhotoUrl(storagePath: string): string {
+// The bucket is private: URLs must be signed. 8h covers a full field day;
+// fresh URLs are created on every load.
+const SIGNED_URL_TTL_SECONDS = 60 * 60 * 8;
+const MAX_PHOTO_BYTES = 10 * 1024 * 1024;
+
+export async function getInspectionPhotoUrl(storagePath: string): Promise<string> {
   if (!storagePath) return '';
   if (isLegacyPhotoUri(storagePath)) return storagePath;
-  const { data } = supabase.storage.from(INSPECTION_PHOTOS_BUCKET).getPublicUrl(storagePath);
-  return data.publicUrl;
+  const { data, error } = await supabase.storage
+    .from(INSPECTION_PHOTOS_BUCKET)
+    .createSignedUrl(storagePath, SIGNED_URL_TTL_SECONDS);
+  if (error) throw error;
+  return data.signedUrl;
 }
 
 export async function uploadInspectionPhoto(
@@ -170,6 +180,12 @@ export async function uploadInspectionPhoto(
   // Works for data:, file:, http(s):, blob: — fetch handles them all in RN/web.
   const response = await fetch(localUri);
   const blob = await response.blob();
+  if (!contentType.startsWith('image/')) {
+    throw new Error(`Tipo de arquivo não permitido: ${contentType}`);
+  }
+  if (blob.size > MAX_PHOTO_BYTES) {
+    throw new Error('Foto excede o tamanho máximo de 10 MB.');
+  }
   const { error } = await supabase.storage
     .from(INSPECTION_PHOTOS_BUCKET)
     .upload(destinationPath, blob, { contentType, upsert: true });
@@ -182,7 +198,7 @@ export async function deleteInspectionPhotoObject(storagePath: string): Promise<
   await supabase.storage.from(INSPECTION_PHOTOS_BUCKET).remove([storagePath]);
 }
 
-function mapPhoto(row: Record<string, unknown>): InspectionPhoto {
+function mapPhoto(row: Record<string, unknown>, signedUrls: Map<string, string>): InspectionPhoto {
   const storagePath = (row.storage_path as string) ?? '';
   return {
     id: row.id as string,
@@ -191,7 +207,7 @@ function mapPhoto(row: Record<string, unknown>): InspectionPhoto {
     itemId: (row.item_id as string) || (row.service_id as string),
     serviceId: row.service_id as string,
     service: row.service as string,
-    uri: getInspectionPhotoUrl(storagePath),
+    uri: isLegacyPhotoUri(storagePath) ? storagePath : (signedUrls.get(storagePath) ?? ''),
     storagePath: isLegacyPhotoUri(storagePath) ? '' : storagePath,
     fileName: row.file_name as string,
     createdAt: row.created_at as string,
@@ -216,7 +232,9 @@ function mapServiceStage(row: Record<string, unknown>): ServiceStage {
     travaLiberacao: row.trava_liberacao as boolean,
     ativo: row.ativo as boolean,
     servicosDependentes: (row.servicos_dependentes as string[]) ?? [],
-    area: (row.area as string) ?? 'Interior',
+    subEtapas: (row.sub_etapas as string[]) ?? [],
+    // Catalog stages no longer carry an area (assigned per-apartment instead).
+    area: (row.area as string) ?? '',
     observacao: (row.observacao as string) ?? '',
     dataInicio: (row.data_inicio as string | null) ?? '',
     dataFim: (row.data_fim as string | null) ?? '',
@@ -250,6 +268,7 @@ export async function fetchApartments(): Promise<Apartment[]> {
     .from('apartments')
     .select('*, checklist_items(*)')
     .eq('obra_id', OBRA_ID)
+    .is('checklist_items.deleted_at', null)
     .order('number');
   if (error) throw error;
   return (data ?? []).map(mapApartment);
@@ -260,10 +279,11 @@ export async function updateApartmentStats(
   progress: number,
   status: ApartmentStatus,
 ): Promise<void> {
-  await supabase
+  const { error } = await supabase
     .from('apartments')
     .update({ progress, status, last_inspection: new Date().toISOString().split('T')[0] })
     .eq('id', apartmentId);
+  if (error) throw error;
 }
 
 // ─── Checklist ────────────────────────────────────────────────────────────────
@@ -273,6 +293,7 @@ export async function loadChecklist(apartmentId: string): Promise<(ChecklistItem
     .from('checklist_items')
     .select('*')
     .eq('apartment_id', apartmentId)
+    .is('deleted_at', null)
     .order('sort_order');
   if (error) throw error;
   return (data ?? []).map(mapChecklistItem);
@@ -281,13 +302,14 @@ export async function loadChecklist(apartmentId: string): Promise<(ChecklistItem
 export async function upsertChecklistItem(
   item: ChecklistItem & ScheduleFields & { apartmentId: string },
 ): Promise<void> {
-  await supabase.from('checklist_items').upsert({
+  const { error } = await supabase.from('checklist_items').upsert({
     id: item.id,
     obra_id: OBRA_ID,
     apartment_id: item.apartmentId,
     label: item.label,
     state: item.state,
     comment: item.comment ?? '',
+    emergency: item.emergency ?? '',
     planned_start: toIsoDate(item.plannedStart),
     planned_end: toIsoDate(item.plannedEnd),
     actual_start: toIsoDate(item.actualStart),
@@ -295,10 +317,15 @@ export async function upsertChecklistItem(
     area: item.area ?? 'Interior',
     is_extra: item.isExtra ?? false,
   });
+  if (error) throw error;
 }
 
 export async function deleteChecklistItem(itemId: string): Promise<void> {
-  await supabase.from('checklist_items').delete().eq('id', itemId);
+  const { error } = await supabase
+    .from('checklist_items')
+    .update({ deleted_at: new Date().toISOString() })
+    .eq('id', itemId);
+  if (error) throw error;
 }
 
 // ─── Measurements ─────────────────────────────────────────────────────────────
@@ -309,6 +336,7 @@ export async function loadMeasurements(apartmentId: string): Promise<Measurement
     .select('*')
     .eq('apartment_id', apartmentId)
     .eq('obra_id', OBRA_ID)
+    .is('deleted_at', null)
     .order('created_at', { ascending: false });
   if (error) throw error;
   return (data ?? []).map(mapMeasurement);
@@ -319,6 +347,7 @@ export async function loadAllMeasurements(): Promise<Measurement[]> {
     .from('measurements')
     .select('*')
     .eq('obra_id', OBRA_ID)
+    .is('deleted_at', null)
     .order('created_at', { ascending: false });
   if (error) throw error;
   return (data ?? []).map(mapMeasurement);
@@ -326,7 +355,7 @@ export async function loadAllMeasurements(): Promise<Measurement[]> {
 
 export async function saveMeasurement(m: Measurement): Promise<void> {
   const apartment = m.apartmentId;
-  await supabase.from('measurements').upsert({
+  const { error } = await supabase.from('measurements').upsert({
     id: m.id,
     obra_id: m.obraId ?? OBRA_ID,
     tower_id: m.towerId ?? null,
@@ -350,10 +379,15 @@ export async function saveMeasurement(m: Measurement): Promise<void> {
     launched_at: m.launchedAt ?? null,
     approved_at: m.approvedAt ?? null,
   });
+  if (error) throw error;
 }
 
 export async function deleteMeasurement(id: string): Promise<void> {
-  await supabase.from('measurements').delete().eq('id', id);
+  const { error } = await supabase
+    .from('measurements')
+    .update({ deleted_at: new Date().toISOString() })
+    .eq('id', id);
+  if (error) throw error;
 }
 
 // ─── Inspection visits ────────────────────────────────────────────────────────
@@ -370,7 +404,7 @@ export async function loadVisits(apartmentId: string): Promise<InspectionVisit[]
 }
 
 export async function saveVisit(visit: InspectionVisit): Promise<void> {
-  await supabase.from('inspection_visits').upsert({
+  const { error } = await supabase.from('inspection_visits').upsert({
     id: visit.id,
     obra_id: OBRA_ID,
     apartment_id: visit.apartmentId,
@@ -390,6 +424,7 @@ export async function saveVisit(visit: InspectionVisit): Promise<void> {
     finalized: visit.finalized,
     finalized_at: visit.finalizedAt ?? null,
   });
+  if (error) throw error;
 }
 
 // ─── Inspection photos ────────────────────────────────────────────────────────
@@ -400,13 +435,31 @@ export async function loadPhotos(apartmentId: string): Promise<InspectionPhoto[]
     .select('*')
     .eq('apartment_id', apartmentId)
     .eq('obra_id', OBRA_ID)
+    .is('deleted_at', null)
     .order('created_at', { ascending: false });
   if (error) throw error;
-  return (data ?? []).map(mapPhoto);
+  const rows = data ?? [];
+
+  // Batch-sign the storage paths (legacy inline URIs are used as-is).
+  const storagePaths = rows
+    .map((row) => (row.storage_path as string) ?? '')
+    .filter((path) => path && !isLegacyPhotoUri(path));
+  const signedUrls = new Map<string, string>();
+  if (storagePaths.length) {
+    const { data: signed, error: signError } = await supabase.storage
+      .from(INSPECTION_PHOTOS_BUCKET)
+      .createSignedUrls(storagePaths, SIGNED_URL_TTL_SECONDS);
+    if (signError) throw signError;
+    for (const entry of signed ?? []) {
+      if (entry.path && entry.signedUrl) signedUrls.set(entry.path, entry.signedUrl);
+    }
+  }
+
+  return rows.map((row) => mapPhoto(row, signedUrls));
 }
 
 export async function savePhoto(photo: InspectionPhoto): Promise<void> {
-  await supabase.from('inspection_photos').upsert({
+  const { error } = await supabase.from('inspection_photos').upsert({
     id: photo.id,
     obra_id: OBRA_ID,
     tower_id: photo.towerId,
@@ -419,11 +472,17 @@ export async function savePhoto(photo: InspectionPhoto): Promise<void> {
     comment: photo.comment,
     visit_id: photo.visitId ?? null,
   });
+  if (error) throw error;
 }
 
-export async function deletePhoto(id: string, storagePath?: string): Promise<void> {
-  if (storagePath) await deleteInspectionPhotoObject(storagePath);
-  await supabase.from('inspection_photos').delete().eq('id', id);
+// Soft delete: the Storage object is kept so the photo can be restored from
+// the soft-deleted row. A future purge job can remove orphaned objects.
+export async function deletePhoto(id: string, _storagePath?: string): Promise<void> {
+  const { error } = await supabase
+    .from('inspection_photos')
+    .update({ deleted_at: new Date().toISOString() })
+    .eq('id', id);
+  if (error) throw error;
 }
 
 // ─── Service stages ───────────────────────────────────────────────────────────
@@ -453,12 +512,14 @@ export async function saveServiceStages(stages: ServiceStage[]): Promise<void> {
     trava_liberacao: stage.travaLiberacao,
     ativo: stage.ativo,
     servicos_dependentes: stage.servicosDependentes,
-    area: stage.area ?? 'Interior',
+    sub_etapas: stage.subEtapas ?? [],
+    area: stage.area ?? '',
     observacao: stage.observacao,
     data_inicio: stage.dataInicio || null,
     data_fim: stage.dataFim || null,
   }));
-  await supabase.from('service_stages').upsert(rows);
+  const { error } = await supabase.from('service_stages').upsert(rows);
+  if (error) throw error;
 }
 
 export async function deleteServiceStage(id: string): Promise<void> {
@@ -466,17 +527,20 @@ export async function deleteServiceStage(id: string): Promise<void> {
 }
 
 export async function propagateStageToApartments(stage: ServiceStage): Promise<void> {
-  const { data: apts } = await supabase
+  const { data: apts, error: aptsError } = await supabase
     .from('apartments')
     .select('id')
     .eq('obra_id', OBRA_ID);
+  if (aptsError) throw aptsError;
   if (!apts?.length) return;
 
-  const { data: existing } = await supabase
+  const { data: existing, error: existingError } = await supabase
     .from('checklist_items')
     .select('apartment_id')
     .eq('obra_id', OBRA_ID)
-    .eq('label', stage.nome);
+    .eq('label', stage.nome)
+    .is('deleted_at', null);
+  if (existingError) throw existingError;
 
   const existingAptIds = new Set((existing ?? []).map((r) => r.apartment_id as string));
   const newRows = apts
@@ -489,7 +553,9 @@ export async function propagateStageToApartments(stage: ServiceStage): Promise<v
       state: 'pending',
       comment: '',
       sort_order: stage.ordemExecucao,
-      area: stage.area ?? 'Interior',
+      // Catalog area may be empty now; default propagated items to Interior so
+      // they remain visible under an area tab (users can move them later).
+      area: stage.area || 'Interior',
       is_extra: false,
     }));
 
@@ -504,12 +570,14 @@ export async function propagateStageToApartments(stage: ServiceStage): Promise<v
 
 export async function addStageToApartments(stage: ServiceStage, apartmentIds: string[]): Promise<void> {
   if (!apartmentIds.length) return;
-  const { data: existing } = await supabase
+  const { data: existing, error: existingError } = await supabase
     .from('checklist_items')
     .select('apartment_id')
     .eq('obra_id', OBRA_ID)
     .eq('label', stage.nome)
+    .is('deleted_at', null)
     .in('apartment_id', apartmentIds);
+  if (existingError) throw existingError;
   const existingIds = new Set((existing ?? []).map((r) => r.apartment_id as string));
   const missing = apartmentIds.filter((id) => !existingIds.has(id));
   if (!missing.length) return;
@@ -521,7 +589,7 @@ export async function addStageToApartments(stage: ServiceStage, apartmentIds: st
     state: 'pending',
     comment: '',
     sort_order: stage.ordemExecucao,
-    area: stage.area ?? 'Interior',
+    area: stage.area || 'Interior',
     is_extra: false,
   }));
   const BATCH = 200;
@@ -537,9 +605,10 @@ export async function removeStageFromApartments(stageName: string, apartmentIds:
   for (let i = 0; i < apartmentIds.length; i += BATCH) {
     const { error } = await supabase
       .from('checklist_items')
-      .delete()
+      .update({ deleted_at: new Date().toISOString() })
       .eq('obra_id', OBRA_ID)
       .eq('label', stageName)
+      .is('deleted_at', null)
       .in('apartment_id', apartmentIds.slice(i, i + BATCH));
     if (error) throw error;
   }
@@ -714,12 +783,13 @@ export async function setStepAssignments(
   itemId: string,
   workerIds: string[],
 ): Promise<void> {
-  await supabase
+  const { error: deleteError } = await supabase
     .from('step_assignments')
     .delete()
     .eq('obra_id', OBRA_ID)
     .eq('apartment_id', apartmentId)
     .eq('item_id', itemId);
+  if (deleteError) throw deleteError;
   if (workerIds.length === 0) return;
   const rows = workerIds.map((workerId) => ({
     id: crypto.randomUUID(),

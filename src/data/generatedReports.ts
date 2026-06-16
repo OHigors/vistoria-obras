@@ -213,7 +213,13 @@ const getVisitVariationLabel = (variation: number) => {
 };
 
 const escapeCsvValue = (value: string | number) => {
-  const text = String(value);
+  let text = String(value);
+
+  // Neutralize spreadsheet formula injection: user-entered text starting with
+  // =, +, -, @ or tab would execute as a formula when opened in Excel.
+  if (typeof value === 'string' && /^[=+\-@\t\r]/.test(text)) {
+    text = `'${text}`;
+  }
 
   if (text.includes('"') || text.includes(';') || text.includes('\n') || text.includes('\r')) {
     return `"${text.replaceAll('"', '""')}"`;
@@ -393,7 +399,7 @@ export const createGeneratedReport = (
     const photoCards = photos.length
       ? `${visiblePdfPhotos.map((photo) => `
           <figure class="photo-card">
-            <img src="${photo.uri}" alt="${escapeHtml(photo.service)}" />
+            <img src="${escapeHtml(photo.uri)}" alt="${escapeHtml(photo.service)}" />
             <figcaption>
               <strong>${escapeHtml(photo.service)}</strong><br />
               ${escapeHtml(formatReportDateTime(photo.dataHora ?? photo.createdAt))}<br />
