@@ -36,7 +36,8 @@ import { categoryOrderIndex, defaultServiceDependencies, getGroupStepChildren, i
 import type { Worker } from '@/src/data/serviceWorkers';
 import { checklistConfig, getProgressMapStyle, statusConfig } from '@/src/ui/status';
 
-const checklistOptions: ChecklistState[] = ['ok', 'pending', 'partial', 'notApplicable'];
+// Ordem do ciclo de progresso (Não iniciado → Em andamento → Concluído → N/A).
+const progressOrder: ChecklistState[] = ['pending', 'partial', 'ok', 'notApplicable'];
 
 const CATEGORY_PALETTE = ['#2563EB', '#7C3AED', '#0891B2', '#16A34A', '#D97706', '#DB2777', '#0EA5E9', '#65A30D', '#B45309', '#9333EA'];
 const categoryColor = (cat: string) => {
@@ -45,7 +46,7 @@ const categoryColor = (cat: string) => {
   return CATEGORY_PALETTE[hash % CATEGORY_PALETTE.length];
 };
 const criticalityOptions = ['Baixa', 'Média', 'Alta', 'Crítica'] as const;
-const detailTabs = ['Resumo', 'Checklist', 'Pendências', 'Fotos', 'Serviços', 'Cronograma', 'Medições', 'Histórico'] as const;
+const detailTabs = ['Resumo', 'Checklist', 'Em aberto', 'Fotos', 'Serviços', 'Cronograma', 'Medições', 'Histórico'] as const;
 
 type DetailTab = (typeof detailTabs)[number];
 type IssueCriticality = (typeof criticalityOptions)[number];
@@ -94,6 +95,27 @@ const getInitialChecklist = (items?: ChecklistItem[]): EditableChecklistItem[] =
     issueCriticality: item.state === 'pending' || item.state === 'partial' ? 'Média' : undefined,
     issueComment: '',
   }));
+
+const todayBr = () => {
+  const d = new Date();
+  return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+};
+
+// Carimba as datas de execução conforme a transição de progresso. A 1ª saída de
+// "Não iniciado" (pending) inicia o realizado; "Concluído" (ok) fecha; reabrir
+// limpa o fim; voltar para "Não iniciado"/"Não se aplica" zera as duas.
+const stampActuals = (
+  prev: EditableChecklistItem,
+  newState: ChecklistState,
+): Pick<ScheduleFields, 'actualStart' | 'actualEnd'> => {
+  if (newState === 'pending' || newState === 'notApplicable') {
+    return { actualStart: undefined, actualEnd: undefined };
+  }
+  return {
+    actualStart: prev.actualStart ?? todayBr(),
+    actualEnd: newState === 'ok' ? (prev.state === 'ok' ? prev.actualEnd : todayBr()) : undefined,
+  };
+};
 
 const formatPhotoDateTime = (value: string) =>
   new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(value));
@@ -175,6 +197,7 @@ export default function ApartmentDetailScreen() {
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [assignments, setAssignments] = useState<Record<string, string[]>>({});
   const [workerPickerItem, setWorkerPickerItem] = useState<EditableChecklistItem | null>(null);
+  const [statusPickerId, setStatusPickerId] = useState<string | null>(null);
   const [draftWorkerIds, setDraftWorkerIds] = useState<string[]>([]);
   const [workerSearch, setWorkerSearch] = useState('');
   const [savingAssignment, setSavingAssignment] = useState(false);
@@ -463,13 +486,23 @@ export default function ApartmentDetailScreen() {
       ? { ...i, state, issueCriticality: state === 'pending' || state === 'partial' ? i.issueCriticality ?? 'Média' : undefined, issueComment: state === 'pending' || state === 'partial' ? i.issueComment ?? '' : '' }
       : i);
     // Re-derive group step parent states whenever a sub-step changes.
-    const next = applyGroupStepStates(baseNext, groupStepChildren);
+    const grouped = applyGroupStepStates(baseNext, groupStepChildren);
+    // Stamp execution dates for every item whose status changed (the link to the cronograma).
+    const next = grouped.map((item) => {
+      const prevItem = prev.find((p) => p.id === item.id);
+      if (!prevItem || prevItem.state === item.state) return item;
+      return { ...item, ...stampActuals(prevItem, item.state) };
+    });
     setChecklist(next);
     if (apartamentoId) {
       // Queue every item whose state changed (direct edit + any auto-updated parent).
       for (const item of next) {
         const prevItem = prev.find((p) => p.id === item.id);
-        if (prevItem?.state !== item.state) pendingRef.current.checklistItems.set(item.id, item);
+        if (prevItem?.state !== item.state) {
+          pendingRef.current.checklistItems.set(item.id, item);
+          // Option C: registra a transição (não bloqueia se a tabela ainda não existir).
+          dbApi.logStatusEvent({ apartmentId: apartamentoId, itemId: item.id, fromState: prevItem?.state, toState: item.state }).catch(() => {});
+        }
       }
       const np = calculateProgress(next);
       const ns = calculateApartmentStatus(next, np);
@@ -907,7 +940,7 @@ export default function ApartmentDetailScreen() {
   const TAB_ICONS: Record<DetailTab, string> = {
     Resumo: 'view-dashboard-outline',
     Checklist: 'checkbox-marked-outline',
-    Pendências: 'alert-circle-outline',
+    'Em aberto': 'alert-circle-outline',
     Fotos: 'camera-outline',
     Serviços: 'hammer-wrench',
     Cronograma: 'calendar-clock',
@@ -984,7 +1017,7 @@ export default function ApartmentDetailScreen() {
         {/* KPI ROW */}
         <View style={s.kpiRow}>
           {[
-            { icon: 'clipboard-list-outline', value: pendingItems.length, label: 'Pendências', color: '#4a5565', borderColor: undefined },
+            { icon: 'clipboard-list-outline', value: pendingItems.length, label: 'Em aberto', color: '#4a5565', borderColor: undefined },
             { icon: 'lock-outline', value: lockedStepsCount, label: 'Travados', color: '#B45309' },
             { icon: 'camera-outline', value: photos.length, label: 'Fotos', color: '#2563EB', borderColor: undefined },
             { icon: 'ruler', value: measurements.length, label: 'Medições', color: '#7C3AED', borderColor: undefined },
@@ -1106,11 +1139,11 @@ export default function ApartmentDetailScreen() {
             {pendingItems.length === 0 ? (
               <View style={[s.card, s.cardCentered]}>
                 <MaterialCommunityIcons name="check-circle" size={32} color="#047857" />
-                <Text style={s.allClear}>Nenhuma pendência ativa</Text>
+                <Text style={s.allClear}>Nada em aberto</Text>
               </View>
             ) : (
               <View style={s.card}>
-                <Text style={s.cardTitle}>Pendências ativas ({pendingItems.length})</Text>
+                <Text style={s.cardTitle}>Itens em aberto ({pendingItems.length})</Text>
                 {pendingItems.slice(0, 5).map((item) => {
                   const cfg = checklistConfig[item.state];
                   const critColor = item.issueCriticality === 'Crítica' ? '#B91C1C' : item.issueCriticality === 'Alta' ? '#B45309' : '#64748B';
@@ -1122,7 +1155,7 @@ export default function ApartmentDetailScreen() {
                     </View>
                   );
                 })}
-                {pendingItems.length > 5 && <Text style={s.moreText}>+{pendingItems.length - 5} na aba Pendências</Text>}
+                {pendingItems.length > 5 && <Text style={s.moreText}>+{pendingItems.length - 5} na aba Em aberto</Text>}
               </View>
             )}
           </>
@@ -1347,20 +1380,40 @@ export default function ApartmentDetailScreen() {
                     </View>
                   ) : (
                     <>
-                      <View style={s.stateRow}>
-                        {checklistOptions.map((opt) => {
-                          const oc = checklistConfig[opt];
-                          const sel = item.state === opt;
+                      <View>
+                        {(() => {
+                          const cur = checklistConfig[item.state];
+                          const open = statusPickerId === item.id;
                           return (
                             <Pressable
-                              key={opt}
-                              onPress={() => updateItemStatus(item.id, opt)}
-                              testID={`checklist-${item.id}-${opt}`}
-                              style={[s.stateBtn, sel && { backgroundColor: oc.background, borderColor: oc.color }]}>
-                              <Text style={[s.stateBtnText, sel && { color: oc.color, fontWeight: '800' as const }]}>{oc.label}</Text>
+                              onPress={() => setStatusPickerId(open ? null : item.id)}
+                              testID={`status-${item.id}`}
+                              style={[s.statusSelect, open && s.statusSelectOpen]}>
+                              <View style={[s.statusDot, { backgroundColor: cur.color }]} />
+                              <Text style={[s.statusSelectText, { color: cur.color }]}>{cur.label}</Text>
+                              <MaterialCommunityIcons name={open ? 'chevron-up' : 'chevron-down'} size={18} color="#94A3B8" />
                             </Pressable>
                           );
-                        })}
+                        })()}
+                        {statusPickerId === item.id && (
+                          <View style={s.statusMenu}>
+                            {progressOrder.map((opt) => {
+                              const oc = checklistConfig[opt];
+                              const sel = item.state === opt;
+                              return (
+                                <Pressable
+                                  key={opt}
+                                  onPress={() => { updateItemStatus(item.id, opt); setStatusPickerId(null); }}
+                                  testID={`checklist-${item.id}-${opt}`}
+                                  style={[s.statusMenuRow, sel && { backgroundColor: oc.background }]}>
+                                  <View style={[s.statusDot, { backgroundColor: oc.color }]} />
+                                  <Text style={[s.statusMenuText, sel && { color: oc.color, fontWeight: '800' as const }]}>{oc.label}</Text>
+                                  {sel && <MaterialCommunityIcons name="check" size={16} color={oc.color} style={{ marginLeft: 'auto' }} />}
+                                </Pressable>
+                              );
+                            })}
+                          </View>
+                        )}
                       </View>
 
                       {item.emergency?.trim() && !expandedEmergencies[item.id] && (
@@ -1523,12 +1576,12 @@ export default function ApartmentDetailScreen() {
         )}
 
         {/* ── PENDÊNCIAS ── */}
-        {activeTab === 'Pendências' && (
+        {activeTab === 'Em aberto' && (
           <>
             {pendingItems.length === 0 ? (
               <View style={[s.card, s.cardCentered]}>
                 <MaterialCommunityIcons name="check-circle" size={32} color="#047857" />
-                <Text style={s.allClear}>Sem pendências ativas</Text>
+                <Text style={s.allClear}>Nada em aberto</Text>
               </View>
             ) : (
               pendingItems.map((item) => {
@@ -1556,7 +1609,7 @@ export default function ApartmentDetailScreen() {
 
             {blockedServiceGroups.length > 0 && (
               <>
-                <Text style={s.sectionLabel}>Serviços travados por pendências</Text>
+                <Text style={s.sectionLabel}>Serviços travados por itens em aberto</Text>
                 {blockedServiceGroups.map((g) => (
                   <View key={g.pendingService} style={s.blockedCard}>
                     <View style={s.blockedRow}>
@@ -1876,7 +1929,7 @@ export default function ApartmentDetailScreen() {
                     <Text style={s.visitDate}>{formatPhotoDateTime(visit.date)}</Text>
                     <Text style={s.visitResp}>{visit.responsible}</Text>
                     <Text style={s.visitMeta}>
-                      {visit.progressBefore}% → {visit.progressAfter}% · {visit.counts.pending + visit.counts.partial} pendência(s)
+                      {visit.progressBefore}% → {visit.progressAfter}% · {visit.counts.pending + visit.counts.partial} em aberto
                     </Text>
                   </View>
                 </View>
@@ -1993,9 +2046,9 @@ export default function ApartmentDetailScreen() {
                     ))}
                   </View>}
 
-                <Text style={s.visitModalSectionTitle}>Pendências geradas</Text>
+                <Text style={s.visitModalSectionTitle}>Itens em aberto gerados</Text>
                 {selectedVisit.issueItemIds.length === 0
-                  ? <Text style={s.visitModalEmpty}>Nenhuma pendência.</Text>
+                  ? <Text style={s.visitModalEmpty}>Nada em aberto.</Text>
                   : selectedVisit.issueItemIds.map((id) => <Text key={id} style={s.visitModalItem}>{checklist.find((i) => i.id === id)?.label ?? id}</Text>)}
 
                 {selectedVisit.generalNote ? <Text style={s.visitModalNote}>{selectedVisit.generalNote}</Text> : null}
@@ -2495,6 +2548,15 @@ const s = StyleSheet.create({
   roadmapCellLabel: { fontSize: 10, fontWeight: '700', textAlign: 'center', lineHeight: 13 },
   stateBtn: { flex: 1, alignItems: 'center', paddingVertical: 9, borderRadius: 8, borderWidth: 1, borderColor: '#E2E8F0', backgroundColor: '#F8FAFC' },
   stateBtnText: { color: '#64748B', fontSize: 11, fontWeight: '700' },
+
+  // status dropdown (progresso da etapa)
+  statusSelect: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 10, paddingHorizontal: 12, borderRadius: 10, borderWidth: 1, borderColor: '#E2E8F0', backgroundColor: '#F8FAFC' },
+  statusSelectOpen: { borderColor: '#CBD5E1', backgroundColor: '#FFFFFF' },
+  statusSelectText: { flex: 1, fontSize: 13, fontWeight: '800' },
+  statusDot: { width: 10, height: 10, borderRadius: 5 },
+  statusMenu: { marginTop: 6, borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 10, backgroundColor: '#FFFFFF', overflow: 'hidden' },
+  statusMenuRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 11, paddingHorizontal: 12, borderBottomWidth: 1, borderBottomColor: '#F1F5F9' },
+  statusMenuText: { color: '#475569', fontSize: 13, fontWeight: '600' },
   issueBox: { backgroundColor: '#FFFBEB', borderColor: '#FDE68A', borderRadius: 10, borderWidth: 1, padding: 12, gap: 10 },
   issueBoxTitle: { color: '#92400E', fontSize: 12, fontWeight: '800' },
   critRow: { flexDirection: 'row', gap: 6, flexWrap: 'wrap' },

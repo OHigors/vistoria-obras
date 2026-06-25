@@ -74,23 +74,25 @@ export const checklistConfig: Record<
   ChecklistState,
   { label: string; color: string; background: string; symbol: string }
 > = {
+  // Progresso da etapa. Os valores armazenados (ok/partial/pending/notApplicable)
+  // são preservados; só os rótulos mudam para a semântica de progresso.
   ok: {
-    label: 'OK',
+    label: 'Concluído',
     color: '#047857',
     background: '#ECFDF5',
-    symbol: 'Ok',
+    symbol: '✓',
   },
   pending: {
-    label: 'Pendente',
-    color: '#475569',
+    label: 'Não iniciado',
+    color: '#64748B',
     background: '#F1F5F9',
-    symbol: '-',
+    symbol: '○',
   },
   partial: {
-    label: 'Parcial',
+    label: 'Em andamento',
     color: '#B45309',
     background: '#FFFBEB',
-    symbol: '-',
+    symbol: '◐',
   },
   notApplicable: {
     label: 'Não se aplica',

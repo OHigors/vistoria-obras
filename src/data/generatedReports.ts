@@ -325,7 +325,7 @@ export const createGeneratedReport = (
 
     if (options.includeIssues) {
       pendingItems.forEach((item) => {
-        csvRows.push(['pendencia', project.name, towerLabel, apartment.number, item.label, item.state === 'pending' ? 'Pendente' : 'Parcial', 'Média', item.comment ?? 'Pendência de vistoria', (getBlockedServiceGroups([item])[0]?.blockedServices ?? []).join(', ') || emptyBlockValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, filters.date || getToday()]);
+        csvRows.push(['pendencia', project.name, towerLabel, apartment.number, item.label, item.state === 'pending' ? 'Não iniciado' : 'Em andamento', 'Média', item.comment ?? 'Pendência de vistoria', (getBlockedServiceGroups([item])[0]?.blockedServices ?? []).join(', ') || emptyBlockValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, filters.date || getToday()]);
       });
     }
 
@@ -362,7 +362,7 @@ export const createGeneratedReport = (
       return [
         item.label,
         issue.issueComment || item.comment || 'Pendência de vistoria',
-        item.state === 'pending' ? 'Pendente' : 'Parcial',
+        item.state === 'pending' ? 'Não iniciado' : 'Em andamento',
         issue.issueCriticality || 'Média',
         (getBlockedServiceGroups([item])[0]?.blockedServices ?? []).join(', ') || emptyBlockValue,
         item.comment || emptyValue,

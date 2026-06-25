@@ -41,7 +41,7 @@ const reportKindHints: Record<ReportKind, string> = {
 const contentOptions: { field: keyof ReportContentOptions; label: string }[] = [
   { field: 'includeSummary', label: 'Resumo' },
   { field: 'includeChecklist', label: 'Checklist' },
-  { field: 'includeIssues', label: 'Pendências' },
+  { field: 'includeIssues', label: 'Em aberto' },
   { field: 'includePhotos', label: 'Fotos' },
   { field: 'includeBlocked', label: 'Serviços travados' },
   { field: 'includeSchedule', label: 'Cronograma' },

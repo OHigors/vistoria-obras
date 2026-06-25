@@ -7,7 +7,7 @@ export type BlockedServiceGroup = {
   pendingService: string;
   blockedServices: string[];
   impact: BlockImpact;
-  currentStatus: 'Pendente' | 'Parcial';
+  currentStatus: 'Não iniciado' | 'Em andamento';
 };
 
 export type BottleneckSummary = {
@@ -30,7 +30,7 @@ const isBlockingChecklistItem = (item: ChecklistItem) =>
   item.state === 'pending' || item.state === 'partial';
 
 const getCurrentStatusLabel = (state: ChecklistItem['state']): BlockedServiceGroup['currentStatus'] =>
-  state === 'pending' ? 'Pendente' : 'Parcial';
+  state === 'pending' ? 'Não iniciado' : 'Em andamento';
 
 const classifyImpact = (blockedServices: string[]): BlockImpact => {
   const blocksFinalRelease = blockedServices.some(

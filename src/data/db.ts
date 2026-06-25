@@ -759,6 +759,24 @@ export async function deleteWorker(id: string): Promise<void> {
   if (error) throw error;
 }
 
+// ─── Checklist status events (histórico de progresso — Option C) ───────────────
+
+export async function logStatusEvent(e: {
+  apartmentId: string;
+  itemId: string;
+  fromState?: ChecklistState | null;
+  toState: ChecklistState;
+}): Promise<void> {
+  const { error } = await supabase.from('checklist_status_events').insert({
+    obra_id: OBRA_ID,
+    apartment_id: e.apartmentId,
+    item_id: e.itemId,
+    from_state: e.fromState ?? null,
+    to_state: e.toState,
+  });
+  if (error) throw error;
+}
+
 // ─── Step assignments ─────────────────────────────────────────────────────────
 
 export async function loadStepAssignments(apartmentId: string): Promise<Record<string, string[]>> {

@@ -313,7 +313,7 @@ export default function GeneralReportScreen() {
           towerLabel: getTowerLabel(apartment.towerId),
           service: item.label,
           description: item.issueComment || item.comment || 'PendÃªncia de vistoria',
-          status: item.state === 'pending' ? 'Pendente' : 'Parcial',
+          status: item.state === 'pending' ? 'Não iniciado' : 'Em andamento',
           criticality: item.issueCriticality ?? 'MÃ©dia',
           blocksServices: (getBlockedServiceGroups([item])[0]?.blockedServices ?? []).join(', ') || 'nÃ£o trava',
           photoCount: photos.filter((photo) => photo.itemId === item.id || photo.serviceId === item.id).length,
