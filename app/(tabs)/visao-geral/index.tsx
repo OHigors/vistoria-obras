@@ -105,7 +105,7 @@ export default function VisaoGeralScreen() {
       <View style={[s.section, s.sectionGreen]}>
         <Text style={[s.sectionTitle, { color: '#047857' }]}>Relatórios</Text>
         {[
-          { href: '/visao-geral/relatorios/relatorio-geral', icon: 'table-large', label: 'Relatório Geral', desc: 'Tabela completa: apartamentos, pendências, cronograma, medições e visitas.' },
+          { href: '/visao-geral/relatorios/relatorio-geral', icon: 'table-large', label: 'Relatório Geral', desc: 'Tabela completa: apartamentos, itens em aberto, cronograma, medições e visitas.' },
           { href: '/visao-geral/relatorios/gerar-relatorio', icon: 'file-export-outline', label: 'Gerar Relatório', desc: 'Escolha tipo, filtros e seções. Exporte em CSV ou PDF.' },
         ].map((r, i) => (
           <Pressable key={r.href} onPress={() => router.push(r.href as any)} style={[s.reportCard, i > 0 && s.activityBorder]}>

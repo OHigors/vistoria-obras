@@ -25,7 +25,7 @@ const C = {
 const viewModes = ['Mapa', 'Lista'] as const;
 const filterOptions = [
   'Todos', 'Excelente', 'Bom', 'Atenção', 'Crítico',
-  'Com pendência', 'Com atraso', 'Travado',
+  'Em aberto', 'Com atraso', 'Travado',
 ] as const;
 
 type ViewMode      = (typeof viewModes)[number];
@@ -78,7 +78,7 @@ const STATUS_FILTER_MAP: Record<FilterOption, (s: ApartmentSummary) => boolean> 
   Bom:            (s) => statusConfig[s.statusKey].label === 'Bom',
   Atenção:        (s) => statusConfig[s.statusKey].label === 'Atenção',
   Crítico:        (s) => statusConfig[s.statusKey].label === 'Crítico',
-  'Com pendência':(s) => s.pendingCount > 0,
+  'Em aberto':(s) => s.pendingCount > 0,
   'Com atraso':   (s) => s.maxDelayDays > 0,
   Travado:        (s) => s.blockedCount > 0,
 };
@@ -330,7 +330,7 @@ export default function TowerApartmentsScreen() {
           {[
             { icon: 'check-circle-outline',  value: `${towerStats.avgProgress}%`, label: 'Avanço',      color: '#2563EB', bg: '#EFF6FF' },
             { icon: 'close-circle-outline',   value: towerStats.criticalCount,     label: 'Críticos',    color: towerStats.criticalCount > 0  ? '#B91C1C' : '#047857', bg: towerStats.criticalCount > 0  ? '#FEE2E2' : '#D1FAE5' },
-            { icon: 'alert-outline',          value: towerStats.totalPending,      label: 'Pendências',  color: towerStats.totalPending > 0   ? '#B45309' : '#047857', bg: towerStats.totalPending > 0   ? '#FEF3C7' : '#D1FAE5' },
+            { icon: 'alert-outline',          value: towerStats.totalPending,      label: 'Em aberto',  color: towerStats.totalPending > 0   ? '#B45309' : '#047857', bg: towerStats.totalPending > 0   ? '#FEF3C7' : '#D1FAE5' },
             { icon: 'lock-outline',           value: towerStats.totalBlocked,      label: 'Travados',    color: towerStats.totalBlocked > 0   ? '#7C3AED' : '#047857', bg: towerStats.totalBlocked > 0   ? '#EDE9FE' : '#D1FAE5' },
             { icon: 'note-text-outline',      value: towerStats.totalObservations, label: 'Observações', color: towerStats.totalObservations > 0 ? '#0891B2' : '#047857', bg: towerStats.totalObservations > 0 ? '#E0F2FE' : '#D1FAE5' },
           ].map((k) => (
@@ -403,12 +403,12 @@ export default function TowerApartmentsScreen() {
                     </View>
                     <View style={s.aptBar}><View style={[s.aptBarFill, { backgroundColor: pc, width: `${progress}%` as `${number}%` }]} /></View>
                     <View style={s.aptMetrics}>
-                      {pendingCount > 0    && <View style={s.metricPill}><MaterialCommunityIcons name="alert-circle-outline" size={11} color="#B45309" /><Text style={[s.metricPillText, { color: '#B45309' }]}>{`${pendingCount} pendência(s)`}</Text></View>}
+                      {pendingCount > 0    && <View style={s.metricPill}><MaterialCommunityIcons name="alert-circle-outline" size={11} color="#B45309" /><Text style={[s.metricPillText, { color: '#B45309' }]}>{`${pendingCount} em aberto`}</Text></View>}
                       {blockedCount > 0    && <View style={s.metricPill}><MaterialCommunityIcons name="lock-outline" size={11} color="#7C3AED" /><Text style={[s.metricPillText, { color: '#7C3AED' }]}>{`${blockedCount} travado(s)`}</Text></View>}
                       {observationCount > 0 && <View style={s.metricPill}><MaterialCommunityIcons name="note-text-outline" size={11} color="#0891B2" /><Text style={[s.metricPillText, { color: '#0891B2' }]}>{`${observationCount} obs.`}</Text></View>}
                       {maxDelayDays > 0    && <View style={s.metricPill}><MaterialCommunityIcons name="clock-alert-outline" size={11} color="#B91C1C" /><Text style={[s.metricPillText, { color: '#B91C1C' }]}>{`${maxDelayDays}d atraso`}</Text></View>}
                       {pendingCount === 0 && blockedCount === 0 && maxDelayDays === 0 && observationCount === 0 && (
-                        <View style={s.metricPill}><MaterialCommunityIcons name="check-circle-outline" size={11} color="#047857" /><Text style={[s.metricPillText, { color: '#047857' }]}>Sem pendências</Text></View>
+                        <View style={s.metricPill}><MaterialCommunityIcons name="check-circle-outline" size={11} color="#047857" /><Text style={[s.metricPillText, { color: '#047857' }]}>Nada em aberto</Text></View>
                       )}
                     </View>
                     <View style={s.aptCardFooter}>

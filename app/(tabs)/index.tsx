@@ -162,7 +162,7 @@ export default function DashboardScreen() {
     },
     {
       key: 'issues', icon: 'clipboard-list-outline', color: '#4338CA', bg: '#EEF2FF',
-      value: ops.openIssues, label: 'Pendências',
+      value: ops.openIssues, label: 'Em aberto',
       sub: ops.unitsWithIssues > 0 ? `em ${ops.unitsWithIssues} unidade(s)` : 'Nenhuma aberta',
     },
     {

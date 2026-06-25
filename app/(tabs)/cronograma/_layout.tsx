@@ -23,8 +23,8 @@ export default function CronogramaLayout() {
         contentStyle: { backgroundColor: '#F8FAFC' },
       }}>
       <Stack.Screen name="index" options={{ headerShown: false }} />
+      <Stack.Screen name="obra" options={{ headerShown: false }} />
       <Stack.Screen name="diagnostico" options={{ headerShown: false }} />
-      <Stack.Screen name="pavimentos" options={{ headerShown: false }} />
       <Stack.Screen name="servicos-etapas" options={{ headerShown: false }} />
       <Stack.Screen name="catalogos" options={{ headerShown: false }} />
       <Stack.Screen name="medicoes" options={{ headerShown: false }} />
