@@ -11,12 +11,14 @@ import type { Apartment, ChecklistState } from '@/src/data/mockObras';
 import type { Worker } from '@/src/data/serviceWorkers';
 import { isValidBrDate, maskDateBr, type ScheduledChecklistItem } from '@/src/data/schedule';
 import {
-  buildEtapaSums,
-  buildGantt,
+  buildCategoryGantt,
+  buildPavimentoGantt,
   formatFull,
   formatShort,
+  getCategoryGroups,
   STATUS_COLORS,
   type CronogramaStatus,
+  type CronogramaTask,
 } from '@/src/data/mockCronograma';
 import { buildCronogramaFromData, getCronogramaStages } from '@/src/data/cronogramaReal';
 
@@ -43,8 +45,15 @@ const MS_DAY = 24 * 60 * 60 * 1000;
 const PROGRESS_STEPS = [0, 25, 50, 75, 100] as const;
 const WEEKDAYS = ['D', 'S', 'T', 'Q', 'Q', 'S', 'S'] as const;
 
-// Realizado "Por pavimento": verde concluído / âmbar em andamento / vermelho atrasado.
-const realColor = (status: CronogramaStatus) => (status === 'Atrasada' ? '#EF4444' : '#22C55E');
+// Jogo de cores do "Realizado", célula a célula:
+//   • âmbar  → tarefa em andamento (ainda não concluída e dentro do prazo)
+//   • verde  → dia realizado dentro do previsto (no prazo)
+//   • vermelho → dia que excedeu o fim previsto (atraso/dias a mais)
+const REAL_GREEN = '#22C55E';
+const REAL_AMBER = '#F59E0B';
+const REAL_RED = '#EF4444';
+const realCellColor = (t: CronogramaTask, dayIndex: number) =>
+  t.status === 'Em andamento' ? REAL_AMBER : dayIndex < t.endOffset ? REAL_GREEN : REAL_RED;
 
 // soma dias a uma data BR (DD/MM/YYYY) → nova data BR
 function addDaysToBr(br: string, days: number): string {
@@ -71,8 +80,9 @@ export default function CronogramaObraScreen() {
   const { apartments, towers, serviceStages, loading, refreshApartment, refreshData } = useObras();
 
   const [view, setView] = useState<MainView>('pavimento');
-  const [openAptId, setOpenAptId] = useState<string | null>(null);
+  const [breakdown, setBreakdown] = useState<{ title: string; sub: string; tasks: CronogramaTask[] } | null>(null);
   const [towerFilter, setTowerFilter] = useState<string>('all');
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
 
   // dados reais carregados sob demanda (não estão no contexto)
   const [workers, setWorkers] = useState<Worker[]>([]);
@@ -128,10 +138,11 @@ export default function CronogramaObraScreen() {
     [result, effectiveTower],
   );
 
-  const groups = useMemo(
-    () => (view === 'pavimento' ? buildGantt(visibleTasks, 'pavimento') : buildEtapaSums(visibleTasks)),
-    [visibleTasks, view],
-  );
+  const groups = useMemo(() => {
+    if (view === 'pavimento') return buildPavimentoGantt(visibleTasks);
+    return selectedCategory ? buildCategoryGantt(visibleTasks, selectedCategory) : [];
+  }, [visibleTasks, view, selectedCategory]);
+  const categoryGroups = useMemo(() => getCategoryGroups(visibleTasks), [visibleTasks]);
   const cronStages = useMemo(() => getCronogramaStages(serviceStages), [serviceStages]);
 
   // apartamentos agrupados por torre/pavimento para o seletor do formulário
@@ -169,11 +180,13 @@ export default function CronogramaObraScreen() {
     [result],
   );
 
-  const modalTasks = useMemo(
-    () => result.tasks.filter((t) => t.apartmentId === openAptId).sort((a, b) => a.startOffset - b.startOffset),
-    [result, openAptId],
-  );
-  const modalApt = modalTasks[0];
+  const breakdownTotals = useMemo(() => {
+    if (!breakdown) return null;
+    const planned = breakdown.tasks.reduce((acc, t) => acc + t.duracaoDias, 0);
+    const withActual = breakdown.tasks.filter((t) => t.actualDias != null);
+    const actual = withActual.reduce((acc, t) => acc + (t.actualDias ?? 0), 0);
+    return { planned, actual, hasActual: withActual.length > 0 };
+  }, [breakdown]);
 
   // etapas ainda não agendadas para o apartamento selecionado
   const scheduledForApt = useMemo(() => {
@@ -393,7 +406,7 @@ export default function CronogramaObraScreen() {
                 ([v, label, icon]) => {
                   const active = view === v;
                   return (
-                    <Pressable key={v} onPress={() => setView(v)} style={[s.toggleBtn, active && s.toggleBtnActive]}>
+                    <Pressable key={v} onPress={() => { setView(v); setSelectedCategory(null); }} style={[s.toggleBtn, active && s.toggleBtnActive]}>
                       <MaterialCommunityIcons name={icon} size={15} color={active ? C.primary : '#94A3B8'} />
                       <Text style={[s.toggleText, active && s.toggleTextActive]}>{label}</Text>
                     </Pressable>
@@ -402,6 +415,32 @@ export default function CronogramaObraScreen() {
               )}
             </View>
 
+            {view === 'etapa' && !selectedCategory ? (
+              <View style={s.catList}>
+                {categoryGroups.map((cg) => (
+                  <Pressable key={cg.categoria} onPress={() => setSelectedCategory(cg.categoria)} style={s.catCard}>
+                    <View style={s.catIcon}>
+                      <MaterialCommunityIcons name="folder-multiple-outline" size={20} color={C.primary} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.catName} numberOfLines={2}>{cg.categoria}</Text>
+                      <Text style={s.catSub}>
+                        {cg.etapaCount} {cg.etapaCount === 1 ? 'etapa' : 'etapas'} · {cg.taskCount} {cg.taskCount === 1 ? 'tarefa' : 'tarefas'}
+                      </Text>
+                    </View>
+                    <MaterialCommunityIcons name="chevron-right" size={20} color="#94A3B8" />
+                  </Pressable>
+                ))}
+              </View>
+            ) : (
+              <>
+                {view === 'etapa' && selectedCategory && (
+                  <Pressable onPress={() => setSelectedCategory(null)} style={s.catBack}>
+                    <MaterialCommunityIcons name="chevron-left" size={20} color={C.primary} />
+                    <Text style={s.catBackText} numberOfLines={1}>{selectedCategory}</Text>
+                  </Pressable>
+                )}
+
             {/* LEGEND */}
             <View style={s.legend}>
               <View style={s.legendItem}>
@@ -409,12 +448,16 @@ export default function CronogramaObraScreen() {
                 <Text style={s.legendText}>Previsto</Text>
               </View>
               <View style={s.legendItem}>
-                <View style={[s.legendSwatch, { backgroundColor: '#22C55E', borderColor: '#16A34A' }]} />
-                <Text style={s.legendText}>Realizado</Text>
+                <View style={[s.legendSwatch, { backgroundColor: REAL_AMBER, borderColor: '#B45309' }]} />
+                <Text style={s.legendText}>Em andamento</Text>
               </View>
               <View style={s.legendItem}>
-                <View style={[s.legendSwatch, { backgroundColor: '#EF4444', borderColor: '#B91C1C' }]} />
-                <Text style={s.legendText}>Atrasado</Text>
+                <View style={[s.legendSwatch, { backgroundColor: REAL_GREEN, borderColor: '#16A34A' }]} />
+                <Text style={s.legendText}>No prazo</Text>
+              </View>
+              <View style={s.legendItem}>
+                <View style={[s.legendSwatch, { backgroundColor: REAL_RED, borderColor: '#B91C1C' }]} />
+                <Text style={s.legendText}>Excedido</Text>
               </View>
             </View>
 
@@ -433,7 +476,7 @@ export default function CronogramaObraScreen() {
                       {g.rows.map((r) => (
                         <Pressable
                           key={r.id}
-                          onPress={() => r.apartmentId && setOpenAptId(r.apartmentId)}
+                          onPress={() => r.breakdown?.length && setBreakdown({ title: r.label, sub: g.title, tasks: r.breakdown })}
                           style={({ pressed }) => [s.pavBlock, { height: PAV_BLOCK_H }, pressed && s.rowLabelPressed]}>
                           <View style={[s.pavNameCell, { width: NAME_W }]}>
                             <Text style={s.pavName} numberOfLines={2}>{r.label}</Text>
@@ -486,7 +529,7 @@ export default function CronogramaObraScreen() {
                                 {days.map((d, i) => {
                                   const weekend = d.getDay() === 0 || d.getDay() === 6;
                                   const inRange = hasActual && i >= t.actualStartOffset! && i < t.actualEndOffset!;
-                                  return <View key={i} style={[s.pavCell, weekend && s.gridCellWeekend, inRange && { backgroundColor: realColor(t.status) }]} />;
+                                  return <View key={i} style={[s.pavCell, weekend && s.gridCellWeekend, inRange && { backgroundColor: realCellColor(t, i) }]} />;
                                 })}
                               </View>
                               <View style={[s.todayLine, { left: result.hojeOffset * DAY_W }]} />
@@ -502,42 +545,63 @@ export default function CronogramaObraScreen() {
 
             <Text style={s.hint}>
               {view === 'pavimento'
-                ? 'Cada linha é uma etapa do apartamento: Previsto (azul) em cima, Realizado (verde/vermelho) embaixo. Cada célula é um dia; linha vermelha = hoje.'
-                : 'Cada linha soma uma etapa em todos os apartamentos. O comprimento do Realizado vs. Previsto mostra o total de dias; cada célula é um dia.'}
+                ? 'Cada linha é um grupo de serviços do pavimento, somando o tempo de todas as suas etapas: Previsto (azul) em cima, Realizado (verde/vermelho) embaixo. Cada célula é um dia; linha vermelha = hoje.'
+                : 'Etapas desta categoria, somadas por pavimento (Previsto azul / Realizado verde). Cada célula é um dia; linha vermelha = hoje.'}
             </Text>
+              </>
+            )}
           </>
         )}
       </ScrollView>
 
-      {/* ── APARTMENT MODAL ─────────────────────────────────────────────────── */}
-      <Modal animationType="slide" transparent visible={!!openAptId} onRequestClose={() => setOpenAptId(null)}>
-        <Pressable style={mod.backdrop} onPress={() => setOpenAptId(null)}>
+      {/* ── BREAKDOWN MODAL (detalhamento da linha agregada) ─────────────────── */}
+      <Modal animationType="slide" transparent visible={!!breakdown} onRequestClose={() => setBreakdown(null)}>
+        <Pressable style={mod.backdrop} onPress={() => setBreakdown(null)}>
           <Pressable style={mod.sheet} onPress={(e) => e.stopPropagation()}>
             <View style={mod.handle} />
-            {modalApt && (
+            {breakdown && (
               <>
                 <View style={mod.header}>
                   <View style={mod.headerLeft}>
                     <View style={mod.headerIcon}>
-                      <MaterialCommunityIcons name="door" size={18} color={C.primary} />
+                      <MaterialCommunityIcons name="format-list-bulleted" size={18} color={C.primary} />
                     </View>
                     <View style={{ flex: 1 }}>
-                      <Text style={mod.headerTitle}>Apto {modalApt.apartmentNumber}</Text>
-                      <Text style={mod.headerSub}>{modalApt.pavimento}</Text>
+                      <Text style={mod.headerTitle} numberOfLines={2}>{breakdown.title}</Text>
+                      <Text style={mod.headerSub}>
+                        {breakdown.sub} · {breakdown.tasks.length} {breakdown.tasks.length === 1 ? 'tarefa' : 'tarefas'}
+                      </Text>
                     </View>
                   </View>
-                  <Pressable onPress={() => setOpenAptId(null)} style={mod.closeBtn} hitSlop={8}>
+                  <Pressable onPress={() => setBreakdown(null)} style={mod.closeBtn} hitSlop={8}>
                     <MaterialCommunityIcons name="close" size={18} color="#475569" />
                   </Pressable>
                 </View>
 
+                {breakdownTotals && (
+                  <View style={mod.totals}>
+                    <View style={mod.totalChip}>
+                      <View style={[mod.totalDot, { backgroundColor: '#3B82F6' }]} />
+                      <Text style={mod.totalLabel}>Previsto</Text>
+                      <Text style={mod.totalValue}>{breakdownTotals.planned} {breakdownTotals.planned === 1 ? 'dia' : 'dias'}</Text>
+                    </View>
+                    {breakdownTotals.hasActual && (
+                      <View style={mod.totalChip}>
+                        <View style={[mod.totalDot, { backgroundColor: REAL_GREEN }]} />
+                        <Text style={mod.totalLabel}>Realizado</Text>
+                        <Text style={mod.totalValue}>{breakdownTotals.actual} {breakdownTotals.actual === 1 ? 'dia' : 'dias'}</Text>
+                      </View>
+                    )}
+                  </View>
+                )}
+
                 <ScrollView style={mod.list} contentContainerStyle={mod.listContent} showsVerticalScrollIndicator={false}>
-                  {modalTasks.map((t) => (
+                  {breakdown.tasks.map((t) => (
                     <View key={t.id} style={mod.taskCard}>
                       <View style={[mod.taskStripe, { backgroundColor: STATUS_COLORS[t.status].bar }]} />
                       <View style={mod.taskInner}>
                         <View style={mod.taskTop}>
-                          <Text style={mod.taskEtapa}>{t.etapa}</Text>
+                          <Text style={mod.taskEtapa}>{t.tower ? `${t.tower} · ` : ''}Apto {t.apartmentNumber} · {t.etapa}</Text>
                           <StatusPill status={t.status} />
                         </View>
                         <View style={mod.taskMetaRow}>
@@ -805,6 +869,15 @@ const s = StyleSheet.create({
   towerChipText: { color: '#64748B', fontSize: 12, fontWeight: '700' },
   towerChipTextActive: { color: C.primary },
 
+  // "Por etapa" — lista de categorias + voltar
+  catList: { gap: 8, marginHorizontal: 16 },
+  catCard: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#FFFFFF', borderColor: '#E2E8F0', borderWidth: 1, borderRadius: 14, padding: 14 },
+  catIcon: { width: 40, height: 40, borderRadius: 12, backgroundColor: C.light, alignItems: 'center', justifyContent: 'center' },
+  catName: { color: '#0F172A', fontSize: 14, fontWeight: '800' },
+  catSub: { color: '#64748B', fontSize: 12, fontWeight: '600', marginTop: 2 },
+  catBack: { flexDirection: 'row', alignItems: 'center', gap: 4, marginHorizontal: 16 },
+  catBackText: { color: C.primary, fontSize: 15, fontWeight: '800', flex: 1 },
+
   legend: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, paddingHorizontal: 18 },
   legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   legendSwatch: { width: 16, height: 10, borderRadius: 3, borderWidth: 1 },
@@ -885,6 +958,12 @@ const mod = StyleSheet.create({
 
   list: { flexGrow: 0 },
   listContent: { paddingHorizontal: 16, paddingTop: 6, gap: 8 },
+
+  totals: { flexDirection: 'row', gap: 10, paddingHorizontal: 18, paddingBottom: 10 },
+  totalChip: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 8 },
+  totalDot: { width: 9, height: 9, borderRadius: 5 },
+  totalLabel: { color: '#94A3B8', fontSize: 10, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.5 },
+  totalValue: { color: '#0F172A', fontSize: 13, fontWeight: '900' },
 
   taskCard: { flexDirection: 'row', backgroundColor: '#FFFFFF', borderColor: '#E2E8F0', borderWidth: 1, borderRadius: 14, overflow: 'hidden' },
   taskStripe: { width: 4 },

@@ -6,6 +6,8 @@
 // end = início + duração. Status é derivado das datas + progresso vs. hoje.
 // Nenhuma tabela real é criada — tudo mock/in-memory.
 
+import { categoryOrderIndex } from '@/src/data/serviceStages';
+
 export type CronogramaStatus = 'Planejada' | 'Em andamento' | 'Atrasada' | 'Concluída';
 
 export type CronogramaTask = {
@@ -38,7 +40,15 @@ export type CronogramaTask = {
   note?: string;
 };
 
-export type GanttRow = { id: string; apartmentId: string; label: string; sub: string; tasks: CronogramaTask[] };
+export type GanttRow = {
+  id: string;
+  apartmentId: string;
+  label: string;
+  sub: string;
+  tasks: CronogramaTask[];
+  // tarefas reais que compõem uma linha agregada (para o detalhamento ao tocar)
+  breakdown?: CronogramaTask[];
+};
 export type GanttGroup = { id: string; title: string; sub: string; ordem: number; rows: GanttRow[] };
 
 export type CronogramaResult = {
@@ -302,55 +312,154 @@ export function buildGantt(tasks: CronogramaTask[], mode: 'pavimento' | 'etapa')
     .sort((a, b) => a.ordem - b.ordem);
 }
 
-// "Por etapa" — uma linha por etapa, somando os dias de todos os apartamentos
-// em que ela aparece (mesma planilha de células do "Por pavimento").
-export function buildEtapaSums(tasks: CronogramaTask[]): GanttGroup[] {
-  const byEtapa = new Map<string, CronogramaTask[]>();
+// Soma (agrega) uma lista de tarefas em UMA tarefa sintética:
+// duração = soma das durações; início = menor início; status = pior caso.
+function aggregateTasks(list: CronogramaTask[], id: string): CronogramaTask {
+  const f = list[0];
+  const sumPlanned = list.reduce((acc, t) => acc + t.duracaoDias, 0);
+  const withActual = list.filter((t) => t.actualStartOffset != null && t.actualEndOffset != null);
+  const sumActual = withActual.reduce((acc, t) => acc + (t.actualDias ?? 0), 0);
+  const aggStart = Math.min(...list.map((t) => t.startOffset));
+  const aggActualStart = withActual.length ? Math.min(...withActual.map((t) => t.actualStartOffset!)) : undefined;
+  const status: CronogramaStatus = list.some((t) => t.status === 'Atrasada')
+    ? 'Atrasada'
+    : list.every((t) => t.status === 'Concluída')
+      ? 'Concluída'
+      : withActual.length
+        ? 'Em andamento'
+        : 'Planejada';
+  return {
+    ...f,
+    id,
+    apartmentId: '',
+    apartmentNumber: '',
+    responsibles: [],
+    startOffset: aggStart,
+    duracaoDias: sumPlanned,
+    endOffset: aggStart + sumPlanned,
+    actualStartOffset: aggActualStart,
+    actualEndOffset: aggActualStart != null ? aggActualStart + sumActual : undefined,
+    actualDias: withActual.length ? sumActual : undefined,
+    status,
+    atrasoDias: 0,
+  };
+}
+
+// Soma uma lista de tarefas da MESMA etapa.
+function aggregateEtapa(list: CronogramaTask[], idSuffix = ''): CronogramaTask {
+  return aggregateTasks(list, `sum-${list[0].etapaId}${idSuffix}`);
+}
+
+// "Por etapa" nível 1 — categorias (grupos) que têm etapas no cronograma.
+export type CategoryGroup = { categoria: string; ordem: number; etapaCount: number; taskCount: number };
+
+export function getCategoryGroups(tasks: CronogramaTask[]): CategoryGroup[] {
+  const byCat = new Map<string, CronogramaTask[]>();
   for (const t of tasks) {
-    if (!byEtapa.has(t.etapaId)) byEtapa.set(t.etapaId, []);
-    byEtapa.get(t.etapaId)!.push(t);
+    const cat = t.funcao || 'Outras';
+    if (!byCat.has(cat)) byCat.set(cat, []);
+    byCat.get(cat)!.push(t);
   }
-  const rows: GanttRow[] = [...byEtapa.values()]
-    .map((list) => {
+  return [...byCat.entries()]
+    .map(([categoria, list]) => ({
+      categoria,
+      ordem: categoryOrderIndex(categoria),
+      etapaCount: new Set(list.map((t) => t.etapaId)).size,
+      taskCount: list.length,
+    }))
+    .sort((a, b) => a.ordem - b.ordem || a.categoria.localeCompare(b.categoria, 'pt-BR'));
+}
+
+// "Por etapa" nível 2 — cronograma de uma categoria, agrupado por pavimento,
+// com uma linha por etapa (somando os apartamentos daquele pavimento).
+export function buildCategoryGantt(tasks: CronogramaTask[], categoria: string): GanttGroup[] {
+  const inCat = tasks.filter((t) => (t.funcao || 'Outras') === categoria);
+  const byPav = new Map<string, CronogramaTask[]>();
+  for (const t of inCat) {
+    const key = `${t.tower ?? ''}||${t.pavimento}`;
+    if (!byPav.has(key)) byPav.set(key, []);
+    byPav.get(key)!.push(t);
+  }
+  return [...byPav.entries()]
+    .map(([key, list]) => {
       const f = list[0];
-      const count = list.length;
-      const sumPlanned = list.reduce((acc, t) => acc + t.duracaoDias, 0);
-      const withActual = list.filter((t) => t.actualStartOffset != null && t.actualEndOffset != null);
-      const sumActual = withActual.reduce((acc, t) => acc + (t.actualDias ?? 0), 0);
-      const aggStart = Math.min(...list.map((t) => t.startOffset));
-      const aggActualStart = withActual.length ? Math.min(...withActual.map((t) => t.actualStartOffset!)) : undefined;
-      const status: CronogramaStatus = list.some((t) => t.status === 'Atrasada')
-        ? 'Atrasada'
-        : list.every((t) => t.status === 'Concluída')
-          ? 'Concluída'
-          : withActual.length
-            ? 'Em andamento'
-            : 'Planejada';
-      const agg: CronogramaTask = {
-        ...f,
-        id: `sum-${f.etapaId}`,
-        apartmentId: '',
-        apartmentNumber: '',
-        responsibles: [],
-        startOffset: aggStart,
-        duracaoDias: sumPlanned,
-        endOffset: aggStart + sumPlanned,
-        actualStartOffset: aggActualStart,
-        actualEndOffset: aggActualStart != null ? aggActualStart + sumActual : undefined,
-        actualDias: withActual.length ? sumActual : undefined,
-        status,
-        atrasoDias: 0,
-      };
-      return {
-        id: agg.id,
-        apartmentId: '',
-        label: `${f.etapa} · ${count} ${count === 1 ? 'apto' : 'aptos'}`,
-        sub: '',
-        tasks: [agg],
-      };
+      const byEtapa = new Map<string, CronogramaTask[]>();
+      for (const t of list) {
+        if (!byEtapa.has(t.etapaId)) byEtapa.set(t.etapaId, []);
+        byEtapa.get(t.etapaId)!.push(t);
+      }
+      const rows: GanttRow[] = [...byEtapa.values()]
+        .map((etapaList) => {
+          const ef = etapaList[0];
+          const count = etapaList.length;
+          return {
+            id: `${key}-${ef.etapaId}`,
+            apartmentId: '',
+            label: count > 1 ? `${ef.etapa} · ${count} aptos` : ef.etapa,
+            sub: '',
+            tasks: [aggregateEtapa(etapaList, `-${key}`)],
+            breakdown: [...etapaList].sort((a, b) =>
+              a.apartmentNumber.localeCompare(b.apartmentNumber, 'pt-BR', { numeric: true }),
+            ),
+          };
+        })
+        .sort((a, b) => a.tasks[0].ordem - b.tasks[0].ordem);
+      const countLabel = `${rows.length} ${rows.length === 1 ? 'etapa' : 'etapas'}`;
+      return { id: key, title: f.pavimento, sub: countLabel, ordem: f.pavimentoOrder, rows };
     })
-    .sort((a, b) => a.tasks[0].ordem - b.tasks[0].ordem);
-  return [{ id: 'etapas', title: 'Resumo por etapa', sub: `${rows.length} ${rows.length === 1 ? 'etapa' : 'etapas'}`, ordem: 0, rows }];
+    .sort((a, b) => {
+      const tA = a.rows[0]?.tasks[0]?.tower ?? '';
+      const tB = b.rows[0]?.tasks[0]?.tower ?? '';
+      return tA.localeCompare(tB, 'pt-BR') || a.ordem - b.ordem;
+    });
+}
+
+// "Por pavimento" — agrupa por pavimento; uma linha por CATEGORIA (grupo),
+// somando o tempo de TODAS as etapas daquela categoria naquele pavimento.
+// Ex.: "Serviços preliminares / Implantação" = Limpeza do terreno + Remoção de
+// entulho → uma única linha com a soma dos dias.
+export function buildPavimentoGantt(tasks: CronogramaTask[]): GanttGroup[] {
+  const byPav = new Map<string, CronogramaTask[]>();
+  for (const t of tasks) {
+    const key = `${t.tower ?? ''}||${t.pavimento}`;
+    if (!byPav.has(key)) byPav.set(key, []);
+    byPav.get(key)!.push(t);
+  }
+  return [...byPav.entries()]
+    .map(([key, list]) => {
+      const f = list[0];
+      const byCat = new Map<string, CronogramaTask[]>();
+      for (const t of list) {
+        const cat = t.funcao || 'Outras';
+        if (!byCat.has(cat)) byCat.set(cat, []);
+        byCat.get(cat)!.push(t);
+      }
+      const rows: GanttRow[] = [...byCat.entries()]
+        .map(([cat, catList]) => ({ cat, order: categoryOrderIndex(cat), catList }))
+        .sort((a, b) => a.order - b.order || a.cat.localeCompare(b.cat, 'pt-BR'))
+        .map(({ cat, catList }) => {
+          const etapaCount = new Set(catList.map((t) => t.etapaId)).size;
+          return {
+            id: `${key}-cat-${cat}`,
+            apartmentId: '',
+            label: cat,
+            sub: `${etapaCount} ${etapaCount === 1 ? 'etapa' : 'etapas'}`,
+            tasks: [aggregateTasks(catList, `sum-cat-${cat}-${key}`)],
+            breakdown: [...catList].sort(
+              (a, b) =>
+                a.ordem - b.ordem ||
+                a.apartmentNumber.localeCompare(b.apartmentNumber, 'pt-BR', { numeric: true }),
+            ),
+          };
+        });
+      const countLabel = `${rows.length} ${rows.length === 1 ? 'grupo' : 'grupos'}`;
+      return { id: key, title: f.pavimento, sub: countLabel, ordem: f.pavimentoOrder, rows };
+    })
+    .sort((a, b) => {
+      const tA = a.rows[0]?.tasks[0]?.tower ?? '';
+      const tB = b.rows[0]?.tasks[0]?.tower ?? '';
+      return tA.localeCompare(tB, 'pt-BR') || a.ordem - b.ordem;
+    });
 }
 
 export const STATUS_COLORS: Record<CronogramaStatus, { bg: string; fg: string; bar: string }> = {
