@@ -77,7 +77,7 @@ const StatusPill = ({ status }: { status: CronogramaStatus }) => {
 export default function CronogramaObraScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { apartments, towers, serviceStages, loading, refreshApartment, refreshData } = useObras();
+  const { apartments, towers, serviceStages, loading, refreshData } = useObras();
 
   const [view, setView] = useState<MainView>('pavimento');
   const [breakdown, setBreakdown] = useState<{ title: string; sub: string; tasks: CronogramaTask[] } | null>(null);
@@ -93,7 +93,7 @@ export default function CronogramaObraScreen() {
   const [saving, setSaving] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
-  const [fApt, setFApt] = useState('');
+  const [fApts, setFApts] = useState<string[]>([]);
   const [fStage, setFStage] = useState('');
   const [fStart, setFStart] = useState('');
   const [fDays, setFDays] = useState('');
@@ -188,19 +188,27 @@ export default function CronogramaObraScreen() {
     return { planned, actual, hasActual: withActual.length > 0 };
   }, [breakdown]);
 
-  // etapas ainda não agendadas para o apartamento selecionado
-  const scheduledForApt = useMemo(() => {
-    const set = new Set<string>();
-    for (const t of result.tasks) if (t.apartmentId === fApt) set.add(t.etapa);
-    return set;
-  }, [result, fApt]);
-  const availableStages = cronStages.filter((st) => !scheduledForApt.has(st.nome));
+  // Para cada etapa do cronograma, conta em quantos dos apartamentos selecionados
+  // ela já está agendada. Selecionar uma etapa que já existe em alguns deles
+  // sobrescreve as datas — o badge no chip torna isso explícito.
+  const stageAlreadyCount = useMemo(() => {
+    const counts = new Map<string, number>();
+    if (fApts.length === 0) return counts;
+    const selectedSet = new Set(fApts);
+    for (const apt of apartments) {
+      if (!selectedSet.has(apt.id)) continue;
+      for (const item of apt.checklist as ScheduledChecklistItem[]) {
+        counts.set(item.label, (counts.get(item.label) ?? 0) + 1);
+      }
+    }
+    return counts;
+  }, [apartments, fApts]);
 
   const hasTasks = result.tasks.length > 0;
   const isLoading = loading && apartments.length === 0;
 
   const openAdd = () => {
-    setFApt(apartments[0]?.id ?? '');
+    setFApts(apartments[0] ? [apartments[0].id] : []);
     setFStage('');
     setFStart('');
     setFDays('');
@@ -214,53 +222,90 @@ export default function CronogramaObraScreen() {
   const toggleResp = (id: string) =>
     setFResp((prev) => (prev.includes(id) ? prev.filter((r) => r !== id) : [...prev, id]));
 
+  const toggleApt = (id: string) =>
+    setFApts((prev) => (prev.includes(id) ? prev.filter((a) => a !== id) : [...prev, id]));
+
+  const toggleGroup = (groupAptIds: string[]) =>
+    setFApts((prev) => {
+      const allSelected = groupAptIds.every((id) => prev.includes(id));
+      if (allSelected) return prev.filter((id) => !groupAptIds.includes(id));
+      const merged = new Set(prev);
+      for (const id of groupAptIds) merged.add(id);
+      return [...merged];
+    });
+
+  const selectAllApts = () => setFApts(apartments.map((a) => a.id));
+  const clearApts = () => setFApts([]);
+
   const saveTask = async () => {
-    if (!fApt) return setFError('Selecione o apartamento.');
+    if (fApts.length === 0) return setFError('Selecione ao menos um apartamento.');
     if (!fStage) return setFError('Selecione a etapa.');
     if (!isValidBrDate(fStart)) return setFError('Informe uma data de início válida (dd/mm/aaaa).');
     const days = Number(fDays);
     if (!Number.isFinite(days) || days < 1) return setFError('Informe a duração em dias (mínimo 1).');
 
-    const apt = apartments.find((a) => a.id === fApt);
-    if (!apt) return setFError('Apartamento não encontrado.');
+    const selectedApts = apartments.filter((a) => fApts.includes(a.id));
+    if (selectedApts.length === 0) return setFError('Apartamentos não encontrados.');
+
+    const fullStage = serviceStages.find((sg) => sg.nome === fStage);
+    if (!fullStage) return setFError('Etapa não encontrada no catálogo.');
 
     setSaving(true);
     setFError(null);
     try {
-      const existing = (apt.checklist as ScheduledChecklistItem[]).find((it) => it.label === fStage);
-      let itemId = existing?.id;
-
-      // etapa ainda não existe como item do apartamento → cria a partir do catálogo
-      if (!itemId) {
-        const fullStage = serviceStages.find((sg) => sg.nome === fStage);
-        if (!fullStage) throw new Error('stage-not-found');
-        await db.addStageToApartments(fullStage, [fApt]);
-        const items = await db.loadChecklist(fApt);
-        itemId = items.find((it) => it.label === fStage)?.id;
-        if (!itemId) throw new Error('item-not-created');
+      // 1) cache do id do item por apartamento. Quem já tem a etapa entra direto;
+      // quem não tem é criado em lote e depois resolvido via loadChecklist.
+      const itemIdByApt = new Map<string, string>();
+      for (const apt of selectedApts) {
+        const existing = (apt.checklist as ScheduledChecklistItem[]).find((it) => it.label === fStage);
+        if (existing) itemIdByApt.set(apt.id, existing.id);
+      }
+      const missingApts = selectedApts.filter((a) => !itemIdByApt.has(a.id));
+      if (missingApts.length) {
+        await db.addStageToApartments(fullStage, missingApts.map((a) => a.id));
+        const freshLists = await Promise.all(
+          missingApts.map(async (a) => [a.id, await db.loadChecklist(a.id)] as const),
+        );
+        for (const [aptId, items] of freshLists) {
+          const item = items.find((it) => it.label === fStage);
+          if (item) itemIdByApt.set(aptId, item.id);
+        }
       }
 
       const state: ChecklistState = fProgress >= 100 ? 'ok' : fProgress > 0 ? 'partial' : 'pending';
-      await db.upsertChecklistItem({
-        id: itemId,
-        apartmentId: fApt,
-        label: fStage,
-        state,
-        comment: fNote.trim() || existing?.comment,
-        emergency: existing?.emergency,
-        area: existing?.area ?? 'Interior',
-        isExtra: existing?.isExtra ?? false,
-        plannedStart: fStart,
-        plannedEnd: addDaysToBr(fStart, Math.round(days)),
-        actualStart: existing?.actualStart,
-        actualEnd: existing?.actualEnd,
-      });
-      await db.setStepAssignments(fApt, itemId, fResp);
+      const plannedEnd = addDaysToBr(fStart, Math.round(days));
+      const trimmedNote = fNote.trim();
 
-      // recarrega o apartamento + suas atribuições para refletir no Gantt
-      await refreshApartment(fApt);
-      const fresh = await db.loadStepAssignments(fApt);
-      setAssignmentsByApt((prev) => ({ ...prev, [fApt]: fresh }));
+      // 2) upsert datas + atribuições em paralelo por apartamento.
+      await Promise.all(
+        selectedApts.map(async (apt) => {
+          const itemId = itemIdByApt.get(apt.id);
+          if (!itemId) throw new Error('item-not-resolved');
+          const existing = (apt.checklist as ScheduledChecklistItem[]).find((it) => it.label === fStage);
+          await db.upsertChecklistItem({
+            id: itemId,
+            apartmentId: apt.id,
+            label: fStage,
+            state,
+            comment: trimmedNote || existing?.comment,
+            emergency: existing?.emergency,
+            area: existing?.area ?? 'Interior',
+            isExtra: existing?.isExtra ?? false,
+            plannedStart: fStart,
+            plannedEnd,
+            actualStart: existing?.actualStart,
+            actualEnd: existing?.actualEnd,
+          });
+          await db.setStepAssignments(apt.id, itemId, fResp);
+        }),
+      );
+
+      // 3) refresh único do contexto + cache de assignments dos apartamentos tocados.
+      await refreshData();
+      const freshAssignments = await Promise.all(
+        selectedApts.map(async (apt) => [apt.id, await db.loadStepAssignments(apt.id)] as const),
+      );
+      setAssignmentsByApt((prev) => ({ ...prev, ...Object.fromEntries(freshAssignments) }));
       setAddOpen(false);
     } catch {
       setFError('Não foi possível salvar. Verifique a conexão e tente novamente.');
@@ -650,7 +695,7 @@ export default function CronogramaObraScreen() {
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={mod.headerTitle}>Adicionar tarefa</Text>
-                  <Text style={mod.headerSub}>Atribua uma etapa a um apartamento</Text>
+                  <Text style={mod.headerSub}>Atribua uma etapa a um ou mais apartamentos</Text>
                 </View>
               </View>
               <Pressable onPress={() => setAddOpen(false)} style={mod.closeBtn} hitSlop={8}>
@@ -661,41 +706,80 @@ export default function CronogramaObraScreen() {
             <ScrollView style={mod.list} contentContainerStyle={form.content} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
               <View style={form.notice}>
                 <MaterialCommunityIcons name="content-save-outline" size={14} color={C.primary} />
-                <Text style={form.noticeText}>A tarefa é salva no banco e atribuída ao apartamento (datas e responsáveis).</Text>
+                <Text style={form.noticeText}>A mesma etapa pode ser aplicada a vários apartamentos de uma vez — datas e responsáveis idênticos.</Text>
               </View>
 
-              {/* Apartamento — agrupado por torre/pavimento */}
-              <Text style={form.label}>Apartamento</Text>
-              {aptGroups.map((grp) => (
-                <View key={grp.label} style={form.aptGroup}>
-                  <Text style={form.aptGroupLabel}>{grp.label}</Text>
-                  <View style={form.chipsWrap}>
-                    {grp.apts.map((a) => {
-                      const active = a.id === fApt;
-                      return (
-                        <Pressable
-                          key={a.id}
-                          onPress={() => { setFApt(a.id); setFStage(''); }}
-                          style={[form.chip, active && form.chipActive]}>
-                          <Text style={[form.chipText, active && form.chipTextActive]}>Apto {a.number}</Text>
-                        </Pressable>
-                      );
-                    })}
+              {/* Apartamento(s) — multi-seleção agrupada por torre/pavimento */}
+              <View style={form.aptHeader}>
+                <Text style={form.label}>Apartamento(s)</Text>
+                <Text style={form.aptCount}>
+                  {fApts.length} de {apartments.length} selecionado(s)
+                </Text>
+              </View>
+              <View style={form.bulkRow}>
+                <Pressable onPress={selectAllApts} style={form.bulkBtn}>
+                  <MaterialCommunityIcons name="checkbox-multiple-marked-outline" size={13} color={C.primary} />
+                  <Text style={form.bulkText}>Selecionar todos</Text>
+                </Pressable>
+                <Pressable onPress={clearApts} disabled={fApts.length === 0} style={[form.bulkBtn, fApts.length === 0 && { opacity: 0.5 }]}>
+                  <MaterialCommunityIcons name="close-circle-outline" size={13} color="#64748B" />
+                  <Text style={[form.bulkText, { color: '#64748B' }]}>Limpar</Text>
+                </Pressable>
+              </View>
+              {aptGroups.map((grp) => {
+                const groupIds = grp.apts.map((a) => a.id);
+                const selectedInGroup = groupIds.filter((id) => fApts.includes(id)).length;
+                const allSelected = selectedInGroup === groupIds.length;
+                return (
+                  <View key={grp.label} style={form.aptGroup}>
+                    <Pressable onPress={() => toggleGroup(groupIds)} style={form.aptGroupHead} hitSlop={6}>
+                      <MaterialCommunityIcons
+                        name={allSelected ? 'checkbox-marked' : selectedInGroup > 0 ? 'checkbox-intermediate' : 'checkbox-blank-outline'}
+                        size={15}
+                        color={selectedInGroup > 0 ? C.primary : '#94A3B8'}
+                      />
+                      <Text style={form.aptGroupLabel}>{grp.label}</Text>
+                      {selectedInGroup > 0 && (
+                        <Text style={form.aptGroupCount}>
+                          {selectedInGroup}/{groupIds.length}
+                        </Text>
+                      )}
+                    </Pressable>
+                    <View style={form.chipsWrap}>
+                      {grp.apts.map((a) => {
+                        const active = fApts.includes(a.id);
+                        return (
+                          <Pressable
+                            key={a.id}
+                            onPress={() => toggleApt(a.id)}
+                            style={[form.chip, active && form.chipActive]}>
+                            {active && <MaterialCommunityIcons name="check" size={13} color={C.primary} style={{ marginRight: 4 }} />}
+                            <Text style={[form.chipText, active && form.chipTextActive]}>Apto {a.number}</Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
                   </View>
-                </View>
-              ))}
+                );
+              })}
 
               {/* Etapa */}
               <Text style={form.label}>Etapa / serviço</Text>
-              {availableStages.length === 0 ? (
-                <Text style={form.empty}>Todas as etapas do cronograma já foram agendadas para este apartamento.</Text>
+              {cronStages.length === 0 ? (
+                <Text style={form.empty}>Nenhuma etapa de cronograma cadastrada no catálogo.</Text>
               ) : (
                 <View style={form.chipsWrap}>
-                  {availableStages.map((e) => {
+                  {cronStages.map((e) => {
                     const active = e.nome === fStage;
+                    const already = stageAlreadyCount.get(e.nome) ?? 0;
                     return (
                       <Pressable key={e.id} onPress={() => setFStage(e.nome)} style={[form.chip, active && form.chipActive]}>
                         <Text style={[form.chipText, active && form.chipTextActive]} numberOfLines={1}>{e.nome}</Text>
+                        {already > 0 && (
+                          <View style={form.chipBadge}>
+                            <Text style={form.chipBadgeText}>{already} já agendada(s)</Text>
+                          </View>
+                        )}
                       </Pressable>
                     );
                   })}
@@ -782,7 +866,13 @@ export default function CronogramaObraScreen() {
                   ) : (
                     <MaterialCommunityIcons name="check" size={18} color="#FFFFFF" />
                   )}
-                  <Text style={form.saveText}>{saving ? 'Salvando…' : 'Salvar tarefa'}</Text>
+                  <Text style={form.saveText}>
+                    {saving
+                      ? 'Salvando…'
+                      : fApts.length > 1
+                        ? `Salvar em ${fApts.length} aptos`
+                        : 'Salvar tarefa'}
+                  </Text>
                 </Pressable>
               </View>
               <View style={{ height: 12 }} />
@@ -998,7 +1088,16 @@ const form = StyleSheet.create({
   chipText: { color: '#475569', fontSize: 12, fontWeight: '700' },
   chipTextActive: { color: C.primary },
   aptGroup: { gap: 6, marginBottom: 6 },
+  aptGroupHead: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 2 },
   aptGroupLabel: { color: '#94A3B8', fontSize: 10, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.5 },
+  aptGroupCount: { color: C.primary, fontSize: 10, fontWeight: '800', marginLeft: 'auto' },
+  aptHeader: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 },
+  aptCount: { color: C.primary, fontSize: 11, fontWeight: '800' },
+  bulkRow: { flexDirection: 'row', gap: 8, marginBottom: 4 },
+  bulkBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, borderWidth: 1, borderColor: '#E2E8F0', backgroundColor: '#F8FAFC' },
+  bulkText: { color: C.primary, fontSize: 11, fontWeight: '800' },
+  chipBadge: { marginLeft: 6, paddingHorizontal: 6, paddingVertical: 1, borderRadius: 999, backgroundColor: '#FEF3C7' },
+  chipBadgeText: { color: '#92400E', fontSize: 9, fontWeight: '800' },
 
   row: { flexDirection: 'row', gap: 12 },
   input: { backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, fontSize: 14, color: '#0F172A', fontWeight: '600' },
