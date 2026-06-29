@@ -10,7 +10,7 @@ import Svg, { Circle, Text as SvgText } from 'react-native-svg';
 import { formatCurrency } from '@/src/data/localMeasurements';
 import { useObras } from '@/src/data/ObrasContext';
 import { summarizeBottlenecks } from '@/src/data/serviceBlockers';
-import { summarizeSchedule } from '@/src/data/schedule';
+import { formatDateBr, getScheduledChecklistForApartment, getScheduleRows, summarizeSchedule } from '@/src/data/schedule';
 import { getProgressColor } from '@/src/ui/status';
 import { Skeleton } from '@/src/ui/Skeleton';
 
@@ -96,6 +96,30 @@ export default function DashboardScreen() {
     () => summarizeSchedule(apartments, (id) => towers.find((t) => t.id === id)?.name ?? id),
     [apartments, towers],
   );
+
+  // Etapas com prazo vencido (mesma regra do cronograma): planejadas, não
+  // concluídas e com fim previsto no passado. É a notificação mais acionável
+  // para quem está em campo — mostra torre, unidade, etapa e dias de atraso.
+  const lateSteps = useMemo(() => {
+    const rows = apartments.flatMap((a) => {
+      const towerName = towers.find((t) => t.id === a.towerId)?.name ?? '';
+      return getScheduleRows(getScheduledChecklistForApartment(a))
+        .filter((r) => r.scheduleStatus === 'Atrasado')
+        .map((r) => ({
+          id: `${a.id}-${r.service}`,
+          aptId: a.id,
+          tower: towerName,
+          apt: a.number,
+          floor: a.floor,
+          service: r.service,
+          delayDays: r.delayDays,
+          plannedEnd: r.plannedEnd,
+        }));
+    });
+    return rows.sort((x, y) => y.delayDays - x.delayDays);
+  }, [apartments, towers]);
+
+  const lateUnits = useMemo(() => new Set(lateSteps.map((l) => l.aptId)).size, [lateSteps]);
 
   const completedAverage = apartments.length
     ? Math.round(apartments.reduce((t, a) => t + a.progress, 0) / apartments.length)
@@ -202,7 +226,7 @@ export default function DashboardScreen() {
     { value: statusCounts.excellent, color: '#047857' },
   ];
 
-  const hasAlerts = scheduleSummary.delayedApartments > 0 || !!bottleneckSummary.mostPendingService;
+  const hasAlerts = lateSteps.length > 0 || !!bottleneckSummary.mostPendingService;
   const heroColor = getProgressColor(completedAverage);
 
   return (
@@ -223,11 +247,18 @@ export default function DashboardScreen() {
             </View>
           </View>
           <View style={s.headerActions}>
-            {hasAlerts && (
-              <Pressable onPress={() => setAlertOpen(true)} style={s.alertBtn}>
-                <MaterialCommunityIcons name="bell-alert" size={20} color="#FCD34D" />
-              </Pressable>
-            )}
+            <Pressable onPress={() => setAlertOpen(true)} style={s.alertBtn}>
+              <MaterialCommunityIcons
+                name={hasAlerts ? 'bell-alert' : 'bell-check-outline'}
+                size={20}
+                color={hasAlerts ? '#FCD34D' : 'rgba(255,255,255,0.85)'}
+              />
+              {lateSteps.length > 0 && (
+                <View style={s.alertBadge}>
+                  <Text style={s.alertBadgeText}>{lateSteps.length > 9 ? '9+' : lateSteps.length}</Text>
+                </View>
+              )}
+            </Pressable>
             <Link href="/cronograma/servicos-etapas" asChild>
               <Pressable style={s.settingsBtn}>
                 <MaterialCommunityIcons name="cog-outline" size={20} color="rgba(255,255,255,0.85)" />
@@ -425,47 +456,69 @@ export default function DashboardScreen() {
               </Pressable>
             </View>
 
-            {scheduleSummary.delayedApartments > 0 && (
-              <View style={s.modalAlertItem}>
-                <View style={s.modalAlertIcon}>
-                  <MaterialCommunityIcons name="clock-alert-outline" size={20} color="#B45309" />
+            <ScrollView style={s.modalScroll} contentContainerStyle={s.modalScrollContent} showsVerticalScrollIndicator={false}>
+              {!hasAlerts && (
+                <View style={s.emptyAlerts}>
+                  <View style={s.emptyAlertsIcon}>
+                    <MaterialCommunityIcons name="check-circle-outline" size={28} color="#047857" />
+                  </View>
+                  <Text style={s.emptyAlertsTitle}>Tudo em dia</Text>
+                  <Text style={s.emptyAlertsSub}>Nenhuma etapa atrasada e nenhum gargalo no momento.</Text>
                 </View>
-                <View style={s.modalAlertContent}>
-                  <Text style={s.modalAlertTitle}>Atraso no cronograma</Text>
-                  <Text style={s.modalAlertText}>
-                    <Text style={s.modalAlertBold}>{scheduleSummary.delayedApartments} apartamento(s)</Text>
-                    {scheduleSummary.mostDelayedTower
-                      ? ` com atraso. Torre mais afetada: ${scheduleSummary.mostDelayedTower.towerName} (até ${scheduleSummary.mostDelayedTower.delayDays} dias de atraso).`
-                      : ' apresentam atraso no cronograma.'}
-                  </Text>
-                  {scheduleSummary.mostDelayedService && (
-                    <Text style={s.modalAlertText}>
-                      Serviço mais atrasado: <Text style={s.modalAlertBold}>{scheduleSummary.mostDelayedService.service}</Text> ({scheduleSummary.mostDelayedService.delayDays} dias).
-                    </Text>
-                  )}
-                </View>
-              </View>
-            )}
+              )}
 
-            {bottleneckSummary.mostPendingService && (
-              <View style={s.modalAlertItem}>
-                <View style={[s.modalAlertIcon, { backgroundColor: '#FEE2E2' }]}>
-                  <MaterialCommunityIcons name="lock-alert-outline" size={20} color="#B91C1C" />
-                </View>
-                <View style={s.modalAlertContent}>
-                  <Text style={s.modalAlertTitle}>Gargalo principal</Text>
-                  <Text style={s.modalAlertText}>
-                    <Text style={s.modalAlertBold}>{bottleneckSummary.mostPendingService.service}</Text>
-                    {` está pendente em ${bottleneckSummary.mostPendingService.affectedApartments} apartamento(s).`}
+              {lateSteps.length > 0 && (
+                <View style={s.lateSection}>
+                  <View style={s.lateSectionHead}>
+                    <MaterialCommunityIcons name="clock-alert-outline" size={16} color="#B45309" />
+                    <Text style={s.lateSectionTitle}>Etapas atrasadas</Text>
+                    <View style={s.lateSectionCount}>
+                      <Text style={s.lateSectionCountText}>{lateSteps.length}</Text>
+                    </View>
+                  </View>
+                  <Text style={s.lateSectionSub}>
+                    {lateSteps.length} etapa(s) vencida(s) em {lateUnits} unidade(s). Priorize as de maior atraso.
                   </Text>
-                  {bottleneckSummary.mostBlockedServices.length > 0 && (
-                    <Text style={s.modalAlertText}>
-                      Serviços travados: <Text style={s.modalAlertBold}>{bottleneckSummary.mostBlockedServices.slice(0, 3).map((sv) => sv.service).join(', ')}{bottleneckSummary.mostBlockedServices.length > 3 ? '…' : ''}</Text>
-                    </Text>
+                  {lateSteps.slice(0, 8).map((ls) => (
+                    <View key={ls.id} style={s.lateRow}>
+                      <View style={s.lateBadge}>
+                        <Text style={s.lateBadgeNum}>{ls.delayDays}</Text>
+                        <Text style={s.lateBadgeUnit}>{ls.delayDays === 1 ? 'dia' : 'dias'}</Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={s.lateService} numberOfLines={1}>{ls.service}</Text>
+                        <Text style={s.lateMeta} numberOfLines={1}>
+                          {ls.tower ? `${ls.tower} · ` : ''}Apto {ls.apt}{ls.plannedEnd ? ` · venceu ${formatDateBr(ls.plannedEnd)}` : ''}
+                        </Text>
+                      </View>
+                    </View>
+                  ))}
+                  {lateSteps.length > 8 && (
+                    <Text style={s.lateMore}>+{lateSteps.length - 8} etapa(s) atrasada(s)</Text>
                   )}
                 </View>
-              </View>
-            )}
+              )}
+
+              {bottleneckSummary.mostPendingService && (
+                <View style={s.modalAlertItem}>
+                  <View style={[s.modalAlertIcon, { backgroundColor: '#FEE2E2' }]}>
+                    <MaterialCommunityIcons name="lock-alert-outline" size={20} color="#B91C1C" />
+                  </View>
+                  <View style={s.modalAlertContent}>
+                    <Text style={s.modalAlertTitle}>Gargalo principal</Text>
+                    <Text style={s.modalAlertText}>
+                      <Text style={s.modalAlertBold}>{bottleneckSummary.mostPendingService.service}</Text>
+                      {` está pendente em ${bottleneckSummary.mostPendingService.affectedApartments} apartamento(s).`}
+                    </Text>
+                    {bottleneckSummary.mostBlockedServices.length > 0 && (
+                      <Text style={s.modalAlertText}>
+                        Serviços travados: <Text style={s.modalAlertBold}>{bottleneckSummary.mostBlockedServices.slice(0, 3).map((sv) => sv.service).join(', ')}{bottleneckSummary.mostBlockedServices.length > 3 ? '…' : ''}</Text>
+                      </Text>
+                    )}
+                  </View>
+                </View>
+              )}
+            </ScrollView>
 
           </Pressable>
         </Pressable>
@@ -488,6 +541,8 @@ const s = StyleSheet.create({
   headerProject: { color: '#FFFFFF', fontSize: 22, fontWeight: '900', marginTop: 2 },
   headerActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   alertBtn: { padding: 9, borderRadius: 999, backgroundColor: 'rgba(255,255,255,0.15)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.3)' },
+  alertBadge: { position: 'absolute', top: -3, right: -3, minWidth: 18, height: 18, borderRadius: 9, backgroundColor: '#DC2626', borderWidth: 1.5, borderColor: '#4a5565', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 3 },
+  alertBadgeText: { color: '#FFFFFF', fontSize: 9, fontWeight: '900' },
   settingsBtn: { padding: 9, borderRadius: 999, backgroundColor: 'rgba(255,255,255,0.15)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.3)' },
 
   // hero — pulled up over the header for a layered look
@@ -565,4 +620,25 @@ const s = StyleSheet.create({
   modalAlertTitle: { color: '#92400E', fontSize: 13, fontWeight: '800' },
   modalAlertText: { color: '#92400E', fontSize: 12, lineHeight: 18 },
   modalAlertBold: { fontWeight: '800' },
+
+  // alert modal scroll + late-steps list
+  modalScroll: { maxHeight: 440 },
+  modalScrollContent: { gap: 12, paddingBottom: 4 },
+  lateSection: { backgroundColor: '#FFFBEB', borderColor: '#FDE68A', borderWidth: 1, borderRadius: 12, padding: 14, gap: 10 },
+  lateSectionHead: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  lateSectionTitle: { flex: 1, color: '#92400E', fontSize: 14, fontWeight: '800' },
+  lateSectionCount: { minWidth: 22, paddingHorizontal: 6, paddingVertical: 1, borderRadius: 999, backgroundColor: '#F59E0B', alignItems: 'center', justifyContent: 'center' },
+  lateSectionCountText: { color: '#FFFFFF', fontSize: 12, fontWeight: '900' },
+  lateSectionSub: { color: '#B45309', fontSize: 12, lineHeight: 17, fontWeight: '600' },
+  lateRow: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#FFFFFF', borderRadius: 10, padding: 10, borderWidth: 1, borderColor: '#FEF3C7' },
+  lateBadge: { width: 44, height: 44, borderRadius: 10, backgroundColor: '#FEF2F2', alignItems: 'center', justifyContent: 'center' },
+  lateBadgeNum: { color: '#DC2626', fontSize: 16, fontWeight: '900', lineHeight: 18 },
+  lateBadgeUnit: { color: '#DC2626', fontSize: 9, fontWeight: '700' },
+  lateService: { color: '#0F172A', fontSize: 13, fontWeight: '800' },
+  lateMeta: { color: '#64748B', fontSize: 11.5, fontWeight: '600', marginTop: 1 },
+  lateMore: { color: '#B45309', fontSize: 12, fontWeight: '700', textAlign: 'center', paddingTop: 2 },
+  emptyAlerts: { alignItems: 'center', gap: 8, backgroundColor: '#F0FDF4', borderColor: '#A7F3D0', borderWidth: 1, borderRadius: 14, paddingVertical: 24, paddingHorizontal: 16 },
+  emptyAlertsIcon: { width: 52, height: 52, borderRadius: 26, backgroundColor: '#DCFCE7', alignItems: 'center', justifyContent: 'center' },
+  emptyAlertsTitle: { color: '#047857', fontSize: 16, fontWeight: '900' },
+  emptyAlertsSub: { color: '#15803D', fontSize: 12.5, fontWeight: '600', textAlign: 'center', lineHeight: 18 },
 });
