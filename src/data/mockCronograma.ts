@@ -312,15 +312,22 @@ export function buildGantt(tasks: CronogramaTask[], mode: 'pavimento' | 'etapa')
     .sort((a, b) => a.ordem - b.ordem);
 }
 
-// Soma (agrega) uma lista de tarefas em UMA tarefa sintética:
-// duração = soma das durações; início = menor início; status = pior caso.
+// Agrega uma lista de tarefas em UMA tarefa sintética. A barra do agregado
+// precisa cobrir a UNIÃO das datas (min→max) — somar as durações fazia o fim
+// visual se afastar da última data prevista quando as tarefas se sobrepõem
+// (ex.: pavimento fecha em 09/07 mas a barra ia até 19/07 porque a soma dos
+// dias das tarefas paralelas era muito maior que o span real).
+// `duracaoDias` continua sendo a SOMA (esforço planejado em dias) — usada só
+// para totais textuais no modal de detalhamento, não para posicionar a barra.
 function aggregateTasks(list: CronogramaTask[], id: string): CronogramaTask {
   const f = list[0];
   const sumPlanned = list.reduce((acc, t) => acc + t.duracaoDias, 0);
   const withActual = list.filter((t) => t.actualStartOffset != null && t.actualEndOffset != null);
   const sumActual = withActual.reduce((acc, t) => acc + (t.actualDias ?? 0), 0);
   const aggStart = Math.min(...list.map((t) => t.startOffset));
+  const aggEnd = Math.max(...list.map((t) => t.endOffset));
   const aggActualStart = withActual.length ? Math.min(...withActual.map((t) => t.actualStartOffset!)) : undefined;
+  const aggActualEnd = withActual.length ? Math.max(...withActual.map((t) => t.actualEndOffset!)) : undefined;
   const status: CronogramaStatus = list.some((t) => t.status === 'Atrasada')
     ? 'Atrasada'
     : list.every((t) => t.status === 'Concluída')
@@ -336,9 +343,9 @@ function aggregateTasks(list: CronogramaTask[], id: string): CronogramaTask {
     responsibles: [],
     startOffset: aggStart,
     duracaoDias: sumPlanned,
-    endOffset: aggStart + sumPlanned,
+    endOffset: aggEnd,
     actualStartOffset: aggActualStart,
-    actualEndOffset: aggActualStart != null ? aggActualStart + sumActual : undefined,
+    actualEndOffset: aggActualEnd,
     actualDias: withActual.length ? sumActual : undefined,
     status,
     atrasoDias: 0,

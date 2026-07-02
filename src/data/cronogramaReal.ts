@@ -84,12 +84,13 @@ export function buildCronogramaFromData(
       const start = parseBr(item.plannedStart);
       const end = parseBr(item.plannedEnd);
       if (!start || !end) continue; // sem datas → não foi atribuída ao cronograma ainda
-      const duracaoDias = Math.max(1, diffDays(start, end));
+      // Datas são inclusivas: uma tarefa 01/07→03/07 dura 3 dias (não 2).
+      const duracaoDias = Math.max(1, diffDays(start, end) + 1);
       // Realizado: datas de execução. Em andamento (com início, sem fim) corre até hoje.
       const aStart = parseBr(item.actualStart);
       let aEnd = parseBr(item.actualEnd);
       if (aStart && !aEnd) aEnd = today;
-      const actualDias = aStart && aEnd ? Math.max(1, diffDays(aStart, aEnd)) : undefined;
+      const actualDias = aStart && aEnd ? Math.max(1, diffDays(aStart, aEnd) + 1) : undefined;
       raws.push({
         id: item.id,
         apartmentId: apt.id,
@@ -104,7 +105,7 @@ export function buildCronogramaFromData(
         responsibles: (aptAssign[item.id] ?? []).map(workerName),
         funcao: stage?.categoria ?? '',
         start,
-        end: addDays(start, duracaoDias),
+        end,
         duracaoDias,
         actualStart: aStart ?? undefined,
         actualEnd: aStart ? aEnd ?? undefined : undefined,
@@ -123,14 +124,17 @@ export function buildCronogramaFromData(
   const endTimes = raws.flatMap((r) => (r.actualEnd ? [r.end.getTime(), r.actualEnd.getTime()] : [r.end.getTime()]));
   const projectStart = new Date(Math.min(...startTimes));
   const projectEnd = new Date(Math.max(...endTimes));
-  const totalDias = Math.max(1, diffDays(projectStart, projectEnd));
+  // Datas inclusivas: se projectEnd == projectStart temos 1 dia visível.
+  const totalDias = Math.max(1, diffDays(projectStart, projectEnd) + 1);
   const hojeOffset = Math.max(0, Math.min(totalDias, diffDays(projectStart, today)));
 
   const tasks: CronogramaTask[] = raws.map((r) => {
     const startOffset = diffDays(projectStart, r.start);
     const endOffset = startOffset + r.duracaoDias;
     const actualStartOffset = r.actualStart ? diffDays(projectStart, r.actualStart) : undefined;
-    const actualEndOffset = r.actualEnd ? diffDays(projectStart, r.actualEnd) : undefined;
+    // +1 mantém coerência inclusiva com endOffset: célula do último dia realizado
+    // pinta porque a renderização usa i < actualEndOffset.
+    const actualEndOffset = r.actualEnd ? diffDays(projectStart, r.actualEnd) + 1 : undefined;
     let status: CronogramaStatus;
     let atrasoDias = 0;
     if (r.executadoPct >= 1) {

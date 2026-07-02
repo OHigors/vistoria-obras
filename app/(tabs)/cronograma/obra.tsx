@@ -93,6 +93,8 @@ export default function CronogramaObraScreen() {
   const [saving, setSaving] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<CronogramaTask | null>(null);
+  const [deletingOne, setDeletingOne] = useState(false);
   const [fApts, setFApts] = useState<string[]>([]);
   const [fStage, setFStage] = useState('');
   const [fStart, setFStart] = useState('');
@@ -208,7 +210,7 @@ export default function CronogramaObraScreen() {
   const isLoading = loading && apartments.length === 0;
 
   const openAdd = () => {
-    setFApts(apartments[0] ? [apartments[0].id] : []);
+    setFApts([]);
     setFStage('');
     setFStart('');
     setFDays('');
@@ -273,7 +275,9 @@ export default function CronogramaObraScreen() {
       }
 
       const state: ChecklistState = fProgress >= 100 ? 'ok' : fProgress > 0 ? 'partial' : 'pending';
-      const plannedEnd = addDaysToBr(fStart, Math.round(days));
+      // Data-fim é inclusiva: N dias começando em 01/07 → termina em 01/07 + (N-1).
+      // Assim "3 dias" ocupa 3 datas (01, 02, 03) — condiz com o que o usuário digita.
+      const plannedEnd = addDaysToBr(fStart, Math.max(0, Math.round(days) - 1));
       const trimmedNote = fNote.trim();
 
       // 2) upsert datas + atribuições em paralelo por apartamento.
@@ -311,6 +315,41 @@ export default function CronogramaObraScreen() {
       setFError('Não foi possível salvar. Verifique a conexão e tente novamente.');
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Remove UMA etapa do cronograma limpando só as datas dela — o item continua
+  // no checklist com o mesmo status. Se o breakdown atual ficar vazio, fecha-o.
+  const removeOneStep = async () => {
+    const target = deleteTarget;
+    if (!target) return;
+    const apt = apartments.find((a) => a.id === target.apartmentId);
+    const item = (apt?.checklist as ScheduledChecklistItem[] | undefined)?.find((i) => i.id === target.id);
+    if (!apt || !item) {
+      setDeleteTarget(null);
+      return;
+    }
+    setDeletingOne(true);
+    try {
+      await db.upsertChecklistItem({
+        ...item,
+        apartmentId: apt.id,
+        plannedStart: undefined,
+        plannedEnd: undefined,
+        actualStart: undefined,
+        actualEnd: undefined,
+      });
+      await refreshData();
+      if (breakdown) {
+        const remaining = breakdown.tasks.filter((t) => t.id !== target.id);
+        if (remaining.length === 0) setBreakdown(null);
+        else setBreakdown({ ...breakdown, tasks: remaining });
+      }
+      setDeleteTarget(null);
+    } catch {
+      // silencia — mesma política do clearCronograma
+    } finally {
+      setDeletingOne(false);
     }
   };
 
@@ -647,7 +686,16 @@ export default function CronogramaObraScreen() {
                       <View style={mod.taskInner}>
                         <View style={mod.taskTop}>
                           <Text style={mod.taskEtapa}>{t.tower ? `${t.tower} · ` : ''}Apto {t.apartmentNumber} · {t.etapa}</Text>
-                          <StatusPill status={t.status} />
+                          <View style={mod.taskActions}>
+                            <StatusPill status={t.status} />
+                            <Pressable
+                              onPress={() => setDeleteTarget(t)}
+                              style={mod.taskDeleteBtn}
+                              hitSlop={6}
+                              accessibilityLabel="Remover esta tarefa do cronograma">
+                              <MaterialCommunityIcons name="trash-can-outline" size={16} color="#B91C1C" />
+                            </Pressable>
+                          </View>
                         </View>
                         <View style={mod.taskMetaRow}>
                           <MaterialCommunityIcons name="account-hard-hat" size={13} color="#94A3B8" />
@@ -881,6 +929,36 @@ export default function CronogramaObraScreen() {
         </Pressable>
       </Modal>
 
+      {/* ── CONFIRM REMOVE ONE STEP ─────────────────────────────────────────── */}
+      <Modal animationType="fade" transparent visible={!!deleteTarget} onRequestClose={() => setDeleteTarget(null)}>
+        <Pressable style={mod.confirmBackdrop} onPress={() => setDeleteTarget(null)}>
+          <Pressable style={mod.confirmSheet} onPress={(e) => e.stopPropagation()}>
+            <View style={mod.confirmIcon}>
+              <MaterialCommunityIcons name="trash-can-outline" size={22} color="#B91C1C" />
+            </View>
+            <Text style={mod.confirmTitle}>Remover tarefa?</Text>
+            <Text style={mod.confirmText}>
+              {deleteTarget
+                ? `Vai limpar as datas de "${deleteTarget.etapa}" no apto ${deleteTarget.apartmentNumber}. A etapa continua no checklist — só sai do cronograma.`
+                : ''}
+            </Text>
+            <View style={mod.confirmActions}>
+              <Pressable onPress={() => setDeleteTarget(null)} disabled={deletingOne} style={[form.actionBtn, form.cancelBtn]}>
+                <Text style={form.cancelText}>Cancelar</Text>
+              </Pressable>
+              <Pressable onPress={removeOneStep} disabled={deletingOne} style={[form.actionBtn, mod.confirmDanger, deletingOne && { opacity: 0.7 }]}>
+                {deletingOne ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <MaterialCommunityIcons name="trash-can-outline" size={18} color="#FFFFFF" />
+                )}
+                <Text style={form.saveText}>{deletingOne ? 'Removendo…' : 'Remover'}</Text>
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       {/* ── CONFIRM CLEAR (modo teste) ───────────────────────────────────────── */}
       <Modal animationType="fade" transparent visible={clearOpen} onRequestClose={() => setClearOpen(false)}>
         <Pressable style={mod.confirmBackdrop} onPress={() => setClearOpen(false)}>
@@ -1060,6 +1138,8 @@ const mod = StyleSheet.create({
   taskInner: { flex: 1, padding: 12, gap: 6 },
   taskTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
   taskEtapa: { color: '#0F172A', fontSize: 14, fontWeight: '800', flex: 1 },
+  taskActions: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  taskDeleteBtn: { width: 28, height: 28, borderRadius: 8, backgroundColor: '#FEF2F2', alignItems: 'center', justifyContent: 'center' },
   taskMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   taskMeta: { color: '#64748B', fontSize: 12, fontWeight: '600' },
   taskLate: { color: '#B91C1C', fontSize: 12, fontWeight: '700' },
