@@ -1,5 +1,5 @@
 import { useRouter } from 'expo-router';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Text } from '@/src/ui/Text';
@@ -7,7 +7,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { useObras } from '@/src/data/ObrasContext';
 import * as db from '@/src/data/db';
-import type { Apartment, ChecklistState } from '@/src/data/mockObras';
+import type { Apartment, ChecklistState, Tower } from '@/src/data/mockObras';
 import type { Worker } from '@/src/data/serviceWorkers';
 import { isValidBrDate, maskDateBr, type ScheduledChecklistItem } from '@/src/data/schedule';
 import {
@@ -20,7 +20,8 @@ import {
   type CronogramaStatus,
   type CronogramaTask,
 } from '@/src/data/mockCronograma';
-import { buildCronogramaFromData, getCronogramaStages } from '@/src/data/cronogramaReal';
+import { buildCronogramaFromData, getCronogramaStages, type TowerScheduledInput } from '@/src/data/cronogramaReal';
+import { getTowerLevel, TOWER_LEVELS } from '@/src/data/towerLevels';
 
 // ── Color token (teal) ──────────────────────────────────────────────────────────
 const C = { primary: '#0D9488', light: '#F0FDFA', medium: '#14B8A6' } as const;
@@ -42,8 +43,9 @@ const NAME_W = 94;
 const PR_W = LABEL_W - NAME_W;
 
 const MS_DAY = 24 * 60 * 60 * 1000;
-const PROGRESS_STEPS = [0, 25, 50, 75, 100] as const;
 const WEEKDAYS = ['D', 'S', 'T', 'Q', 'Q', 'S', 'S'] as const;
+
+const nivelKey = (towerId: string, code: string) => `${towerId}|${code}`;
 
 // Jogo de cores do "Realizado", célula a célula:
 //   • âmbar  → tarefa em andamento (ainda não concluída e dentro do prazo)
@@ -87,6 +89,7 @@ export default function CronogramaObraScreen() {
   // dados reais carregados sob demanda (não estão no contexto)
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [assignmentsByApt, setAssignmentsByApt] = useState<Record<string, Record<string, string[]>>>({});
+  const [towerScheduled, setTowerScheduled] = useState<TowerScheduledInput[]>([]);
 
   // ── add-task form ──
   const [addOpen, setAddOpen] = useState(false);
@@ -95,12 +98,15 @@ export default function CronogramaObraScreen() {
   const [clearing, setClearing] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<CronogramaTask | null>(null);
   const [deletingOne, setDeletingOne] = useState(false);
+  const [fScope, setFScope] = useState<'apartamento' | 'nivel'>('apartamento');
   const [fApts, setFApts] = useState<string[]>([]);
+  const [fNiveis, setFNiveis] = useState<string[]>([]); // chaves `${towerId}|${levelCode}`
+  const [collapsedAptGroups, setCollapsedAptGroups] = useState<Record<string, boolean>>({});
+  const [expandedFloors, setExpandedFloors] = useState<Record<string, boolean>>({}); // pavimentos abertos (padrão: fechado)
   const [fStage, setFStage] = useState('');
   const [fStart, setFStart] = useState('');
   const [fDays, setFDays] = useState('');
   const [fResp, setFResp] = useState<string[]>([]);
-  const [fProgress, setFProgress] = useState(0);
   const [fNote, setFNote] = useState('');
   const [fError, setFError] = useState<string | null>(null);
 
@@ -124,9 +130,35 @@ export default function CronogramaObraScreen() {
     };
   }, [apartments]);
 
+  // Etapas de nível de torre (com datas) para o "Por pavimento".
+  const loadTowerScheduled = useCallback(async () => {
+    const results = await Promise.all(
+      towers.map((t) =>
+        db.loadTowerChecklist(t.id).then((items) => ({ t, items })).catch(() => ({ t, items: [] as db.TowerChecklistItem[] })),
+      ),
+    );
+    const input: TowerScheduledInput[] = [];
+    for (const { t, items } of results) {
+      for (const item of items) {
+        input.push({
+          item,
+          towerId: t.id,
+          levelCode: item.levelCode,
+          levelLabel: getTowerLevel(item.levelCode)?.label ?? item.levelCode,
+          levelOrder: TOWER_LEVELS.findIndex((l) => l.code === item.levelCode),
+        });
+      }
+    }
+    setTowerScheduled(input);
+  }, [towers]);
+
+  useEffect(() => {
+    loadTowerScheduled().catch(() => {});
+  }, [loadTowerScheduled]);
+
   const result = useMemo(
-    () => buildCronogramaFromData(apartments, serviceStages, workers, assignmentsByApt, towers),
-    [apartments, serviceStages, workers, assignmentsByApt, towers],
+    () => buildCronogramaFromData(apartments, serviceStages, workers, assignmentsByApt, towers, towerScheduled),
+    [apartments, serviceStages, workers, assignmentsByApt, towers, towerScheduled],
   );
 
   // filtro de torre (aplica nas duas abas)
@@ -140,33 +172,47 @@ export default function CronogramaObraScreen() {
     [result, effectiveTower],
   );
 
+  // "Por etapa" ainda não trata níveis de torre — mostra só tarefas de apartamento.
+  const aptOnlyTasks = useMemo(() => visibleTasks.filter((t) => t.apartmentId), [visibleTasks]);
   const groups = useMemo(() => {
     if (view === 'pavimento') return buildPavimentoGantt(visibleTasks);
-    return selectedCategory ? buildCategoryGantt(visibleTasks, selectedCategory) : [];
-  }, [visibleTasks, view, selectedCategory]);
-  const categoryGroups = useMemo(() => getCategoryGroups(visibleTasks), [visibleTasks]);
+    return selectedCategory ? buildCategoryGantt(aptOnlyTasks, selectedCategory) : [];
+  }, [visibleTasks, aptOnlyTasks, view, selectedCategory]);
+  const categoryGroups = useMemo(() => getCategoryGroups(aptOnlyTasks), [aptOnlyTasks]);
   const cronStages = useMemo(() => getCronogramaStages(serviceStages), [serviceStages]);
 
   // apartamentos agrupados por torre/pavimento para o seletor do formulário
-  const aptGroups = useMemo(() => {
-    const multiTower = towers.length > 1;
-    const map = new Map<string, { label: string; order: number; apts: Apartment[] }>();
-    apartments.forEach((a) => {
+  // Apartamentos organizados por Torre → Pavimento (hierarquia do seletor).
+  const towerAptGroups = useMemo(() => {
+    const byTower = new Map<string, { tower: Tower; floors: Map<string, Apartment[]> }>();
+    for (const a of apartments) {
       const tower = towers.find((t) => t.id === a.towerId);
-      const towerIdx = Math.max(0, towers.findIndex((t) => t.id === a.towerId));
-      const floorNum = Number(a.floor.match(/\d+/)?.[0] ?? 0);
-      const key = multiTower ? `${a.towerId}|${a.floor}` : a.floor;
-      const label = multiTower && tower ? `${tower.name} · ${a.floor}` : a.floor;
-      if (!map.has(key)) map.set(key, { label, order: towerIdx * 1000 + floorNum, apts: [] });
-      map.get(key)!.apts.push(a);
-    });
-    return [...map.values()]
-      .sort((x, y) => x.order - y.order)
-      .map((g) => ({
-        ...g,
-        apts: g.apts.sort((p, q) => p.number.localeCompare(q.number, 'pt-BR', { numeric: true })),
+      if (!tower) continue;
+      if (!byTower.has(tower.id)) byTower.set(tower.id, { tower, floors: new Map() });
+      const g = byTower.get(tower.id)!;
+      if (!g.floors.has(a.floor)) g.floors.set(a.floor, []);
+      g.floors.get(a.floor)!.push(a);
+    }
+    const floorNum = (f: string) => Number(f.match(/\d+/)?.[0] ?? 0);
+    const towerIdx = (id: string) => {
+      const i = towers.findIndex((t) => t.id === id);
+      return i < 0 ? 999 : i;
+    };
+    return [...byTower.values()]
+      .sort((x, y) => towerIdx(x.tower.id) - towerIdx(y.tower.id))
+      .map(({ tower, floors }) => ({
+        tower,
+        floors: [...floors.entries()]
+          .map(([floor, apts]) => ({ floor, apts: apts.sort((p, q) => p.number.localeCompare(q.number, 'pt-BR', { numeric: true })) }))
+          .sort((a, b) => floorNum(a.floor) - floorNum(b.floor)),
       }));
   }, [apartments, towers]);
+
+  // Torres → níveis estruturais (mesmo catálogo do Corte), para o escopo "Níveis".
+  const nivelGroups = useMemo(
+    () => towers.map((t) => ({ tower: t, levels: TOWER_LEVELS })),
+    [towers],
+  );
 
   const stats = useMemo(() => {
     const total = visibleTasks.length;
@@ -210,12 +256,15 @@ export default function CronogramaObraScreen() {
   const isLoading = loading && apartments.length === 0;
 
   const openAdd = () => {
+    setFScope('apartamento');
     setFApts([]);
+    setFNiveis([]);
+    setCollapsedAptGroups({});
+    setExpandedFloors({});
     setFStage('');
     setFStart('');
     setFDays('');
     setFResp([]);
-    setFProgress(0);
     setFNote('');
     setFError(null);
     setAddOpen(true);
@@ -238,19 +287,70 @@ export default function CronogramaObraScreen() {
 
   const selectAllApts = () => setFApts(apartments.map((a) => a.id));
   const clearApts = () => setFApts([]);
+  const toggleAptCollapse = (key: string) =>
+    setCollapsedAptGroups((prev) => ({ ...prev, [key]: !prev[key] }));
+  const toggleFloor = (key: string) =>
+    setExpandedFloors((prev) => ({ ...prev, [key]: !prev[key] }));
+
+  const toggleNivel = (key: string) =>
+    setFNiveis((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+  const toggleTowerNiveis = (keys: string[]) =>
+    setFNiveis((prev) => {
+      const allSelected = keys.every((k) => prev.includes(k));
+      if (allSelected) return prev.filter((k) => !keys.includes(k));
+      const merged = new Set(prev);
+      for (const k of keys) merged.add(k);
+      return [...merged];
+    });
 
   const saveTask = async () => {
-    if (fApts.length === 0) return setFError('Selecione ao menos um apartamento.');
     if (!fStage) return setFError('Selecione a etapa.');
     if (!isValidBrDate(fStart)) return setFError('Informe uma data de início válida (dd/mm/aaaa).');
     const days = Number(fDays);
     if (!Number.isFinite(days) || days < 1) return setFError('Informe a duração em dias (mínimo 1).');
 
-    const selectedApts = apartments.filter((a) => fApts.includes(a.id));
-    if (selectedApts.length === 0) return setFError('Apartamentos não encontrados.');
-
     const fullStage = serviceStages.find((sg) => sg.nome === fStage);
     if (!fullStage) return setFError('Etapa não encontrada no catálogo.');
+
+    // Data-fim é inclusiva: N dias começando em 01/07 → termina em 01/07 + (N-1).
+    const plannedEnd = addDaysToBr(fStart, Math.max(0, Math.round(days) - 1));
+    const trimmedNote = fNote.trim();
+
+    // ── Escopo: NÍVEIS de torre ──────────────────────────────────────────────
+    if (fScope === 'nivel') {
+      if (fNiveis.length === 0) return setFError('Selecione ao menos um nível.');
+      setSaving(true);
+      setFError(null);
+      try {
+        await Promise.all(
+          fNiveis.map(async (key) => {
+            const [towerId, levelCode] = key.split('|');
+            // Idempotente: cria a etapa no nível se ainda não existir e devolve o item.
+            const created = await db.addTowerChecklistItem({ towerId, levelCode, label: fStage, sortOrder: fullStage.ordemExecucao });
+            await db.upsertTowerChecklistItem({
+              ...created,
+              towerId,
+              levelCode,
+              comment: trimmedNote || created.comment,
+              plannedStart: fStart,
+              plannedEnd,
+            });
+          }),
+        );
+        await loadTowerScheduled();
+        setAddOpen(false);
+      } catch {
+        setFError('Não foi possível salvar. Verifique a conexão e tente novamente.');
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
+
+    // ── Escopo: APARTAMENTOS ─────────────────────────────────────────────────
+    if (fApts.length === 0) return setFError('Selecione ao menos um apartamento.');
+    const selectedApts = apartments.filter((a) => fApts.includes(a.id));
+    if (selectedApts.length === 0) return setFError('Apartamentos não encontrados.');
 
     setSaving(true);
     setFError(null);
@@ -274,13 +374,8 @@ export default function CronogramaObraScreen() {
         }
       }
 
-      const state: ChecklistState = fProgress >= 100 ? 'ok' : fProgress > 0 ? 'partial' : 'pending';
-      // Data-fim é inclusiva: N dias começando em 01/07 → termina em 01/07 + (N-1).
-      // Assim "3 dias" ocupa 3 datas (01, 02, 03) — condiz com o que o usuário digita.
-      const plannedEnd = addDaysToBr(fStart, Math.max(0, Math.round(days) - 1));
-      const trimmedNote = fNote.trim();
-
-      // 2) upsert datas + atribuições em paralelo por apartamento.
+      // 2) upsert datas + atribuições em paralelo por apartamento. O status da
+      // vistoria é preservado (o cronograma só cuida das datas).
       await Promise.all(
         selectedApts.map(async (apt) => {
           const itemId = itemIdByApt.get(apt.id);
@@ -290,7 +385,7 @@ export default function CronogramaObraScreen() {
             id: itemId,
             apartmentId: apt.id,
             label: fStage,
-            state,
+            state: existing?.state ?? 'pending',
             comment: trimmedNote || existing?.comment,
             emergency: existing?.emergency,
             area: existing?.area ?? 'Interior',
@@ -685,7 +780,7 @@ export default function CronogramaObraScreen() {
                       <View style={[mod.taskStripe, { backgroundColor: STATUS_COLORS[t.status].bar }]} />
                       <View style={mod.taskInner}>
                         <View style={mod.taskTop}>
-                          <Text style={mod.taskEtapa}>{t.tower ? `${t.tower} · ` : ''}Apto {t.apartmentNumber} · {t.etapa}</Text>
+                          <Text style={mod.taskEtapa}>{t.tower ? `${t.tower} · ` : ''}{t.apartmentNumber ? `Apto ${t.apartmentNumber} · ` : ''}{t.etapa}</Text>
                           <View style={mod.taskActions}>
                             <StatusPill status={t.status} />
                             <Pressable
@@ -743,7 +838,9 @@ export default function CronogramaObraScreen() {
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={mod.headerTitle}>Adicionar tarefa</Text>
-                  <Text style={mod.headerSub}>Atribua uma etapa a um ou mais apartamentos</Text>
+                  <Text style={mod.headerSub}>
+                    {fScope === 'apartamento' ? 'Atribua uma etapa a um ou mais apartamentos' : 'Agende uma etapa em um ou mais níveis das torres'}
+                  </Text>
                 </View>
               </View>
               <Pressable onPress={() => setAddOpen(false)} style={mod.closeBtn} hitSlop={8}>
@@ -754,62 +851,149 @@ export default function CronogramaObraScreen() {
             <ScrollView style={mod.list} contentContainerStyle={form.content} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
               <View style={form.notice}>
                 <MaterialCommunityIcons name="content-save-outline" size={14} color={C.primary} />
-                <Text style={form.noticeText}>A mesma etapa pode ser aplicada a vários apartamentos de uma vez — datas e responsáveis idênticos.</Text>
-              </View>
-
-              {/* Apartamento(s) — multi-seleção agrupada por torre/pavimento */}
-              <View style={form.aptHeader}>
-                <Text style={form.label}>Apartamento(s)</Text>
-                <Text style={form.aptCount}>
-                  {fApts.length} de {apartments.length} selecionado(s)
+                <Text style={form.noticeText}>
+                  {fScope === 'apartamento'
+                    ? 'A mesma etapa pode ser aplicada a vários apartamentos de uma vez — datas idênticas.'
+                    : 'Agende etapas estruturais (fundação, terreno, reservatório…) em um ou mais níveis das torres.'}
                 </Text>
               </View>
-              <View style={form.bulkRow}>
-                <Pressable onPress={selectAllApts} style={form.bulkBtn}>
-                  <MaterialCommunityIcons name="checkbox-multiple-marked-outline" size={13} color={C.primary} />
-                  <Text style={form.bulkText}>Selecionar todos</Text>
-                </Pressable>
-                <Pressable onPress={clearApts} disabled={fApts.length === 0} style={[form.bulkBtn, fApts.length === 0 && { opacity: 0.5 }]}>
-                  <MaterialCommunityIcons name="close-circle-outline" size={13} color="#64748B" />
-                  <Text style={[form.bulkText, { color: '#64748B' }]}>Limpar</Text>
-                </Pressable>
-              </View>
-              {aptGroups.map((grp) => {
-                const groupIds = grp.apts.map((a) => a.id);
-                const selectedInGroup = groupIds.filter((id) => fApts.includes(id)).length;
-                const allSelected = selectedInGroup === groupIds.length;
-                return (
-                  <View key={grp.label} style={form.aptGroup}>
-                    <Pressable onPress={() => toggleGroup(groupIds)} style={form.aptGroupHead} hitSlop={6}>
-                      <MaterialCommunityIcons
-                        name={allSelected ? 'checkbox-marked' : selectedInGroup > 0 ? 'checkbox-intermediate' : 'checkbox-blank-outline'}
-                        size={15}
-                        color={selectedInGroup > 0 ? C.primary : '#94A3B8'}
-                      />
-                      <Text style={form.aptGroupLabel}>{grp.label}</Text>
-                      {selectedInGroup > 0 && (
-                        <Text style={form.aptGroupCount}>
-                          {selectedInGroup}/{groupIds.length}
-                        </Text>
-                      )}
+
+              {/* Escopo: apartamentos ou níveis */}
+              <View style={form.scopeToggle}>
+                {([['apartamento', 'Apartamentos', 'door'], ['nivel', 'Níveis', 'layers-triple-outline']] as const).map(([v, label, icon]) => {
+                  const active = fScope === v;
+                  return (
+                    <Pressable key={v} onPress={() => setFScope(v)} style={[form.scopeBtn, active && form.scopeBtnActive]}>
+                      <MaterialCommunityIcons name={icon} size={15} color={active ? C.primary : '#94A3B8'} />
+                      <Text style={[form.scopeText, active && form.scopeTextActive]}>{label}</Text>
                     </Pressable>
-                    <View style={form.chipsWrap}>
-                      {grp.apts.map((a) => {
-                        const active = fApts.includes(a.id);
-                        return (
-                          <Pressable
-                            key={a.id}
-                            onPress={() => toggleApt(a.id)}
-                            style={[form.chip, active && form.chipActive]}>
-                            {active && <MaterialCommunityIcons name="check" size={13} color={C.primary} style={{ marginRight: 4 }} />}
-                            <Text style={[form.chipText, active && form.chipTextActive]}>Apto {a.number}</Text>
-                          </Pressable>
-                        );
-                      })}
-                    </View>
+                  );
+                })}
+              </View>
+
+              {fScope === 'apartamento' ? (
+                <>
+                  <View style={form.aptHeader}>
+                    <Text style={form.label}>Apartamento(s)</Text>
+                    <Text style={form.aptCount}>{fApts.length} de {apartments.length} selecionado(s)</Text>
                   </View>
-                );
-              })}
+                  <View style={form.bulkRow}>
+                    <Pressable onPress={selectAllApts} style={form.bulkBtn}>
+                      <MaterialCommunityIcons name="checkbox-multiple-marked-outline" size={13} color={C.primary} />
+                      <Text style={form.bulkText}>Selecionar todos</Text>
+                    </Pressable>
+                    <Pressable onPress={clearApts} disabled={fApts.length === 0} style={[form.bulkBtn, fApts.length === 0 && { opacity: 0.5 }]}>
+                      <MaterialCommunityIcons name="close-circle-outline" size={13} color="#64748B" />
+                      <Text style={[form.bulkText, { color: '#64748B' }]}>Limpar</Text>
+                    </Pressable>
+                  </View>
+                  {towerAptGroups.map((tg) => {
+                    const towerIds = tg.floors.flatMap((f) => f.apts.map((a) => a.id));
+                    const selInTower = towerIds.filter((id) => fApts.includes(id)).length;
+                    const towerAll = towerIds.length > 0 && selInTower === towerIds.length;
+                    const collapsed = collapsedAptGroups[tg.tower.id] === true;
+                    return (
+                      <View key={tg.tower.id} style={form.towerBlock}>
+                        <View style={form.aptGroupHead}>
+                          <Pressable onPress={() => toggleGroup(towerIds)} style={form.aptGroupSelect} hitSlop={6}>
+                            <MaterialCommunityIcons
+                              name={towerAll ? 'checkbox-marked' : selInTower > 0 ? 'checkbox-intermediate' : 'checkbox-blank-outline'}
+                              size={16}
+                              color={selInTower > 0 ? C.primary : '#94A3B8'}
+                            />
+                            <MaterialCommunityIcons name="office-building-outline" size={14} color="#64748B" />
+                            <Text style={form.towerName}>{tg.tower.name}</Text>
+                          </Pressable>
+                          {selInTower > 0 && <Text style={form.aptGroupCount}>{selInTower}/{towerIds.length}</Text>}
+                          <Pressable onPress={() => toggleAptCollapse(tg.tower.id)} hitSlop={8} style={form.aptGroupChevron}>
+                            <MaterialCommunityIcons name={collapsed ? 'chevron-down' : 'chevron-up'} size={18} color="#94A3B8" />
+                          </Pressable>
+                        </View>
+                        {!collapsed && tg.floors.map((f) => {
+                          const floorIds = f.apts.map((a) => a.id);
+                          const selInFloor = floorIds.filter((id) => fApts.includes(id)).length;
+                          const floorAll = selInFloor === floorIds.length;
+                          const fKey = `${tg.tower.id}|${f.floor}`;
+                          const floorOpen = expandedFloors[fKey] === true;
+                          return (
+                            <View key={f.floor} style={form.floorBlock}>
+                              <View style={form.floorHead}>
+                                <Pressable onPress={() => toggleGroup(floorIds)} style={form.floorSelect} hitSlop={6}>
+                                  <MaterialCommunityIcons
+                                    name={floorAll ? 'checkbox-marked' : selInFloor > 0 ? 'checkbox-intermediate' : 'checkbox-blank-outline'}
+                                    size={14}
+                                    color={selInFloor > 0 ? C.primary : '#CBD5E1'}
+                                  />
+                                  <Text style={form.floorLabel}>{f.floor}</Text>
+                                  <Text style={form.floorMeta}>· {floorIds.length} apto(s)</Text>
+                                  {selInFloor > 0 && <Text style={form.floorCount}>{selInFloor}/{floorIds.length}</Text>}
+                                </Pressable>
+                                <Pressable onPress={() => toggleFloor(fKey)} hitSlop={8} style={form.aptGroupChevron}>
+                                  <MaterialCommunityIcons name={floorOpen ? 'chevron-up' : 'chevron-down'} size={16} color="#94A3B8" />
+                                </Pressable>
+                              </View>
+                              {floorOpen && (
+                                <View style={form.chipsWrap}>
+                                  {f.apts.map((a) => {
+                                    const active = fApts.includes(a.id);
+                                    return (
+                                      <Pressable key={a.id} onPress={() => toggleApt(a.id)} style={[form.chip, active && form.chipActive]}>
+                                        {active && <MaterialCommunityIcons name="check" size={13} color={C.primary} style={{ marginRight: 4 }} />}
+                                        <Text style={[form.chipText, active && form.chipTextActive]}>Apto {a.number}</Text>
+                                      </Pressable>
+                                    );
+                                  })}
+                                </View>
+                              )}
+                            </View>
+                          );
+                        })}
+                      </View>
+                    );
+                  })}
+                </>
+              ) : (
+                <>
+                  <View style={form.aptHeader}>
+                    <Text style={form.label}>Nível(is)</Text>
+                    <Text style={form.aptCount}>{fNiveis.length} selecionado(s)</Text>
+                  </View>
+                  {nivelGroups.length === 0 ? (
+                    <Text style={form.empty}>Nenhuma torre cadastrada.</Text>
+                  ) : (
+                    nivelGroups.map(({ tower: t, levels }) => {
+                      const keys = levels.map((l) => nivelKey(t.id, l.code));
+                      const selectedInTower = keys.filter((k) => fNiveis.includes(k)).length;
+                      const allSelected = selectedInTower === keys.length;
+                      return (
+                        <View key={t.id} style={form.aptGroup}>
+                          <Pressable onPress={() => toggleTowerNiveis(keys)} style={form.aptGroupSelect} hitSlop={6}>
+                            <MaterialCommunityIcons
+                              name={allSelected ? 'checkbox-marked' : selectedInTower > 0 ? 'checkbox-intermediate' : 'checkbox-blank-outline'}
+                              size={15}
+                              color={selectedInTower > 0 ? C.primary : '#94A3B8'}
+                            />
+                            <Text style={form.aptGroupLabel}>{t.name}</Text>
+                            {selectedInTower > 0 && <Text style={form.aptGroupCount}>{selectedInTower}/{keys.length}</Text>}
+                          </Pressable>
+                          <View style={form.chipsWrap}>
+                            {levels.map((l) => {
+                              const key = nivelKey(t.id, l.code);
+                              const active = fNiveis.includes(key);
+                              return (
+                                <Pressable key={key} onPress={() => toggleNivel(key)} style={[form.chip, active && form.chipActive]}>
+                                  {active && <MaterialCommunityIcons name="check" size={13} color={C.primary} style={{ marginRight: 4 }} />}
+                                  <Text style={[form.chipText, active && form.chipTextActive]}>{l.label}</Text>
+                                </Pressable>
+                              );
+                            })}
+                          </View>
+                        </View>
+                      );
+                    })
+                  )}
+                </>
+              )}
 
               {/* Etapa */}
               <Text style={form.label}>Etapa / serviço</Text>
@@ -860,36 +1044,27 @@ export default function CronogramaObraScreen() {
                 </View>
               </View>
 
-              {/* Responsáveis */}
-              <Text style={form.label}>Responsáveis</Text>
-              {workers.length === 0 ? (
-                <Text style={form.empty}>Nenhum colaborador cadastrado.</Text>
-              ) : (
-                <View style={form.chipsWrap}>
-                  {workers.map((w) => {
-                    const active = fResp.includes(w.id);
-                    return (
-                      <Pressable key={w.id} onPress={() => toggleResp(w.id)} style={[form.chip, active && form.chipActive]}>
-                        {active && <MaterialCommunityIcons name="check" size={13} color={C.primary} style={{ marginRight: 4 }} />}
-                        <Text style={[form.chipText, active && form.chipTextActive]}>{w.nome}</Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
+              {/* Responsáveis — só apartamentos têm atribuição de colaboradores */}
+              {fScope === 'apartamento' && (
+                <>
+                  <Text style={form.label}>Responsáveis</Text>
+                  {workers.length === 0 ? (
+                    <Text style={form.empty}>Nenhum colaborador cadastrado.</Text>
+                  ) : (
+                    <View style={form.chipsWrap}>
+                      {workers.map((w) => {
+                        const active = fResp.includes(w.id);
+                        return (
+                          <Pressable key={w.id} onPress={() => toggleResp(w.id)} style={[form.chip, active && form.chipActive]}>
+                            {active && <MaterialCommunityIcons name="check" size={13} color={C.primary} style={{ marginRight: 4 }} />}
+                            <Text style={[form.chipText, active && form.chipTextActive]}>{w.nome}</Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  )}
+                </>
               )}
-
-              {/* Progresso */}
-              <Text style={form.label}>Progresso</Text>
-              <View style={form.progressRow}>
-                {PROGRESS_STEPS.map((p) => {
-                  const active = p === fProgress;
-                  return (
-                    <Pressable key={p} onPress={() => setFProgress(p)} style={[form.progBtn, active && form.progBtnActive]}>
-                      <Text style={[form.progText, active && form.progTextActive]}>{p}%</Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
 
               {/* Observação */}
               <Text style={form.label}>Observação (opcional)</Text>
@@ -917,9 +1092,9 @@ export default function CronogramaObraScreen() {
                   <Text style={form.saveText}>
                     {saving
                       ? 'Salvando…'
-                      : fApts.length > 1
-                        ? `Salvar em ${fApts.length} aptos`
-                        : 'Salvar tarefa'}
+                      : fScope === 'nivel'
+                        ? (fNiveis.length > 1 ? `Salvar em ${fNiveis.length} níveis` : 'Salvar no nível')
+                        : (fApts.length > 1 ? `Salvar em ${fApts.length} aptos` : 'Salvar tarefa')}
                   </Text>
                 </Pressable>
               </View>
@@ -1167,10 +1342,28 @@ const form = StyleSheet.create({
   chipActive: { backgroundColor: C.light, borderColor: C.medium },
   chipText: { color: '#475569', fontSize: 12, fontWeight: '700' },
   chipTextActive: { color: C.primary },
+  scopeToggle: { flexDirection: 'row', backgroundColor: '#F1F5F9', borderRadius: 10, padding: 3, gap: 3, marginTop: 4 },
+  scopeBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 9, borderRadius: 8 },
+  scopeBtnActive: { backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#E2E8F0' },
+  scopeText: { color: '#94A3B8', fontSize: 13, fontWeight: '800' },
+  scopeTextActive: { color: C.primary },
+
   aptGroup: { gap: 6, marginBottom: 6 },
   aptGroupHead: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 2 },
+  aptGroupSelect: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 6 },
+  aptGroupChevron: { padding: 2 },
   aptGroupLabel: { color: '#94A3B8', fontSize: 10, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.5 },
-  aptGroupCount: { color: C.primary, fontSize: 10, fontWeight: '800', marginLeft: 'auto' },
+  aptGroupCount: { color: C.primary, fontSize: 10, fontWeight: '800' },
+
+  // hierarquia Torre → Pavimento → Aptos
+  towerBlock: { gap: 8, marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#F1F5F9' },
+  towerName: { color: '#0F172A', fontSize: 13, fontWeight: '900' },
+  floorBlock: { gap: 6, marginLeft: 10, paddingLeft: 8, borderLeftWidth: 2, borderLeftColor: '#F1F5F9' },
+  floorHead: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  floorSelect: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 6 },
+  floorLabel: { color: '#475569', fontSize: 11.5, fontWeight: '800' },
+  floorMeta: { color: '#94A3B8', fontSize: 10.5, fontWeight: '600' },
+  floorCount: { color: C.primary, fontSize: 10, fontWeight: '800', marginLeft: 'auto' },
   aptHeader: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 },
   aptCount: { color: C.primary, fontSize: 11, fontWeight: '800' },
   bulkRow: { flexDirection: 'row', gap: 8, marginBottom: 4 },

@@ -60,12 +60,23 @@ type RawTask = Omit<
   'startOffset' | 'endOffset' | 'status' | 'atrasoDias' | 'actualStartOffset' | 'actualEndOffset'
 >;
 
+// Etapas de nível de torre (fundação, terreno, reservatório...) que também têm
+// datas planejadas e devem aparecer no cronograma "Por pavimento".
+export type TowerScheduledInput = {
+  item: ScheduledChecklistItem;
+  towerId: string;
+  levelCode: string;
+  levelLabel: string;
+  levelOrder: number;
+};
+
 export function buildCronogramaFromData(
   apartments: Apartment[],
   serviceStages: ServiceStage[],
   workers: Worker[],
   assignmentsByApt: Record<string, Record<string, string[]>>,
   towers: Tower[] = [],
+  towerScheduled: TowerScheduledInput[] = [],
 ): CronogramaResult {
   const today = startOfToday();
   const stageByName = new Map(serviceStages.map((s) => [s.nome, s]));
@@ -114,6 +125,45 @@ export function buildCronogramaFromData(
         note: item.comment,
       });
     }
+  }
+
+  // 1b) Etapas de níveis de torre com datas planejadas. Entram como tarefas do
+  // "Por pavimento" agrupadas sob o cabeçalho "Torre · Nível" (pavimento = rótulo).
+  for (const { item, towerId, levelLabel, levelOrder } of towerScheduled) {
+    const stage = stageByName.get(item.label);
+    if (stage && (!stage.ativo || !stage.apareceNoCronograma)) continue;
+    if (item.state === 'notApplicable') continue;
+    const start = parseBr(item.plannedStart);
+    const end = parseBr(item.plannedEnd);
+    if (!start || !end) continue;
+    const duracaoDias = Math.max(1, diffDays(start, end) + 1);
+    const aStart = parseBr(item.actualStart);
+    let aEnd = parseBr(item.actualEnd);
+    if (aStart && !aEnd) aEnd = today;
+    const actualDias = aStart && aEnd ? Math.max(1, diffDays(aStart, aEnd) + 1) : undefined;
+    const tName = towerName(towerId);
+    raws.push({
+      id: item.id,
+      apartmentId: '', // '' → tarefa de nível (não de apartamento)
+      apartmentNumber: '',
+      pavimento: tName ? `${tName} · ${levelLabel}` : levelLabel,
+      pavimentoOrder: 900 + Math.max(0, levelOrder),
+      tower: tName,
+      etapaId: stage?.id ?? item.label,
+      etapa: item.label,
+      etapaAbrev: abbrev(item.label),
+      ordem: stage?.ordemExecucao ?? 999,
+      responsibles: [],
+      funcao: stage?.categoria ?? '',
+      start,
+      end,
+      duracaoDias,
+      actualStart: aStart ?? undefined,
+      actualEnd: aStart ? aEnd ?? undefined : undefined,
+      actualDias,
+      executadoPct: progressFromState(item.state),
+      note: item.comment,
+    });
   }
 
   if (raws.length === 0) {
