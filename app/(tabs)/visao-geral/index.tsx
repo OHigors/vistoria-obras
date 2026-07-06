@@ -19,9 +19,9 @@ export default function VisaoGeralScreen() {
       contentContainerStyle={[s.container, { paddingTop: insets.top + 16 }]}
       showsVerticalScrollIndicator={false}>
 
-      {/* TORRES — blue border */}
-      <View style={[s.section, s.sectionBlue]}>
-        <Text style={[s.sectionTitle, { color: '#1D4ED8' }]}>Torres</Text>
+      {/* TORRES */}
+      <View style={s.section}>
+        <Text style={s.sectionTitle}>Torres</Text>
         {loading
           ? [1, 2].map((i) => <Skeleton key={i} height={100} radius={10} />)
           : towers.map((tower) => {
@@ -29,11 +29,10 @@ export default function VisaoGeralScreen() {
               const avg = apts.length ? Math.round(apts.reduce((t, a) => t + a.progress, 0) / apts.length) : 0;
               const criticalCount = apts.filter((a) => a.status === 'critical').length;
               const attentionCount = apts.filter((a) => a.status === 'attention').length;
-              const barColor = criticalCount > 0 ? '#B91C1C' : attentionCount > 0 ? '#D97706' : '#1D4ED8';
               return (
                 <Pressable
                   key={tower.id}
-                  onPress={() => router.push({ pathname: '/visao-geral/[torreId]', params: { torreId: tower.id } })}
+                  onPress={() => router.push({ pathname: '/visao-geral/corte/[torreId]', params: { torreId: tower.id } })}
                   style={s.towerCard}>
                   <View style={s.towerTop}>
                     <View style={s.towerIconWrap}>
@@ -43,10 +42,10 @@ export default function VisaoGeralScreen() {
                       <Text style={s.towerName}>{tower.name}</Text>
                       <Text style={s.towerMeta}>{tower.block} · {tower.position} · {apts.length} un.</Text>
                     </View>
-                    <Text style={[s.towerPct, { color: barColor }]}>{avg}%</Text>
+                    <Text style={s.towerPct}>{avg}%</Text>
                   </View>
                   <View style={s.towerBar}>
-                    <View style={[s.towerBarFill, { width: `${avg}%` as `${number}%`, backgroundColor: barColor }]} />
+                    <View style={[s.towerBarFill, { width: `${avg}%` as `${number}%` }]} />
                   </View>
                   <View style={s.towerFooter}>
                     {criticalCount > 0 && <View style={s.badgeRed}><Text style={s.badgeRedText}>{criticalCount} crítico(s)</Text></View>}
@@ -60,12 +59,12 @@ export default function VisaoGeralScreen() {
             })}
       </View>
 
-      {/* MEDIÇÕES RECENTES — purple border */}
-      <View style={[s.section, s.sectionPurple]}>
+      {/* MEDIÇÕES RECENTES */}
+      <View style={s.section}>
         <View style={s.sectionHeaderRow}>
-          <Text style={[s.sectionTitle, { color: '#6D28D9' }]}>Medições recentes</Text>
+          <Text style={s.sectionTitle}>Medições recentes</Text>
           <Pressable onPress={() => router.push('/cronograma/medicoes' as any)}>
-            <Text style={[s.sectionLink, { color: '#6D28D9' }]}>Ver tudo →</Text>
+            <Text style={s.sectionLink}>Ver tudo →</Text>
           </Pressable>
         </View>
         {loading ? (
@@ -101,9 +100,9 @@ export default function VisaoGeralScreen() {
         )}
       </View>
 
-      {/* RELATÓRIOS — green border */}
-      <View style={[s.section, s.sectionGreen]}>
-        <Text style={[s.sectionTitle, { color: '#047857' }]}>Relatórios</Text>
+      {/* RELATÓRIOS */}
+      <View style={s.section}>
+        <Text style={s.sectionTitle}>Relatórios</Text>
         {[
           { href: '/visao-geral/relatorios/relatorio-geral', icon: 'table-large', label: 'Relatório Geral', desc: 'Tabela completa: apartamentos, itens em aberto, cronograma, medições e visitas.' },
           { href: '/visao-geral/relatorios/gerar-relatorio', icon: 'file-export-outline', label: 'Gerar Relatório', desc: 'Escolha tipo, filtros e seções. Exporte em CSV ou PDF.' },
@@ -129,15 +128,12 @@ const s = StyleSheet.create({
   scroll: { backgroundColor: '#F8FAFC' },
   container: { paddingBottom: 40, gap: 12, paddingHorizontal: 16 },
 
-  // section containers — border color is the differentiator
-  section: { backgroundColor: '#FFFFFF', borderRadius: 16, padding: 16, gap: 12, borderWidth: 2 },
-  sectionBlue:   { borderColor: '#3B82F6' },
-  sectionPurple: { borderColor: '#8B5CF6' },
-  sectionGreen:  { borderColor: '#10B981' },
+  // section containers — neutral border
+  section: { backgroundColor: '#FFFFFF', borderRadius: 16, padding: 16, gap: 12, borderWidth: 1, borderColor: '#E2E8F0' },
 
-  sectionTitle: { fontSize: 15, fontWeight: '900' },
+  sectionTitle: { fontSize: 15, fontWeight: '900', color: '#0F172A' },
   sectionHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  sectionLink: { fontSize: 12, fontWeight: '700' },
+  sectionLink: { fontSize: 12, fontWeight: '700', color: '#64748B' },
   spacer: { flex: 1 },
 
   // tower
@@ -147,16 +143,16 @@ const s = StyleSheet.create({
   towerInfo: { flex: 1 },
   towerName: { color: '#0F172A', fontSize: 15, fontWeight: '900' },
   towerMeta: { color: '#64748B', fontSize: 12, marginTop: 1 },
-  towerPct: { fontSize: 20, fontWeight: '900' },
+  towerPct: { fontSize: 20, fontWeight: '900', color: '#334155' },
   towerBar: { backgroundColor: '#E2E8F0', borderRadius: 999, height: 5, overflow: 'hidden' },
-  towerBarFill: { height: '100%', borderRadius: 999 },
+  towerBarFill: { height: '100%', borderRadius: 999, backgroundColor: '#475569' },
   towerFooter: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  badgeRed:   { backgroundColor: '#FEE2E2', borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
-  badgeRedText:   { color: '#B91C1C', fontSize: 11, fontWeight: '700' },
-  badgeAmber: { backgroundColor: '#FEF3C7', borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
-  badgeAmberText: { color: '#B45309', fontSize: 11, fontWeight: '700' },
-  badgeGreen: { backgroundColor: '#D1FAE5', borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
-  badgeGreenText: { color: '#047857', fontSize: 11, fontWeight: '700' },
+  badgeRed:   { backgroundColor: '#F1F5F9', borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
+  badgeRedText:   { color: '#475569', fontSize: 11, fontWeight: '700' },
+  badgeAmber: { backgroundColor: '#F1F5F9', borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
+  badgeAmberText: { color: '#475569', fontSize: 11, fontWeight: '700' },
+  badgeGreen: { backgroundColor: '#F1F5F9', borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
+  badgeGreenText: { color: '#475569', fontSize: 11, fontWeight: '700' },
 
   // activity
   activityRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 4 },

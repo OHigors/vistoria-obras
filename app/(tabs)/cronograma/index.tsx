@@ -164,8 +164,8 @@ export default function CronogramaScreen() {
           <Pressable
             key={item.href}
             onPress={() => router.push(item.href as any)}
-            style={[s.linkCard, { borderColor: item.border, backgroundColor: item.bg }]}>
-            <View style={[s.linkIcon, { backgroundColor: '#FFFFFF' }]}>
+            style={[s.linkCard, { borderColor: '#E2E8F0', backgroundColor: '#FFFFFF' }]}>
+            <View style={[s.linkIcon, { backgroundColor: item.bg }]}>
               <MaterialCommunityIcons name={item.icon as any} size={20} color={item.color} />
             </View>
             <View style={s.linkContent}>
@@ -187,18 +187,18 @@ const s = StyleSheet.create({
 
   // kpi
   kpiRow: { flexDirection: 'row', gap: 12 },
-  kpiCard: { flex: 1, borderRadius: 14, padding: 16, alignItems: 'center', gap: 6, backgroundColor: '#FFFFFF', borderWidth: 2 },
-  kpiBorderRed:   { borderColor: '#F87171' },
-  kpiBorderAmber: { borderColor: '#FCD34D' },
-  kpiBorderGreen: { borderColor: '#34D399' },
+  kpiCard: { flex: 1, borderRadius: 14, padding: 16, alignItems: 'center', gap: 6, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#E2E8F0' },
+  kpiBorderRed:   { borderColor: '#E2E8F0' },
+  kpiBorderAmber: { borderColor: '#E2E8F0' },
+  kpiBorderGreen: { borderColor: '#E2E8F0' },
   kpiValue: { fontSize: 32, fontWeight: '900' },
   kpiLabel: { color: '#475569', fontSize: 12, fontWeight: '600', textAlign: 'center' },
 
   // section containers
-  section: { backgroundColor: '#FFFFFF', borderRadius: 16, padding: 16, gap: 12, borderWidth: 2 },
-  sectionRed:     { borderColor: '#F87171' },
-  sectionAmber:   { borderColor: '#FCD34D' },
-  sectionGreen:   { borderColor: '#34D399' },
+  section: { backgroundColor: '#FFFFFF', borderRadius: 16, padding: 16, gap: 12, borderWidth: 1, borderColor: '#E2E8F0' },
+  sectionRed:     { borderColor: '#E2E8F0' },
+  sectionAmber:   { borderColor: '#E2E8F0' },
+  sectionGreen:   { borderColor: '#E2E8F0' },
   sectionCentered: { alignItems: 'center', paddingVertical: 28 },
   sectionTitle: { fontSize: 15, fontWeight: '900' },
 
@@ -231,7 +231,7 @@ const s = StyleSheet.create({
 
   // links
   linksSection: { gap: 10 },
-  linkCard: { borderRadius: 14, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12, borderWidth: 2 },
+  linkCard: { borderRadius: 14, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12, borderWidth: 1 },
   linkIcon: { width: 44, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   linkContent: { flex: 1, gap: 2 },
   linkLabel: { fontSize: 14, fontWeight: '800' },

@@ -328,6 +328,100 @@ export async function deleteChecklistItem(itemId: string): Promise<void> {
   if (error) throw error;
 }
 
+// ─── Checklist da torre (Corte da Torre) ──────────────────────────────────────
+// Itens com escopo torre+nível (apartment_id NULL): etapas como Fundação,
+// Limpeza do terreno e Reservatório, que não pertencem a um apartamento.
+// level_code referencia o catálogo em src/data/towerLevels.ts.
+
+export type TowerChecklistItem = ChecklistItem & ScheduleFields & { levelCode: string };
+
+// A migração 20260703000000_tower_checklist ainda não foi aplicada quando o
+// banco responde 42703 (coluna inexistente) para tower_id/level_code.
+export function isMissingTowerColumns(error: unknown): boolean {
+  return Boolean(error && typeof error === 'object' && (error as { code?: string }).code === '42703');
+}
+
+export async function loadTowerChecklist(towerId: string): Promise<TowerChecklistItem[]> {
+  const { data, error } = await supabase
+    .from('checklist_items')
+    .select('*')
+    .eq('tower_id', towerId)
+    .is('deleted_at', null)
+    .order('sort_order')
+    .order('label');
+  if (error) throw error;
+  return (data ?? []).map((row) => ({
+    ...mapChecklistItem(row as DbChecklistRow),
+    levelCode: (row as { level_code?: string | null }).level_code ?? '',
+  }));
+}
+
+// Adiciona uma etapa ao nível da torre. Idempotente: se já existe uma etapa
+// ativa com o mesmo rótulo neste nível, reaproveita a linha em vez de duplicar
+// (mesmo critério — label — usado por addStageToApartments). checklist_items.id
+// é uuid no banco, então geramos com crypto.randomUUID como no resto do app.
+export async function addTowerChecklistItem(params: {
+  towerId: string;
+  levelCode: string;
+  label: string;
+  sortOrder?: number;
+}): Promise<TowerChecklistItem> {
+  const { data: existing, error: exErr } = await supabase
+    .from('checklist_items')
+    .select('*')
+    .eq('tower_id', params.towerId)
+    .eq('level_code', params.levelCode)
+    .eq('label', params.label)
+    .is('deleted_at', null)
+    .limit(1);
+  if (exErr) throw exErr;
+  if (existing && existing.length) {
+    return { ...mapChecklistItem(existing[0] as DbChecklistRow), levelCode: params.levelCode };
+  }
+
+  const id = crypto.randomUUID();
+  const { error } = await supabase.from('checklist_items').insert({
+    id,
+    obra_id: OBRA_ID,
+    apartment_id: null,
+    tower_id: params.towerId,
+    level_code: params.levelCode,
+    label: params.label,
+    state: 'pending',
+    comment: '',
+    sort_order: params.sortOrder ?? 0,
+    area: 'Torre',
+    is_extra: false,
+  });
+  if (error) throw error;
+  return { id, label: params.label, state: 'pending', area: 'Torre', levelCode: params.levelCode };
+}
+
+// Atualiza uma etapa de torre existente (mudança de estado, datas...). A linha
+// já existe com seu uuid; upsert por id preserva sort_order (coluna omitida).
+export async function upsertTowerChecklistItem(
+  item: ChecklistItem & ScheduleFields & { towerId: string; levelCode: string },
+): Promise<void> {
+  const { error } = await supabase.from('checklist_items').upsert({
+    id: item.id,
+    obra_id: OBRA_ID,
+    apartment_id: null,
+    tower_id: item.towerId,
+    level_code: item.levelCode,
+    label: item.label,
+    state: item.state,
+    comment: item.comment ?? '',
+    emergency: item.emergency ?? '',
+    planned_start: toIsoDate(item.plannedStart),
+    planned_end: toIsoDate(item.plannedEnd),
+    actual_start: toIsoDate(item.actualStart),
+    actual_end: toIsoDate(item.actualEnd),
+    area: item.area ?? 'Torre',
+    is_extra: item.isExtra ?? false,
+  });
+  if (error) throw error;
+}
+
 // ─── Measurements ─────────────────────────────────────────────────────────────
 
 export async function loadMeasurements(apartmentId: string): Promise<Measurement[]> {
@@ -427,6 +521,48 @@ export async function saveVisit(visit: InspectionVisit): Promise<void> {
   if (error) throw error;
 }
 
+// ─── Vistorias com escopo de nível de torre ─────────────────────────────────────
+// Mesma tabela das visitas de apartamento, com escopo (tower_id, level_code) e
+// apartment_id NULL (ver migração 20260705000000_tower_visits).
+export async function loadTowerVisits(towerId: string, levelCode: string): Promise<InspectionVisit[]> {
+  const { data, error } = await supabase
+    .from('inspection_visits')
+    .select('*')
+    .eq('tower_id', towerId)
+    .eq('level_code', levelCode)
+    .is('apartment_id', null)
+    .eq('obra_id', OBRA_ID)
+    .order('date', { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map(mapVisit);
+}
+
+export async function saveTowerVisit(visit: InspectionVisit, towerId: string, levelCode: string): Promise<void> {
+  const { error } = await supabase.from('inspection_visits').upsert({
+    id: visit.id,
+    obra_id: OBRA_ID,
+    apartment_id: null,
+    tower_id: towerId,
+    level_code: levelCode,
+    date: visit.date,
+    started_at: visit.startedAt ?? visit.date,
+    responsible: visit.responsible,
+    progress_before: visit.progressBefore,
+    progress_after: visit.progressAfter,
+    evolution: visit.evolution,
+    counts: visit.counts,
+    photos_added: visit.photosAdded,
+    status_after: visit.statusAfter,
+    general_note: visit.generalNote,
+    changed_item_ids: visit.changedItemIds,
+    added_photo_ids: visit.addedPhotoIds,
+    issue_item_ids: visit.issueItemIds,
+    finalized: visit.finalized,
+    finalized_at: visit.finalizedAt ?? null,
+  });
+  if (error) throw error;
+}
+
 // ─── Inspection photos ────────────────────────────────────────────────────────
 
 export async function loadPhotos(apartmentId: string): Promise<InspectionPhoto[]> {
@@ -482,6 +618,86 @@ export async function deletePhoto(id: string, _storagePath?: string): Promise<vo
     .from('inspection_photos')
     .update({ deleted_at: new Date().toISOString() })
     .eq('id', id);
+  if (error) throw error;
+}
+
+// ─── Fotos com escopo de nível de torre ─────────────────────────────────────────
+// Mesma tabela/bucket das fotos de apartamento, mas o escopo é (tower_id,
+// level_code) com apartment_id NULL (ver migração 20260704000000_tower_photos).
+export async function loadTowerPhotos(towerId: string, levelCode: string): Promise<InspectionPhoto[]> {
+  const { data, error } = await supabase
+    .from('inspection_photos')
+    .select('*')
+    .eq('tower_id', towerId)
+    .eq('level_code', levelCode)
+    .is('apartment_id', null)
+    .eq('obra_id', OBRA_ID)
+    .is('deleted_at', null)
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  const rows = data ?? [];
+
+  const storagePaths = rows
+    .map((row) => (row.storage_path as string) ?? '')
+    .filter((path) => path && !isLegacyPhotoUri(path));
+  const signedUrls = new Map<string, string>();
+  if (storagePaths.length) {
+    const { data: signed, error: signError } = await supabase.storage
+      .from(INSPECTION_PHOTOS_BUCKET)
+      .createSignedUrls(storagePaths, SIGNED_URL_TTL_SECONDS);
+    if (signError) throw signError;
+    for (const entry of signed ?? []) {
+      if (entry.path && entry.signedUrl) signedUrls.set(entry.path, entry.signedUrl);
+    }
+  }
+  return rows.map((row) => mapPhoto(row, signedUrls));
+}
+
+// Todas as fotos com escopo de nível da torre (qualquer level_code).
+export async function loadAllTowerPhotos(towerId: string): Promise<InspectionPhoto[]> {
+  const { data, error } = await supabase
+    .from('inspection_photos')
+    .select('*')
+    .eq('tower_id', towerId)
+    .is('apartment_id', null)
+    .not('level_code', 'is', null)
+    .eq('obra_id', OBRA_ID)
+    .is('deleted_at', null)
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  const rows = data ?? [];
+
+  const storagePaths = rows
+    .map((row) => (row.storage_path as string) ?? '')
+    .filter((path) => path && !isLegacyPhotoUri(path));
+  const signedUrls = new Map<string, string>();
+  if (storagePaths.length) {
+    const { data: signed, error: signError } = await supabase.storage
+      .from(INSPECTION_PHOTOS_BUCKET)
+      .createSignedUrls(storagePaths, SIGNED_URL_TTL_SECONDS);
+    if (signError) throw signError;
+    for (const entry of signed ?? []) {
+      if (entry.path && entry.signedUrl) signedUrls.set(entry.path, entry.signedUrl);
+    }
+  }
+  return rows.map((row) => mapPhoto(row, signedUrls));
+}
+
+export async function saveTowerPhoto(photo: InspectionPhoto, levelCode: string): Promise<void> {
+  const { error } = await supabase.from('inspection_photos').upsert({
+    id: photo.id,
+    obra_id: OBRA_ID,
+    tower_id: photo.towerId,
+    apartment_id: null,
+    level_code: levelCode,
+    item_id: photo.itemId,
+    service_id: photo.serviceId,
+    service: photo.service,
+    storage_path: photo.storagePath,
+    file_name: photo.fileName,
+    comment: photo.comment,
+    visit_id: photo.visitId ?? null,
+  });
   if (error) throw error;
 }
 

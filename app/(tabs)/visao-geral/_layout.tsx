@@ -24,6 +24,8 @@ export default function VisaoGeralLayout() {
       }}>
       <Stack.Screen name="index" options={{ headerShown: false }} />
       <Stack.Screen name="[torreId]" options={{ headerShown: false }} />
+      <Stack.Screen name="corte/[torreId]" options={{ headerShown: false }} />
+      <Stack.Screen name="nivel/[torreId]/[levelCode]" options={{ headerShown: false }} />
       <Stack.Screen name="apartamentos/[apartamentoId]" options={{ headerShown: false }} />
       <Stack.Screen name="relatorios/relatorio-geral" options={{ headerShown: false }} />
       <Stack.Screen name="relatorios/gerar-relatorio" options={{ headerShown: false }} />

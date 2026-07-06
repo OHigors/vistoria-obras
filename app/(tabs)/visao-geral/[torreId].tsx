@@ -359,6 +359,10 @@ export default function TowerApartmentsScreen() {
                 </Pressable>
               );
             })}
+            <Pressable onPress={() => router.push(`/visao-geral/corte/${torreId}` as never)} style={s.viewBtn}>
+              <MaterialCommunityIcons name="office-building-outline" size={16} color="#94A3B8" />
+              <Text style={s.viewBtnText}>Corte</Text>
+            </Pressable>
           </View>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.filterRow}>
             {filterOptions.map((opt) => {
