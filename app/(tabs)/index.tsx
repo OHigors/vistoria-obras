@@ -7,6 +7,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import Svg, { Circle, Text as SvgText } from 'react-native-svg';
 
 
+import { useAuth } from '@/src/data/AuthContext';
 import { formatCurrency } from '@/src/data/localMeasurements';
 import { useObras } from '@/src/data/ObrasContext';
 import { summarizeBottlenecks } from '@/src/data/serviceBlockers';
@@ -88,6 +89,7 @@ type DashView = 'kpi' | 'dist';
 export default function DashboardScreen() {
   const insets = useSafeAreaInsets();
   const { apartments, towers, project, measurements, loading } = useObras();
+  const { signOut } = useAuth();
   const [alertOpen, setAlertOpen] = useState(false);
   const [view, setView] = useState<DashView>('kpi');
 
@@ -264,6 +266,9 @@ export default function DashboardScreen() {
                 <MaterialCommunityIcons name="cog-outline" size={20} color="rgba(255,255,255,0.85)" />
               </Pressable>
             </Link>
+            <Pressable onPress={() => signOut()} style={s.settingsBtn} accessibilityLabel="Sair">
+              <MaterialCommunityIcons name="logout-variant" size={20} color="rgba(255,255,255,0.85)" />
+            </Pressable>
           </View>
         </View>
       </View>
