@@ -3,12 +3,16 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { HapticTab } from '@/components/haptic-tab';
 import { IconSymbol } from '@/components/ui/icon-symbol';
+import { AreaFilterProvider } from '@/src/data/AreaFilterContext';
+import { ObrasProvider } from '@/src/data/ObrasContext';
 
 export default function TabLayout() {
   const insets = useSafeAreaInsets();
   const bottomPad = Math.max(insets.bottom, 8);
 
   return (
+    <AreaFilterProvider>
+    <ObrasProvider>
     <Tabs
       screenOptions={{
         tabBarActiveTintColor: '#2563EB',
@@ -50,5 +54,7 @@ export default function TabLayout() {
         }}
       />
     </Tabs>
+    </ObrasProvider>
+    </AreaFilterProvider>
   );
 }

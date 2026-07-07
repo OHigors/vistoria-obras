@@ -18,14 +18,13 @@ import {
 } from '@expo-google-fonts/inter';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { ObrasProvider } from '@/src/data/ObrasContext';
-import { AreaFilterProvider } from '@/src/data/AreaFilterContext';
+import { AuthProvider, useAuth } from '@/src/data/AuthContext';
 import { ToastProvider } from '@/src/ui/Toast';
 
 SplashScreen.preventAutoHideAsync();
 
-export default function RootLayout() {
-  const colorScheme = useColorScheme();
+function RootNavigator() {
+  const { session, loading } = useAuth();
 
   const [fontsLoaded] = useFonts({
     Inter_100Thin,
@@ -39,27 +38,37 @@ export default function RootLayout() {
     Inter_900Black,
   });
 
+  // Segura o splash até fontes carregadas E a sessão inicial resolvida.
   useEffect(() => {
-    if (fontsLoaded) {
-      SplashScreen.hideAsync();
-    }
-  }, [fontsLoaded]);
+    if (fontsLoaded && !loading) SplashScreen.hideAsync();
+  }, [fontsLoaded, loading]);
 
-  if (!fontsLoaded) return null;
+  if (!fontsLoaded || loading) return null;
+
+  return (
+    <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: '#F8FAFC' } }}>
+      <Stack.Protected guard={!!session}>
+        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
+      </Stack.Protected>
+      <Stack.Protected guard={!session}>
+        <Stack.Screen name="login" options={{ headerShown: false }} />
+      </Stack.Protected>
+    </Stack>
+  );
+}
+
+export default function RootLayout() {
+  const colorScheme = useColorScheme();
 
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <AreaFilterProvider>
-      <ObrasProvider>
+      <AuthProvider>
         <ToastProvider>
-          <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: '#F8FAFC' } }}>
-            <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-            <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
-          </Stack>
+          <RootNavigator />
           <StatusBar style="light" />
         </ToastProvider>
-      </ObrasProvider>
-      </AreaFilterProvider>
+      </AuthProvider>
     </ThemeProvider>
   );
 }

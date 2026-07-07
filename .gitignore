@@ -39,10 +39,12 @@ expo-web*.log
 # local db backups
 /backups/
 
-# db scripts, local migrations, and supabase CLI project (contain schema + seeds)
+# db scripts + supabase CLI local state (branches/temp/config/seed stay local)
 /scripts/
 /migrations/
-/supabase/
+/supabase/*
+# ...but DO version the schema migrations — pure DDL (schema, policies, grants), no secrets.
+!/supabase/migrations/
 
 # typescript
 *.tsbuildinfo
