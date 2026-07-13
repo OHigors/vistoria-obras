@@ -100,6 +100,8 @@ export const inspectionStyles = StyleSheet.create({
   obsCancelBtnText: { color: '#475569', fontSize: 12, fontWeight: '700' },
   obsDoneBtn: { backgroundColor: '#2563EB', borderRadius: 8, paddingHorizontal: 14, paddingVertical: 6 },
   obsDoneBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: '700' },
+  // X para remover a foto — canto superior direito da caixa do comentário
+  photoRemoveX: { position: 'absolute', top: 5, right: 5, zIndex: 2, width: 24, height: 24, alignItems: 'center', justifyContent: 'center' },
   // emergency
   emergencyPreview: { alignItems: 'center', backgroundColor: '#FEF2F2', borderColor: '#FECACA', borderRadius: 8, borderWidth: 1, flexDirection: 'row', gap: 8, paddingHorizontal: 10, paddingVertical: 8 },
   emergencyPreviewText: { color: '#DC2626', flex: 1, fontSize: 12, fontWeight: '600' },
@@ -204,6 +206,10 @@ export const inspectionStyles = StyleSheet.create({
   statusMenu: { marginTop: 6, borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 10, backgroundColor: '#FFFFFF', overflow: 'hidden' },
   statusMenuRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 11, paddingHorizontal: 12, borderBottomWidth: 1, borderBottomColor: '#F1F5F9' },
   statusMenuText: { color: '#475569', fontSize: 13, fontWeight: '600' },
+  // status como botões — linha horizontal (1 linha), só o nome da etapa
+  statusBtnRow: { flexDirection: 'row', gap: 6 },
+  statusBtn: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 9, paddingHorizontal: 4, borderRadius: 10, borderWidth: 1, borderColor: '#E2E8F0', backgroundColor: '#F8FAFC' },
+  statusBtnLabel: { fontSize: 11, fontWeight: '800', textAlign: 'center', lineHeight: 13 },
   issueBox: { backgroundColor: '#FFFBEB', borderColor: '#FDE68A', borderRadius: 10, borderWidth: 1, padding: 12, gap: 10 },
   issueBoxTitle: { color: '#92400E', fontSize: 12, fontWeight: '800' },
   critRow: { flexDirection: 'row', gap: 6, flexWrap: 'wrap' },

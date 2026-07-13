@@ -1,4 +1,9 @@
+import type { ComponentProps } from 'react';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+
 import type { ApartmentStatus, ChecklistState } from '@/src/data/mockObras';
+
+type MCIName = ComponentProps<typeof MaterialCommunityIcons>['name'];
 
 export const statusConfig: Record<
   ApartmentStatus,
@@ -72,32 +77,42 @@ export const getProgressMapStyle = (
 
 export const checklistConfig: Record<
   ChecklistState,
-  { label: string; color: string; background: string; symbol: string }
+  { label: string; color: string; background: string; symbol: string; abbrev: string; icon?: MCIName }
 > = {
   // Progresso da etapa. Os valores armazenados (ok/partial/pending/notApplicable)
   // são preservados; só os rótulos mudam para a semântica de progresso.
+  // `abbrev` = iniciais do nome (botões). `icon` = ícone do quadradinho antes do
+  // nome da etapa; sem icon, o quadradinho mostra a abreviação (ex.: "NI").
   ok: {
     label: 'Concluído',
     color: '#047857',
     background: '#ECFDF5',
     symbol: '✓',
+    abbrev: 'C',
+    icon: 'check-bold',
   },
   pending: {
     label: 'Não iniciado',
-    color: '#64748B',
-    background: '#F1F5F9',
+    color: '#475569',
+    background: '#E2E8F0',
     symbol: '○',
+    abbrev: 'NI',
+    icon: 'circle-outline',
   },
   partial: {
     label: 'Em andamento',
     color: '#B45309',
     background: '#FFFBEB',
     symbol: '◐',
+    abbrev: 'EA',
+    icon: 'progress-clock',
   },
   notApplicable: {
     label: 'Não se aplica',
-    color: '#334155',
-    background: '#E2E8F0',
+    color: '#94A3B8',
+    background: '#F1F5F9',
     symbol: 'NA',
+    abbrev: 'NA',
+    icon: 'minus',
   },
 };

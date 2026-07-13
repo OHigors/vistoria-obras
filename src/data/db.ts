@@ -253,6 +253,38 @@ export async function fetchProject() {
   return data as { id: string; name: string; summary: string };
 }
 
+// ─── Perfil + obras do usuário logado ────────────────────────────────────────────
+export type UserObra = { id: string; name: string; summary: string; role: string };
+export type Profile = { id: string; name: string; email: string };
+
+export async function loadMyObras(): Promise<UserObra[]> {
+  const { data, error } = await supabase
+    .from('user_obras')
+    .select('role, obra:obras(id, name, summary)')
+    .order('created_at', { ascending: true });
+  if (error) throw error;
+  return (data ?? [])
+    .map((row) => {
+      const o = row.obra as unknown as { id: string; name: string; summary: string | null } | null;
+      return o ? { id: o.id, name: o.name, summary: o.summary ?? '', role: row.role as string } : null;
+    })
+    .filter((o): o is UserObra => o !== null);
+}
+
+export async function loadProfile(): Promise<Profile | null> {
+  const { data, error } = await supabase.from('profiles').select('id, name, email').maybeSingle();
+  if (error) throw error;
+  return data ? { id: data.id as string, name: (data.name as string) ?? '', email: (data.email as string) ?? '' } : null;
+}
+
+export async function updateProfileName(name: string): Promise<void> {
+  const { data: userData } = await supabase.auth.getUser();
+  const uid = userData.user?.id;
+  if (!uid) return;
+  const { error } = await supabase.from('profiles').update({ name }).eq('id', uid);
+  if (error) throw error;
+}
+
 export async function fetchTowers(): Promise<Tower[]> {
   const { data, error } = await supabase
     .from('towers')

@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import type { Apartment, ApartmentStatus, ChecklistItem, Tower } from '@/src/data/mockObras';
 import type { Measurement } from '@/src/data/localMeasurements';
@@ -6,6 +7,9 @@ import type { ServiceStage } from '@/src/data/serviceStages';
 import type { ServiceCategory } from '@/src/data/serviceCategories';
 import type { ServiceUnit } from '@/src/data/serviceUnits';
 import * as db from '@/src/data/db';
+import { OBRA_ID, setActiveObra } from '@/src/lib/supabase';
+
+const ACTIVE_OBRA_KEY = 'vistoria.activeObraId';
 
 type Project = { id: string; name: string; summary: string };
 
@@ -18,6 +22,12 @@ type ObrasContextValue = {
   serviceUnits: ServiceUnit[];
   measurements: Measurement[];
   loading: boolean;
+  // multi-obra
+  myObras: db.UserObra[];
+  activeObraId: string;
+  profile: db.Profile | null;
+  switchObra: (id: string) => Promise<void>;
+  refreshProfile: () => Promise<void>;
   // helpers
   getTowerById: (id: string) => Tower | undefined;
   getApartmentById: (id: string) => Apartment | undefined;
@@ -43,6 +53,11 @@ const ObrasContext = createContext<ObrasContextValue>({
   serviceUnits: [],
   measurements: [],
   loading: true,
+  myObras: [],
+  activeObraId: OBRA_ID,
+  profile: null,
+  switchObra: async () => {},
+  refreshProfile: async () => {},
   getTowerById: () => undefined,
   getApartmentById: () => undefined,
   getApartmentsByTower: () => [],
@@ -64,6 +79,9 @@ export function ObrasProvider({ children }: { children: React.ReactNode }) {
   const [serviceUnits, setServiceUnits] = useState<ServiceUnit[]>([]);
   const [measurements, setMeasurements] = useState<Measurement[]>([]);
   const [loading, setLoading] = useState(true);
+  const [myObras, setMyObras] = useState<db.UserObra[]>([]);
+  const [activeObraId, setActiveObraId] = useState<string>(OBRA_ID);
+  const [profile, setProfile] = useState<db.Profile | null>(null);
 
   const loadAll = useCallback(async () => {
     try {
@@ -88,6 +106,43 @@ export function ObrasProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const refreshProfile = useCallback(async () => {
+    const p = await db.loadProfile().catch(() => null);
+    setProfile(p);
+  }, []);
+
+  // Descobre as obras do usuário, resolve a obra ativa (última escolhida e
+  // persistida, senão a primeira) e só então carrega os dados dessa obra.
+  const bootstrap = useCallback(async () => {
+    setLoading(true);
+    const [obrasList, prof] = await Promise.all([
+      db.loadMyObras().catch(() => [] as db.UserObra[]),
+      db.loadProfile().catch(() => null),
+    ]);
+    setMyObras(obrasList);
+    setProfile(prof);
+
+    let active = await AsyncStorage.getItem(ACTIVE_OBRA_KEY).catch(() => null);
+    if (!active || !obrasList.some((o) => o.id === active)) {
+      active = obrasList[0]?.id ?? OBRA_ID;
+    }
+    setActiveObra(active);
+    setActiveObraId(active);
+    await loadAll();
+  }, [loadAll]);
+
+  const switchObra = useCallback(
+    async (id: string) => {
+      if (id === activeObraId) return;
+      await AsyncStorage.setItem(ACTIVE_OBRA_KEY, id).catch(() => {});
+      setActiveObra(id);
+      setActiveObraId(id);
+      setLoading(true);
+      await loadAll();
+    },
+    [activeObraId, loadAll],
+  );
+
   const refreshMeasurements = useCallback(async () => {
     const data = await db.loadAllMeasurements();
     setMeasurements(data);
@@ -109,8 +164,8 @@ export function ObrasProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    loadAll();
-  }, [loadAll]);
+    bootstrap();
+  }, [bootstrap]);
 
   const refreshApartment = useCallback(async (apartmentId: string) => {
     const fresh = await db.fetchApartments();
@@ -159,6 +214,11 @@ export function ObrasProvider({ children }: { children: React.ReactNode }) {
         serviceUnits,
         measurements,
         loading,
+        myObras,
+        activeObraId,
+        profile,
+        switchObra,
+        refreshProfile,
         getTowerById,
         getApartmentById,
         getApartmentsByTower,
