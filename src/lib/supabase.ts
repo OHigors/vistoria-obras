@@ -17,7 +17,14 @@ export const supabase = createClient(
   },
 );
 
-export const OBRA_ID = process.env.EXPO_PUBLIC_OBRA_ID!;
+// Obra "ativa" — começa na do .env e é trocada em runtime quando o usuário
+// escolhe outra no perfil. É um `let` exportado (live binding): db.ts lê o valor
+// atual em cada chamada. Use setActiveObra para trocar.
+export let OBRA_ID = process.env.EXPO_PUBLIC_OBRA_ID!;
+
+export function setActiveObra(id: string) {
+  OBRA_ID = id;
+}
 
 // No nativo, o Supabase recomenda pausar/retomar o refresh do token conforme o
 // app entra/sai de foco (evita refresh em background e sessões expiradas).

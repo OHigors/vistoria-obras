@@ -53,6 +53,8 @@ export default function TabLayout() {
           tabBarIcon: ({ color }) => <IconSymbol size={24} name="calendar.badge.clock" color={color} />,
         }}
       />
+      {/* Perfil: acessível pelo ícone do usuário no Início, fora da barra de abas. */}
+      <Tabs.Screen name="perfil" options={{ href: null }} />
     </Tabs>
     </ObrasProvider>
     </AreaFilterProvider>

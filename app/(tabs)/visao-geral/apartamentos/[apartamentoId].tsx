@@ -37,8 +37,8 @@ import type { Worker } from '@/src/data/serviceWorkers';
 import { checklistConfig, getProgressMapStyle, statusConfig } from '@/src/ui/status';
 import { inspectionStyles as s } from '@/src/features/inspection/inspectionStyles';
 
-// Ordem do ciclo de progresso (Não iniciado → Em andamento → Concluído → N/A).
-const progressOrder: ChecklistState[] = ['pending', 'partial', 'ok', 'notApplicable'];
+// Ordem dos botões de status: Concluído → Em andamento → Não iniciado → N/A.
+const progressOrder: ChecklistState[] = ['ok', 'partial', 'pending', 'notApplicable'];
 
 const CATEGORY_PALETTE = ['#2563EB', '#7C3AED', '#0891B2', '#16A34A', '#D97706', '#DB2777', '#0EA5E9', '#65A30D', '#B45309', '#9333EA'];
 const categoryColor = (cat: string) => {
@@ -164,7 +164,7 @@ export default function ApartmentDetailScreen() {
   const tower = apartment ? getTowerById(apartment.towerId) : undefined;
 
   const goBackToTower = useCallback(() => {
-    router.push(apartment ? `/(tabs)/visao-geral/${apartment.towerId}` as any : '/(tabs)/visao-geral' as any);
+    router.push(apartment ? `/(tabs)/visao-geral/corte/${apartment.towerId}` as any : '/(tabs)/visao-geral' as any);
   }, [router, apartment?.towerId]);
 
   const initialChecklist = useMemo(() => getInitialChecklist(apartment?.checklist), [apartment?.checklist]);
@@ -175,6 +175,7 @@ export default function ApartmentDetailScreen() {
   const [scheduleAlert, setScheduleAlert] = useState('');
   const [photos, setPhotos] = useState<InspectionPhoto[]>([]);
   const [selectedPhoto, setSelectedPhoto] = useState<InspectionPhoto>();
+  const [draftPhotoComments, setDraftPhotoComments] = useState<Record<string, string>>({});
   const [selectedMeasurementEvidence, setSelectedMeasurementEvidence] = useState<Measurement>();
   const [activeTab, setActiveTab] = useState<DetailTab>('Resumo');
   const [visits, setVisits] = useState<InspectionVisit[]>([]);
@@ -184,6 +185,7 @@ export default function ApartmentDetailScreen() {
   const [addStepSearch, setAddStepSearch] = useState('');
   const [addStepArea, setAddStepArea] = useState<'Interior' | 'Exterior'>('Interior');
   const [confirmRemoveStep, setConfirmRemoveStep] = useState<EditableChecklistItem | null>(null);
+  const [confirmRemovePhoto, setConfirmRemovePhoto] = useState<string | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
   const [showBackToTop, setShowBackToTop] = useState(false);
   const [tabArrows, setTabArrows] = useState({ left: false, right: false });
@@ -198,7 +200,6 @@ export default function ApartmentDetailScreen() {
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [assignments, setAssignments] = useState<Record<string, string[]>>({});
   const [workerPickerItem, setWorkerPickerItem] = useState<EditableChecklistItem | null>(null);
-  const [statusPickerId, setStatusPickerId] = useState<string | null>(null);
   const [draftWorkerIds, setDraftWorkerIds] = useState<string[]>([]);
   const [workerSearch, setWorkerSearch] = useState('');
   const [savingAssignment, setSavingAssignment] = useState(false);
@@ -221,11 +222,13 @@ export default function ApartmentDetailScreen() {
   // We batch writes (checklist items, photo comments, open visit) and show a
   // toast so the user always sees that something was persisted. Reduces the
   // "1 DB write per keystroke" pattern to a single write per ~800ms idle window.
-  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error' | 'moved'>('idle');
   const [uploadStatus, setUploadStatus] = useState<Record<string, 'uploading' | 'uploaded' | 'failed'>>({});
   const toastAnim = useRef(new Animated.Value(0)).current;
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Marca que o próximo "salvo" foi uma conclusão → toast especial (mais longo).
+  const pendingMovedToastRef = useRef(false);
   const draftCommentsRef = useRef<Record<string, string>>({});
   const draftEmergenciesRef = useRef<Record<string, string>>({});
   const pendingRef = useRef<{
@@ -234,14 +237,14 @@ export default function ApartmentDetailScreen() {
     visits: Map<string, InspectionVisit>;
   }>({ checklistItems: new Map(), photos: new Map(), visits: new Map() });
 
-  const showToast = useCallback((status: 'saving' | 'saved' | 'error') => {
+  const showToast = useCallback((status: 'saving' | 'saved' | 'error' | 'moved') => {
     setSaveStatus(status);
     Animated.timing(toastAnim, { toValue: 1, duration: 180, useNativeDriver: true }).start();
     if (hideToastTimerRef.current) clearTimeout(hideToastTimerRef.current);
     if (status !== 'saving') {
       hideToastTimerRef.current = setTimeout(() => {
         Animated.timing(toastAnim, { toValue: 0, duration: 220, useNativeDriver: true }).start(() => setSaveStatus('idle'));
-      }, 1600);
+      }, status === 'moved' ? 3400 : 1600);
     }
   }, [toastAnim]);
 
@@ -250,7 +253,8 @@ export default function ApartmentDetailScreen() {
     if (checklistItems.size === 0 && pendingPhotos.size === 0 && pendingVisits.size === 0) {
       // Nothing actually changed (e.g. tapping the current status again). Resolve
       // the "Salvando…" toast instead of leaving it spinning forever.
-      showToast('saved');
+      showToast(pendingMovedToastRef.current ? 'moved' : 'saved');
+      pendingMovedToastRef.current = false;
       return;
     }
     pendingRef.current = { checklistItems: new Map(), photos: new Map(), visits: new Map() };
@@ -262,7 +266,8 @@ export default function ApartmentDetailScreen() {
         ...Array.from(pendingPhotos.values()).map((p) => dbApi.savePhoto(p)),
         ...Array.from(pendingVisits.values()).map((v) => dbApi.saveVisit(v)),
       ]);
-      showToast('saved');
+      showToast(pendingMovedToastRef.current ? 'moved' : 'saved');
+      pendingMovedToastRef.current = false;
     } catch (err) {
       console.error('Save flush failed', err);
       showToast('error');
@@ -270,7 +275,9 @@ export default function ApartmentDetailScreen() {
   }, [apartamentoId, showToast]);
 
   const scheduleSave = useCallback(() => {
-    showToast('saving');
+    // Numa conclusão, já mostramos direto o toast "movida para o fim" — assim o
+    // "Salvando…" não aparece empilhado com o de conclusão.
+    showToast(pendingMovedToastRef.current ? 'moved' : 'saving');
     if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
     flushTimerRef.current = setTimeout(flushSaves, 1000);
   }, [flushSaves, showToast]);
@@ -483,6 +490,11 @@ export default function ApartmentDetailScreen() {
 
   const updateItemStatus = (itemId: string, state: ChecklistState) => {
     const prev = checklist;
+    // Concluir (→ ok) desce a etapa para o fim do grupo → toast especial (mais
+    // longo). Marca ANTES de qualquer scheduleSave para que o feedback já apareça
+    // como "movida" (sem o "Salvando…" empilhado com o de conclusão).
+    const prevTarget = prev.find((p) => p.id === itemId);
+    if (state === 'ok' && prevTarget?.state !== 'ok') pendingMovedToastRef.current = true;
     const baseNext = prev.map((i) => i.id === itemId
       ? { ...i, state, issueCriticality: state === 'pending' || state === 'partial' ? i.issueCriticality ?? 'Média' : undefined, issueComment: state === 'pending' || state === 'partial' ? i.issueComment ?? '' : '' }
       : i);
@@ -645,6 +657,17 @@ export default function ApartmentDetailScreen() {
       return next;
     });
     scheduleSave();
+  };
+
+  // Comentário da foto: edita um rascunho e só grava no "Salvar" (evita 1 escrita
+  // por tecla, que causava erros). "Cancelar" descarta o rascunho.
+  const savePhotoComment = (photoId: string) => {
+    const value = draftPhotoComments[photoId] ?? photos.find((p) => p.id === photoId)?.comment ?? '';
+    updatePhotoComment(photoId, value);
+    setDraftPhotoComments((cur) => { const n = { ...cur }; delete n[photoId]; return n; });
+  };
+  const cancelPhotoComment = (photoId: string) => {
+    setDraftPhotoComments((cur) => { const n = { ...cur }; delete n[photoId]; return n; });
   };
 
   const removePhoto = (photoId: string) => {
@@ -1208,10 +1231,11 @@ export default function ApartmentDetailScreen() {
               // Sub-steps are hidden from the main list; only count non-sub-step items for the header.
               const visibleItems = groupItems.filter((i) => !allGroupSubStepLabels.has(i.label));
               const okInGroup = visibleItems.filter((i) => i.state === 'ok' || i.state === 'notApplicable').length;
-              // Build ordered render list. Top-level entries are ordered by state
-              // (Parcial, Pendente, Não se aplica, OK) so completed steps sink to the
-              // bottom. Group-step sub-steps stay attached to their parent in roadmap order.
-              const stateOrder: Record<string, number> = { partial: 0, pending: 1, notApplicable: 2, ok: 3 };
+              // Build ordered render list. Só as etapas concluídas (ok) descem para o
+              // fim do grupo; as demais mantêm a ordem original (sort_order), então
+              // mudar entre Parcial/Pendente/N.A. não reordena a lista. Sub-steps de
+              // group-step seguem presos ao pai na ordem do roadmap. (sort estável)
+              const stateOrder: Record<string, number> = { partial: 0, pending: 0, notApplicable: 0, ok: 1 };
               type RenderRow = { item: EditableChecklistItem; indented: boolean };
               const blocks: Array<{ sortKey: number; rows: RenderRow[] }> = [];
               for (const item of groupItems) {
@@ -1295,7 +1319,9 @@ export default function ApartmentDetailScreen() {
                   ) : (
                     <View style={s.checkCardTop}>
                       <View style={[s.checkIcon, { backgroundColor: cfg.background }]}>
-                        <Text style={[s.checkIconSymbol, { color: cfg.color }]}>{cfg.symbol}</Text>
+                        {cfg.icon
+                          ? <MaterialCommunityIcons name={cfg.icon} size={16} color={cfg.color} />
+                          : <Text style={[s.checkIconSymbol, { color: cfg.color }]}>{cfg.abbrev}</Text>}
                       </View>
                       <View style={s.checkCardInfo}>
                         <View style={s.checkLabelRow}>
@@ -1381,40 +1407,23 @@ export default function ApartmentDetailScreen() {
                     </View>
                   ) : (
                     <>
-                      <View>
-                        {(() => {
-                          const cur = checklistConfig[item.state];
-                          const open = statusPickerId === item.id;
+                      <View style={s.statusBtnRow}>
+                        {progressOrder.map((opt) => {
+                          const oc = checklistConfig[opt];
+                          const sel = item.state === opt;
                           return (
                             <Pressable
-                              onPress={() => setStatusPickerId(open ? null : item.id)}
-                              testID={`status-${item.id}`}
-                              style={[s.statusSelect, open && s.statusSelectOpen]}>
-                              <View style={[s.statusDot, { backgroundColor: cur.color }]} />
-                              <Text style={[s.statusSelectText, { color: cur.color }]}>{cur.label}</Text>
-                              <MaterialCommunityIcons name={open ? 'chevron-up' : 'chevron-down'} size={18} color="#94A3B8" />
+                              key={opt}
+                              onPress={() => updateItemStatus(item.id, opt)}
+                              testID={`checklist-${item.id}-${opt}`}
+                              accessibilityRole="button"
+                              accessibilityState={{ selected: sel }}
+                              accessibilityLabel={oc.label}
+                              style={[s.statusBtn, sel && { backgroundColor: oc.background, borderColor: oc.color }]}>
+                              <Text style={[s.statusBtnLabel, { color: sel ? oc.color : '#64748B' }]} numberOfLines={2}>{oc.label}</Text>
                             </Pressable>
                           );
-                        })()}
-                        {statusPickerId === item.id && (
-                          <View style={s.statusMenu}>
-                            {progressOrder.map((opt) => {
-                              const oc = checklistConfig[opt];
-                              const sel = item.state === opt;
-                              return (
-                                <Pressable
-                                  key={opt}
-                                  onPress={() => { updateItemStatus(item.id, opt); setStatusPickerId(null); }}
-                                  testID={`checklist-${item.id}-${opt}`}
-                                  style={[s.statusMenuRow, sel && { backgroundColor: oc.background }]}>
-                                  <View style={[s.statusDot, { backgroundColor: oc.color }]} />
-                                  <Text style={[s.statusMenuText, sel && { color: oc.color, fontWeight: '800' as const }]}>{oc.label}</Text>
-                                  {sel && <MaterialCommunityIcons name="check" size={16} color={oc.color} style={{ marginLeft: 'auto' }} />}
-                                </Pressable>
-                              );
-                            })}
-                          </View>
-                        )}
+                        })}
                       </View>
 
                       {item.emergency?.trim() && !expandedEmergencies[item.id] && (
@@ -1547,19 +1556,31 @@ export default function ApartmentDetailScreen() {
                                 </View>
                               </Pressable>
                               <View style={s.thumbBody}>
-                                <TextInput
-                                  multiline
-                                  onChangeText={(v) => updatePhotoComment(photo.id, v)}
-                                  placeholder="Comentário..."
-                                  placeholderTextColor="#94A3B8"
-                                  style={s.thumbInput}
-                                  testID={`photo-comment-${photo.id}`}
-                                  value={photo.comment}
-                                />
-                                <Pressable onPress={() => removePhoto(photo.id)} style={s.removeBtn} testID={`remove-photo-${photo.id}`}>
-                                  <MaterialCommunityIcons name="trash-can-outline" size={12} color="#B91C1C" />
-                                  <Text style={s.removeBtnText}>Remover</Text>
-                                </Pressable>
+                                <View style={s.obsBox}>
+                                  <Pressable onPress={() => setConfirmRemovePhoto(photo.id)} style={s.photoRemoveX} testID={`remove-photo-${photo.id}`} hitSlop={6}>
+                                    <MaterialCommunityIcons name="close" size={14} color="#64748B" />
+                                  </Pressable>
+                                  <TextInput
+                                    multiline
+                                    onChangeText={(v) => setDraftPhotoComments((cur) => ({ ...cur, [photo.id]: v }))}
+                                    placeholder="Comentário..."
+                                    placeholderTextColor="#94A3B8"
+                                    style={[s.obsTextarea, { paddingRight: 26 }]}
+                                    testID={`photo-comment-${photo.id}`}
+                                    value={draftPhotoComments[photo.id] ?? photo.comment ?? ''}
+                                  />
+                                  <View style={s.obsBoxFooter}>
+                                    <View />
+                                    <View style={s.obsBoxFooterRight}>
+                                      <Pressable onPress={() => cancelPhotoComment(photo.id)} style={s.obsCancelBtn}>
+                                        <Text style={s.obsCancelBtnText}>Cancelar</Text>
+                                      </Pressable>
+                                      <Pressable onPress={() => savePhotoComment(photo.id)} style={s.obsDoneBtn} testID={`photo-comment-save-${photo.id}`}>
+                                        <Text style={s.obsDoneBtnText}>Salvar</Text>
+                                      </Pressable>
+                                    </View>
+                                  </View>
+                                </View>
                               </View>
                             </View>
                           ))}
@@ -2093,6 +2114,29 @@ export default function ApartmentDetailScreen() {
         </View>
       </Modal>
 
+      {/* MODAL: confirm remove photo */}
+      <Modal animationType="fade" onRequestClose={() => setConfirmRemovePhoto(null)} transparent visible={Boolean(confirmRemovePhoto)}>
+        <View style={s.modalBackdrop}>
+          <View style={s.confirmSheet}>
+            <View style={[s.confirmIcon, { backgroundColor: '#FEE2E2' }]}>
+              <MaterialCommunityIcons name="image-remove" size={26} color="#B91C1C" />
+            </View>
+            <Text style={s.confirmTitle}>Remover esta foto?</Text>
+            <Text style={s.confirmSub}>A foto e seu comentário serão apagados. Esta ação não pode ser desfeita.</Text>
+            <View style={s.confirmActions}>
+              <Pressable onPress={() => setConfirmRemovePhoto(null)} style={s.confirmBtnGhost}>
+                <Text style={s.confirmBtnGhostText}>Cancelar</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => { if (confirmRemovePhoto) removePhoto(confirmRemovePhoto); setConfirmRemovePhoto(null); }}
+                style={s.confirmBtnDanger}>
+                <Text style={s.confirmBtnDangerText}>Remover</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       {/* MODAL: confirm reset checklist + wipe photos */}
       <Modal animationType="fade" onRequestClose={() => setConfirmReset(false)} transparent visible={confirmReset}>
         <View style={s.modalBackdrop}>
@@ -2333,7 +2377,7 @@ export default function ApartmentDetailScreen() {
           pointerEvents="none"
           style={[
             s.saveToast,
-            saveStatus === 'saved' && s.saveToastSaved,
+            (saveStatus === 'saved' || saveStatus === 'moved') && s.saveToastSaved,
             saveStatus === 'error' && s.saveToastError,
             {
               opacity: toastAnim,
@@ -2341,12 +2385,12 @@ export default function ApartmentDetailScreen() {
             },
           ]}>
           <MaterialCommunityIcons
-            name={saveStatus === 'saving' ? 'cloud-upload-outline' : saveStatus === 'saved' ? 'cloud-check' : 'cloud-alert'}
+            name={saveStatus === 'saving' ? 'cloud-upload-outline' : saveStatus === 'moved' ? 'arrow-down-bold' : saveStatus === 'saved' ? 'cloud-check' : 'cloud-alert'}
             size={16}
             color="#FFFFFF"
           />
           <Text style={s.saveToastText}>
-            {saveStatus === 'saving' ? 'Salvando…' : saveStatus === 'saved' ? 'Salvo' : 'Erro ao salvar'}
+            {saveStatus === 'saving' ? 'Salvando…' : saveStatus === 'moved' ? 'Concluída — movida para o fim da lista' : saveStatus === 'saved' ? 'Salvo' : 'Erro ao salvar'}
           </Text>
         </Animated.View>
       )}

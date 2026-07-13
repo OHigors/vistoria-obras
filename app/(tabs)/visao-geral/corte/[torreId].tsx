@@ -21,7 +21,7 @@ import {
   LEVELS_BELOW_FLOORS,
   type TowerLevelDef,
 } from '@/src/data/towerLevels';
-import { getProgressMapStyle, statusConfig } from '@/src/ui/status';
+import { getProgressMapStyle } from '@/src/ui/status';
 
 // ── Prancha (technical drawing) tokens ────────────────────────────────────────
 const INK = '#0F172A';
@@ -30,7 +30,6 @@ const SHEET_BG = '#F1F5F9';
 const GUIDE = '#CBD5E1';
 const HATCH_BLUE = '#93C5FD'; // hachura azul do corte original
 const CRIT_BG = '#FEE2E2';
-const CRIT_FG = '#B91C1C';
 
 // Larguras da silhueta por tipo de nível (reproduz o degrau do corte).
 const KIND_WIDTH: Record<TowerLevelDef['kind'], `${number}%`> = {
@@ -196,9 +195,10 @@ export default function CorteDaTorreScreen() {
 
   const renderLevelBand = (def: TowerLevelDef) => {
     const { items, progress, ghost, critical } = levelAgg(def);
+    // Cor puramente por % de conclusão (mesma paleta de pavimentos/apartamentos).
     const map = getProgressMapStyle(progress);
-    const fg = critical ? CRIT_FG : map.fg;
-    const bg = critical ? CRIT_BG : map.bg;
+    const fg = map.fg;
+    const bg = map.bg;
     const hatched = def.kind === 'below';
     return (
       <View key={def.code} style={s.row}>
@@ -238,9 +238,10 @@ export default function CorteDaTorreScreen() {
   };
 
   const renderFloorBand = (floor: (typeof floors)[number]) => {
+    // Cor puramente por % de conclusão (mesma paleta dos níveis e apartamentos).
     const map = getProgressMapStyle(floor.progress);
-    const fg = floor.hasCritical ? CRIT_FG : map.fg;
-    const bg = floor.hasCritical ? CRIT_BG : map.bg;
+    const fg = map.fg;
+    const bg = map.bg;
     const expanded = expandedFloor === floor.floor;
     return (
       <View key={floor.floor}>
@@ -275,25 +276,20 @@ export default function CorteDaTorreScreen() {
         {expanded && (
           <View style={s.aptDrawerRow}>
             <View style={s.aptDrawerRail} />
-            <View style={[s.aptDrawer, { width: KIND_WIDTH.body, backgroundColor: bg, borderColor: fg }]}>
+            <View style={[s.aptDrawer, { width: KIND_WIDTH.body, backgroundColor: bg, borderColor: INK }]}>
               <Text style={[s.aptDrawerHint, { color: fg }]}>Apartamentos deste pavimento</Text>
               <View style={s.aptRow}>
                 {floor.apts.map((apt) => {
-                  const noProgress = apt.progress === 0;
-                  const cfg = statusConfig[apt.status];
-                  // Sem avanço → cinza; com avanço → cor do status.
-                  const dot = noProgress ? '#94A3B8' : cfg.color;
-                  const chipBg = noProgress ? '#FFFFFF' : cfg.background;
-                  const chipBorder = noProgress ? '#CBD5E1' : cfg.border;
-                  const chipText = noProgress ? '#64748B' : cfg.color;
+                  // Cor por % de conclusão (0% → cinza neutro), igual aos pavimentos.
+                  const amap = getProgressMapStyle(apt.progress);
                   return (
                     <Pressable
                       key={apt.id}
                       onPress={() => router.push(`/visao-geral/apartamentos/${apt.id}` as never)}
-                      style={[s.aptChip, { backgroundColor: chipBg, borderColor: chipBorder }]}>
-                      <View style={[s.aptDot, { backgroundColor: dot }]} />
-                      <Text style={[s.aptChipText, { color: chipText }]}>{apt.number}</Text>
-                      <Text style={[s.aptChipPct, { color: chipText }]}>{apt.progress}%</Text>
+                      style={[s.aptChip, { backgroundColor: amap.bg, borderColor: amap.border }]}>
+                      <View style={[s.aptDot, { backgroundColor: amap.fg }]} />
+                      <Text style={[s.aptChipText, { color: amap.fg }]}>{apt.number}</Text>
+                      <Text style={[s.aptChipPct, { color: amap.fg }]}>{apt.progress}%</Text>
                     </Pressable>
                   );
                 })}

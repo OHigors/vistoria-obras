@@ -1,6 +1,6 @@
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useMemo, useRef, useState } from 'react';
-import { Image, Modal, Platform, Pressable, ScrollView, TextInput, View } from 'react-native';
+import { Animated, Image, Modal, Platform, Pressable, ScrollView, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -36,7 +36,7 @@ const TAB_ICONS: Record<DetailTab, string> = {
   Histórico: 'history',
 };
 
-const progressOrder: ChecklistState[] = ['pending', 'partial', 'ok', 'notApplicable'];
+const progressOrder: ChecklistState[] = ['ok', 'partial', 'pending', 'notApplicable'];
 
 const scheduleStatusStyles: Record<string, { background: string; color: string }> = {
   'No prazo': { background: '#DBEAFE', color: '#2563EB' },
@@ -101,13 +101,14 @@ export default function NivelDaTorreScreen() {
   const [loading, setLoading] = useState(true);
   const [needsMigration, setNeedsMigration] = useState(false);
   const [activeTab, setActiveTab] = useState<DetailTab>('Resumo');
-  const [statusPickerId, setStatusPickerId] = useState<string | null>(null);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const [expandedComments, setExpandedComments] = useState<Record<string, boolean>>({});
   const [draftComments, setDraftComments] = useState<Record<string, string>>({});
+  const [draftPhotoComments, setDraftPhotoComments] = useState<Record<string, string>>({});
   const [expandedEmergencies, setExpandedEmergencies] = useState<Record<string, boolean>>({});
   const [draftEmergencies, setDraftEmergencies] = useState<Record<string, string>>({});
   const [confirmRemove, setConfirmRemove] = useState<TowerItem | null>(null);
+  const [confirmRemovePhoto, setConfirmRemovePhoto] = useState<string | null>(null);
   const [addStepOpen, setAddStepOpen] = useState(false);
   const [addStepSearch, setAddStepSearch] = useState('');
   const [collapsedAddStepGroups, setCollapsedAddStepGroups] = useState<Record<string, boolean>>({});
@@ -266,6 +267,19 @@ export default function NivelDaTorreScreen() {
     });
   };
 
+  // Toast de conclusão (etapa movida para o fim da lista) — dura um pouco mais.
+  const [movedToast, setMovedToast] = useState(false);
+  const movedAnim = useRef(new Animated.Value(0)).current;
+  const movedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showMovedToast = useCallback(() => {
+    setMovedToast(true);
+    Animated.timing(movedAnim, { toValue: 1, duration: 180, useNativeDriver: true }).start();
+    if (movedTimerRef.current) clearTimeout(movedTimerRef.current);
+    movedTimerRef.current = setTimeout(() => {
+      Animated.timing(movedAnim, { toValue: 0, duration: 220, useNativeDriver: true }).start(() => setMovedToast(false));
+    }, 3400);
+  }, [movedAnim]);
+
   const updateItemStatus = (itemId: string, next: ChecklistState) => {
     const prev = items;
     const target = prev.find((i) => i.id === itemId);
@@ -279,6 +293,7 @@ export default function NivelDaTorreScreen() {
     setItems(nextItems);
     persistItem(stamped, prev);
     registerVisitUpdate(nextItems, itemId);
+    if (next === 'ok' && target.state !== 'ok') showMovedToast();
   };
 
   const addStepToLevel = async (nome: string, ordemExecucao: number) => {
@@ -351,6 +366,17 @@ export default function NivelDaTorreScreen() {
     setPhotos((cur) => cur.map((p) => (p.id === photoId ? { ...p, comment, comentarioFoto: comment } : p)));
     const target = photos.find((p) => p.id === photoId);
     if (target) db.savePhoto({ ...target, comment, comentarioFoto: comment }).catch(() => {});
+  };
+
+  // Comentário da foto: edita um rascunho e só grava no "Salvar" (evita 1 escrita
+  // por tecla, que causava erros). "Cancelar" descarta o rascunho.
+  const savePhotoComment = (photoId: string) => {
+    const value = draftPhotoComments[photoId] ?? photos.find((p) => p.id === photoId)?.comment ?? '';
+    updatePhotoComment(photoId, value);
+    setDraftPhotoComments((cur) => { const n = { ...cur }; delete n[photoId]; return n; });
+  };
+  const cancelPhotoComment = (photoId: string) => {
+    setDraftPhotoComments((cur) => { const n = { ...cur }; delete n[photoId]; return n; });
   };
 
   const handlePickImage = async (source: 'camera' | 'gallery') => {
@@ -594,6 +620,9 @@ export default function NivelDaTorreScreen() {
               const color = categoryColor(cat);
               const collapsed = collapsedGroups[cat] === true;
               const okInGroup = groupItems.filter((i) => i.state === 'ok' || i.state === 'notApplicable').length;
+              // Só as etapas concluídas (ok) descem para o fim; as demais mantêm a
+              // ordem original (sort estável), então outras mudanças não reordenam.
+              const orderedItems = [...groupItems].sort((a, b) => (a.state === 'ok' ? 1 : 0) - (b.state === 'ok' ? 1 : 0));
               return (
                 <View key={`chk-grp-${cat}`} style={s.checklistGroup}>
                   <Pressable onPress={() => setCollapsedGroups((cur) => ({ ...cur, [cat]: !collapsed }))} style={s.checklistGroupHeader}>
@@ -602,15 +631,16 @@ export default function NivelDaTorreScreen() {
                     <Text style={s.checklistGroupTitle}>{cat}</Text>
                     <Text style={s.checklistGroupCount}>{okInGroup}/{groupItems.length} OK</Text>
                   </Pressable>
-                  {!collapsed && groupItems.map((item) => {
+                  {!collapsed && orderedItems.map((item) => {
                     const cfg = checklistConfig[item.state];
                     const itemPhotos = photosByServiceId[item.id] ?? [];
-                    const open = statusPickerId === item.id;
                     return (
                       <View key={item.id} style={[s.checkCard, { borderLeftColor: cfg.color }]}>
                         <View style={s.checkCardTop}>
                           <View style={[s.checkIcon, { backgroundColor: cfg.background }]}>
-                            <Text style={[s.checkIconSymbol, { color: cfg.color }]}>{cfg.symbol}</Text>
+                            {cfg.icon
+                              ? <MaterialCommunityIcons name={cfg.icon} size={16} color={cfg.color} />
+                              : <Text style={[s.checkIconSymbol, { color: cfg.color }]}>{cfg.abbrev}</Text>}
                           </View>
                           <View style={s.checkCardInfo}>
                             <View style={s.checkLabelRow}>
@@ -623,28 +653,22 @@ export default function NivelDaTorreScreen() {
                           </Pressable>
                         </View>
 
-                        <View>
-                          <Pressable onPress={() => setStatusPickerId(open ? null : item.id)} style={[s.statusSelect, open && s.statusSelectOpen]}>
-                            <View style={[s.statusDot, { backgroundColor: cfg.color }]} />
-                            <Text style={[s.statusSelectText, { color: cfg.color }]}>{cfg.label}</Text>
-                            <MaterialCommunityIcons name={open ? 'chevron-up' : 'chevron-down'} size={18} color="#94A3B8" />
-                          </Pressable>
-                          {open && (
-                            <View style={s.statusMenu}>
-                              {progressOrder.map((opt) => {
-                                const oc = checklistConfig[opt];
-                                const sel = item.state === opt;
-                                return (
-                                  <Pressable key={opt} onPress={() => { updateItemStatus(item.id, opt); setStatusPickerId(null); }}
-                                    style={[s.statusMenuRow, sel && { backgroundColor: oc.background }]}>
-                                    <View style={[s.statusDot, { backgroundColor: oc.color }]} />
-                                    <Text style={[s.statusMenuText, sel && { color: oc.color, fontWeight: '800' as const }]}>{oc.label}</Text>
-                                    {sel && <MaterialCommunityIcons name="check" size={16} color={oc.color} style={{ marginLeft: 'auto' }} />}
-                                  </Pressable>
-                                );
-                              })}
-                            </View>
-                          )}
+                        <View style={s.statusBtnRow}>
+                          {progressOrder.map((opt) => {
+                            const oc = checklistConfig[opt];
+                            const sel = item.state === opt;
+                            return (
+                              <Pressable
+                                key={opt}
+                                onPress={() => updateItemStatus(item.id, opt)}
+                                accessibilityRole="button"
+                                accessibilityState={{ selected: sel }}
+                                accessibilityLabel={oc.label}
+                                style={[s.statusBtn, sel && { backgroundColor: oc.background, borderColor: oc.color }]}>
+                                <Text style={[s.statusBtnLabel, { color: sel ? oc.color : '#64748B' }]} numberOfLines={2}>{oc.label}</Text>
+                              </Pressable>
+                            );
+                          })}
                         </View>
 
                         {item.emergency?.trim() && !expandedEmergencies[item.id] && (
@@ -743,14 +767,26 @@ export default function NivelDaTorreScreen() {
                                   </View>
                                 </Pressable>
                                 <View style={s.thumbBody}>
-                                  <TextInput
-                                    multiline onChangeText={(v) => updatePhotoComment(photo.id, v)}
-                                    placeholder="Comentário..." placeholderTextColor="#94A3B8"
-                                    style={s.thumbInput} value={photo.comment} />
-                                  <Pressable onPress={() => removePhoto(photo.id)} style={s.removeBtn}>
-                                    <MaterialCommunityIcons name="trash-can-outline" size={12} color="#B91C1C" />
-                                    <Text style={s.removeBtnText}>Remover</Text>
-                                  </Pressable>
+                                  <View style={s.obsBox}>
+                                    <Pressable onPress={() => setConfirmRemovePhoto(photo.id)} style={s.photoRemoveX} hitSlop={6}>
+                                      <MaterialCommunityIcons name="close" size={14} color="#64748B" />
+                                    </Pressable>
+                                    <TextInput
+                                      multiline onChangeText={(v) => setDraftPhotoComments((cur) => ({ ...cur, [photo.id]: v }))}
+                                      placeholder="Comentário..." placeholderTextColor="#94A3B8"
+                                      style={[s.obsTextarea, { paddingRight: 26 }]} value={draftPhotoComments[photo.id] ?? photo.comment ?? ''} />
+                                    <View style={s.obsBoxFooter}>
+                                      <View />
+                                      <View style={s.obsBoxFooterRight}>
+                                        <Pressable onPress={() => cancelPhotoComment(photo.id)} style={s.obsCancelBtn}>
+                                          <Text style={s.obsCancelBtnText}>Cancelar</Text>
+                                        </Pressable>
+                                        <Pressable onPress={() => savePhotoComment(photo.id)} style={s.obsDoneBtn}>
+                                          <Text style={s.obsDoneBtnText}>Salvar</Text>
+                                        </Pressable>
+                                      </View>
+                                    </View>
+                                  </View>
                                 </View>
                               </View>
                             ))}
@@ -999,7 +1035,7 @@ export default function NivelDaTorreScreen() {
                   <Text style={s.modalMeta}>{formatPhotoDateTime(selectedPhoto.dataHora ?? selectedPhoto.createdAt)}</Text>
                   {selectedPhoto.comment ? <Text style={s.modalComment}>{selectedPhoto.comment}</Text> : null}
                 </View>
-                <Pressable onPress={() => removePhoto(selectedPhoto.id)} style={s.removeBtn}>
+                <Pressable onPress={() => setConfirmRemovePhoto(selectedPhoto.id)} style={s.removeBtn}>
                   <MaterialCommunityIcons name="trash-can-outline" size={12} color="#B91C1C" />
                   <Text style={s.removeBtnText}>Remover foto</Text>
                 </Pressable>
@@ -1064,6 +1100,29 @@ export default function NivelDaTorreScreen() {
                 <Text style={s.confirmBtnGhostText}>Cancelar</Text>
               </Pressable>
               <Pressable onPress={removeStepNow} style={s.confirmBtnDanger}>
+                <Text style={s.confirmBtnDangerText}>Remover</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* MODAL: confirm remove photo */}
+      <Modal animationType="fade" onRequestClose={() => setConfirmRemovePhoto(null)} transparent visible={Boolean(confirmRemovePhoto)}>
+        <View style={s.modalBackdrop}>
+          <View style={s.confirmSheet}>
+            <View style={[s.confirmIcon, { backgroundColor: '#FEE2E2' }]}>
+              <MaterialCommunityIcons name="image-remove" size={26} color="#B91C1C" />
+            </View>
+            <Text style={s.confirmTitle}>Remover esta foto?</Text>
+            <Text style={s.confirmSub}>A foto e seu comentário serão apagados. Esta ação não pode ser desfeita.</Text>
+            <View style={s.confirmActions}>
+              <Pressable onPress={() => setConfirmRemovePhoto(null)} style={s.confirmBtnGhost}>
+                <Text style={s.confirmBtnGhostText}>Cancelar</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => { if (confirmRemovePhoto) removePhoto(confirmRemovePhoto); setConfirmRemovePhoto(null); }}
+                style={s.confirmBtnDanger}>
                 <Text style={s.confirmBtnDangerText}>Remover</Text>
               </Pressable>
             </View>
@@ -1164,6 +1223,22 @@ export default function NivelDaTorreScreen() {
           </Pressable>
         </Pressable>
       </Modal>
+
+      {movedToast && (
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            s.saveToast,
+            s.saveToastSaved,
+            {
+              opacity: movedAnim,
+              transform: [{ translateY: movedAnim.interpolate({ inputRange: [0, 1], outputRange: [16, 0] }) }],
+            },
+          ]}>
+          <MaterialCommunityIcons name="arrow-down-bold" size={16} color="#FFFFFF" />
+          <Text style={s.saveToastText}>Concluída — movida para o fim da lista</Text>
+        </Animated.View>
+      )}
     </>
   );
 }
