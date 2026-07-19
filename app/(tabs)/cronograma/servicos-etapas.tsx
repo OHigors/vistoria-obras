@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Text } from '@/src/ui/Text';
+import { ReadOnlyBanner } from '@/src/ui/ReadOnlyBanner';
 import { Skeleton } from '@/src/ui/Skeleton';
 import { useToast } from '@/src/ui/Toast';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
@@ -201,7 +202,7 @@ const categoryColor = (cat: string) => {
 export default function ServiceStagesScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { refreshServiceStages, refreshData, serviceCategories, serviceUnits } = useObras();
+  const { refreshServiceStages, refreshData, serviceCategories, serviceUnits, canWrite } = useObras();
   const toast = useToast();
   const scrollRef = useRef<ScrollView | null>(null);
   const [stages, setStages] = useState<ServiceStage[]>([]);
@@ -268,6 +269,7 @@ export default function ServiceStagesScreen() {
   };
 
   const saveDraft = () => {
+    if (!canWrite) return;
     const next: Partial<Record<keyof ServiceStage, string>> = {};
     const trimmedName = draft.nome.trim();
     if (!trimmedName) {
@@ -325,7 +327,7 @@ export default function ServiceStagesScreen() {
   const reactivate = (stage: ServiceStage) => persistStages(stages.map((s) => (s.id === stage.id ? { ...s, ativo: true } : s)));
 
   const confirmDelete = () => {
-    if (!stageToDelete) return;
+    if (!canWrite || !stageToDelete) return;
     const id = stageToDelete.id;
     const next = stages.filter((s) => s.id !== id);
     const ordered = next.map((s, i) => ({ ...s, ordemExecucao: i + 1 }));
@@ -478,6 +480,7 @@ export default function ServiceStagesScreen() {
           <Text style={s.backBtnText}>Cronograma</Text>
         </Pressable>
       </View>
+      {!canWrite && <ReadOnlyBanner />}
       <ScrollView
         ref={scrollRef}
         style={s.scroll}
@@ -504,6 +507,7 @@ export default function ServiceStagesScreen() {
           </View>
         </View>
         <View style={s.headerActions}>
+          {canWrite && (
           <Pressable
             accessibilityLabel="Nova etapa"
             onPress={() => {
@@ -520,6 +524,7 @@ export default function ServiceStagesScreen() {
           >
             <MaterialCommunityIcons name="plus" size={20} color="#6D28D9" />
           </Pressable>
+          )}
           <Pressable
             accessibilityLabel="Gerenciar categorias e unidades"
             onPress={() => router.push('/(tabs)/cronograma/catalogos' as any)}

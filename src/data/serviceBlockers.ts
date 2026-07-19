@@ -57,11 +57,14 @@ const classifyImpact = (blockedServices: string[]): BlockImpact => {
 export const getChecklistForApartment = (apartment: Apartment): ChecklistItem[] =>
   apartment.checklist;
 
-export const getBlockedServiceGroups = (checklist: ChecklistItem[]): BlockedServiceGroup[] =>
-  checklist
+export const getBlockedServiceGroups = (checklist: ChecklistItem[]): BlockedServiceGroup[] => {
+  // Uma vez por chamada, não uma vez por item.
+  const dependencyMap = getServiceDependencyMap();
+
+  return checklist
     .filter(isBlockingChecklistItem)
     .map((item) => {
-      const blockedServices = getServiceDependencyMap()[item.label] ?? [];
+      const blockedServices = dependencyMap[item.label] ?? [];
 
       return {
         pendingService: item.label,
@@ -71,6 +74,7 @@ export const getBlockedServiceGroups = (checklist: ChecklistItem[]): BlockedServ
       };
     })
     .filter((group) => group.blockedServices.length > 0);
+};
 
 export const summarizeBottlenecks = (projectApartments: Apartment[]): BottleneckSummary => {
   const pendingApartmentsByService = new Map<string, Set<string>>();

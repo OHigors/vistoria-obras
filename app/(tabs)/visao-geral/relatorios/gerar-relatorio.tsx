@@ -1,5 +1,5 @@
 import { useRouter } from 'expo-router';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
@@ -11,11 +11,17 @@ import {
   reportCsvHeader,
   validateReportFilters,
   type ReportContentOptions,
+  type ReportDataSource,
   type ReportFilters,
   type ReportKind,
 } from '@/src/data/generatedReports';
-import { project, towers } from '@/src/data/mockObras';
+import { useObras } from '@/src/data/ObrasContext';
+import * as db from '@/src/data/db';
 import { isValidBrDate, maskDateBr } from '@/src/data/schedule';
+
+type ChecklistMap = Awaited<ReturnType<typeof db.loadAllChecklistItems>>;
+type VisitsMap = Awaited<ReturnType<typeof db.loadVisitsByApartment>>;
+type PhotosMap = Awaited<ReturnType<typeof db.loadPhotosByApartment>>;
 
 const csvSeparator = ';';
 const csvBom = '﻿';
@@ -143,9 +149,75 @@ export default function GenerateReportScreen() {
   const [filters, setFilters] = useState<ReportFilters>(defaultFilters);
   const [options, setOptions] = useState<ReportContentOptions>(defaultOptions);
 
-  const report = useMemo(() => createGeneratedReport(kind, filters, options), [filters, kind, options]);
+  const { activeObraId, apartments, measurements, profile, project, towers } = useObras();
+  const [checklistByApt, setChecklistByApt] = useState<ChecklistMap>(new Map());
+  const [visitsByApartment, setVisitsByApartment] = useState<VisitsMap>(new Map());
+  const [photosByApartment, setPhotosByApartment] = useState<PhotosMap>(new Map());
+  const [photosLoaded, setPhotosLoaded] = useState(false);
+  const [loadingData, setLoadingData] = useState(true);
+
+  // Os apartamentos do contexto chegam sem checklist (lazy loading), então o
+  // relatório precisa buscar os itens e as visitas antes de montar a prévia.
+  useEffect(() => {
+    let alive = true;
+    setLoadingData(true);
+    Promise.all([db.loadAllChecklistItems(), db.loadVisitsByApartment()])
+      .then(([checklists, visits]) => {
+        if (!alive) return;
+        setChecklistByApt(checklists);
+        setVisitsByApartment(visits);
+      })
+      .finally(() => {
+        if (alive) setLoadingData(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [activeObraId]);
+
+  // Trocar de obra invalida as fotos já assinadas.
+  useEffect(() => {
+    setPhotosByApartment(new Map());
+    setPhotosLoaded(false);
+  }, [activeObraId]);
+
+  // Assinar URLs custa uma chamada ao Storage: só busca fotos se o relatório
+  // realmente as incluir, e só uma vez por obra.
+  useEffect(() => {
+    if (!options.includePhotos || photosLoaded) return;
+    let alive = true;
+    db.loadPhotosByApartment().then((map) => {
+      if (!alive) return;
+      setPhotosByApartment(map);
+      setPhotosLoaded(true);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [options.includePhotos, photosLoaded]);
+
+  const reportData = useMemo<ReportDataSource>(
+    () => ({
+      projectName: project.name,
+      responsible: profile?.name || 'não informado',
+      towers,
+      apartments: apartments.map((apartment) => ({
+        ...apartment,
+        checklist: checklistByApt.get(apartment.id) ?? apartment.checklist,
+      })),
+      measurements,
+      photosByApartment,
+      visitsByApartment,
+    }),
+    [apartments, checklistByApt, measurements, photosByApartment, profile?.name, project.name, towers, visitsByApartment],
+  );
+
+  const report = useMemo(
+    () => createGeneratedReport(kind, filters, options, reportData),
+    [filters, kind, options, reportData],
+  );
   const validationMessage = validateDates(filters) || validateReportFilters(kind, filters);
-  const canExport = !validationMessage && report.isValid && report.text.length > 0;
+  const canExport = !loadingData && !validationMessage && report.isValid && report.text.length > 0;
 
   const updateFilter = (field: keyof ReportFilters, value: string) => {
     setFilters((currentFilters) => ({ ...currentFilters, [field]: value }));

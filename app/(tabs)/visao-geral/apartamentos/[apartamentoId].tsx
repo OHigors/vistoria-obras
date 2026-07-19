@@ -1,11 +1,13 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native'
+import { Animated, Modal, Platform, Pressable, ScrollView, TextInput, View } from 'react-native'
+// expo-image: cache em disco/memória (a Image do RN rebaixa a foto inteira toda vez).
+import { Image } from 'expo-image'
 import { Text } from '@/src/ui/Text';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
-import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
+import { preparePhotoForUpload } from '@/src/features/inspection/preparePhoto';
 
 import type { ApartmentStatus, ChecklistItem, ChecklistState } from '@/src/data/mockObras';
 import { useAreaFilter } from '@/src/data/AreaFilterContext';
@@ -28,17 +30,25 @@ import {
   toNumber,
 } from '@/src/data/localMeasurements';
 import { useObras } from '@/src/data/ObrasContext';
+import { useObraScopeGuard } from '@/src/data/useObraScopeGuard';
 import * as dbApi from '@/src/data/db';
+import { getCachedChecklist } from '@/src/data/checklistCache';
 import type { ScheduleFields } from '@/src/data/schedule';
 import { formatDateBr, getScheduleRows, isValidBrDate, maskDateBr } from '@/src/data/schedule';
 import { getBlockedServiceGroups } from '@/src/data/serviceBlockers';
 import { categoryOrderIndex, defaultServiceDependencies, getGroupStepChildren, isServiceActiveForFeature } from '@/src/data/serviceStages';
 import type { Worker } from '@/src/data/serviceWorkers';
 import { checklistConfig, getProgressMapStyle, statusConfig } from '@/src/ui/status';
+import { computeApartmentStatus as calculateApartmentStatus } from '@/src/data/apartmentStatus';
+import { ReadOnlyBanner } from '@/src/ui/ReadOnlyBanner';
 import { inspectionStyles as s } from '@/src/features/inspection/inspectionStyles';
 
 // Ordem dos botões de status: Concluído → Em andamento → Não iniciado → N/A.
 const progressOrder: ChecklistState[] = ['ok', 'partial', 'pending', 'notApplicable'];
+
+// Grupo "default" onde etapas/grupos recriados são incluídos (não há mais a
+// escolha Interior/Exterior ao adicionar).
+const DEFAULT_STEP_AREA = 'Interior' as const;
 
 const CATEGORY_PALETTE = ['#2563EB', '#7C3AED', '#0891B2', '#16A34A', '#D97706', '#DB2777', '#0EA5E9', '#65A30D', '#B45309', '#9333EA'];
 const categoryColor = (cat: string) => {
@@ -144,31 +154,27 @@ const calculateProgress = (items: EditableChecklistItem[]) => {
   return Math.round((score / items.length) * 100);
 };
 
-const calculateApartmentStatus = (items: EditableChecklistItem[], progress: number): ApartmentStatus => {
-  const pendingCount = items.filter((i) => i.state === 'pending').length;
-  const partialCount = items.filter((i) => i.state === 'partial').length;
-  const manyPending = pendingCount >= Math.max(3, Math.ceil(items.length * 0.35));
-  if (progress < 50 || manyPending) return 'critical';
-  if ((progress >= 50 && progress <= 74) || partialCount > 0) return 'attention';
-  if (progress >= 90 && pendingCount === 0) return 'excellent';
-  return 'good';
-};
+// calculateApartmentStatus agora vem de @/src/data/apartmentStatus (fórmula única,
+// compartilhada com Corte/Nível e replicada no trigger do banco).
 
 export default function ApartmentDetailScreen() {
   const { apartamentoId } = useLocalSearchParams<{ apartamentoId: string }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { getApartmentById, getTowerById, updateApartmentLocal, serviceStages, refreshServiceStages, project, loading } = useObras();
+  const { getApartmentById, getTowerById, updateApartmentLocal, serviceStages, refreshServiceStages, project, loading, canWrite } = useObras();
   const { areaFilter, setAreaFilter } = useAreaFilter();
   const apartment = getApartmentById(apartamentoId);
   const tower = apartment ? getTowerById(apartment.towerId) : undefined;
+  // Trocou de obra? O apartamento desta URL não existe mais aqui — volta pra Visão Geral.
+  useObraScopeGuard(Boolean(apartment), '/visao-geral');
 
   const goBackToTower = useCallback(() => {
     router.push(apartment ? `/(tabs)/visao-geral/corte/${apartment.towerId}` as any : '/(tabs)/visao-geral' as any);
   }, [router, apartment?.towerId]);
 
-  const initialChecklist = useMemo(() => getInitialChecklist(apartment?.checklist), [apartment?.checklist]);
-  const [checklist, setChecklist] = useState<EditableChecklistItem[]>(initialChecklist);
+  const [checklist, setChecklist] = useState<EditableChecklistItem[]>([]);
+  // Baseline carregado do banco — usado por "restaurar" (descartar alterações).
+  const [baseChecklist, setBaseChecklist] = useState<EditableChecklistItem[]>([]);
   const [measurements, setMeasurements] = useState<Measurement[]>([]);
   const [measurementDrafts, setMeasurementDrafts] = useState<Record<string, MeasurementDraft>>({});
   const [measurementAlert, setMeasurementAlert] = useState('');
@@ -182,10 +188,15 @@ export default function ApartmentDetailScreen() {
   const [selectedVisit, setSelectedVisit] = useState<InspectionVisit>();
   const [photoPickerTarget, setPhotoPickerTarget] = useState<{ itemId: string; forMeasurement?: boolean } | null>(null);
   const [addStepOpen, setAddStepOpen] = useState(false);
-  const [addStepSearch, setAddStepSearch] = useState('');
-  const [addStepArea, setAddStepArea] = useState<'Interior' | 'Exterior'>('Interior');
+  const [confirmRestoreGroup, setConfirmRestoreGroup] = useState<string | null>(null);
+  const [restoreMsg, setRestoreMsg] = useState<string | null>(null); // feedback dentro do "Adicionar grupo"
   const [confirmRemoveStep, setConfirmRemoveStep] = useState<EditableChecklistItem | null>(null);
   const [confirmRemovePhoto, setConfirmRemovePhoto] = useState<string | null>(null);
+  // Ações em lote por grupo (categoria): menu aberto + confirmação de exclusão.
+  const [groupMenu, setGroupMenu] = useState<string | null>(null);
+  const [groupStatusOpen, setGroupStatusOpen] = useState(false); // dropdown de status aberto
+  const [groupMsg, setGroupMsg] = useState<string | null>(null);  // feedback dentro do menu
+  const [confirmRemoveGroup, setConfirmRemoveGroup] = useState<string | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
   const [showBackToTop, setShowBackToTop] = useState(false);
   const [tabArrows, setTabArrows] = useState({ left: false, right: false });
@@ -293,16 +304,32 @@ export default function ApartmentDetailScreen() {
 
   useEffect(() => {
     if (!apartamentoId) return;
-    setChecklist(getInitialChecklist(apartment?.checklist));
     setMeasurementDrafts({});
     setMeasurementAlert('');
     setSelectedVisit(undefined);
+    // O Corte e a lista da torre baixam os checklists da torre INTEIRA — abrir um
+    // apartamento a partir delas encontra o dele já em memória e pinta sem esperar
+    // a rede. A busca fresca abaixo continua e substitui (a rede manda).
+    const seed = getInitialChecklist(getCachedChecklist(apartamentoId) ?? []);
+    setBaseChecklist(seed);
+    setChecklist(seed);
+    // LAZY: carrega o checklist DESTE apartamento (antes vinha do contexto, que
+    // baixava o de todos no boot).
+    dbApi.loadChecklist(apartamentoId).then((items) => {
+      const init = getInitialChecklist(items);
+      setBaseChecklist(init);
+      // Com o cache, o usuário pode editar ANTES desta resposta chegar — e ela
+      // reflete o banco de antes da edição (uma etapa recém-excluída voltaria).
+      // Só substitui se o estado ainda for a semente intocada; qualquer edição
+      // troca a identidade do array e a resposta velha é descartada.
+      setChecklist((cur) => (cur === seed ? init : cur));
+    }).catch(() => {});
     dbApi.loadMeasurements(apartamentoId).then(setMeasurements);
     dbApi.loadPhotos(apartamentoId).then(setPhotos);
     setVisitsLoading(true);
     dbApi.loadVisits(apartamentoId).then((v) => { setVisits(v); setVisitsLoading(false); });
     dbApi.loadStepAssignments(apartamentoId).then(setAssignments);
-  }, [apartamentoId, apartment?.checklist]);
+  }, [apartamentoId]);
 
   useEffect(() => {
     dbApi.loadWorkers().then(setWorkers);
@@ -314,12 +341,10 @@ export default function ApartmentDetailScreen() {
   // already on this apartment.
   const availableStages = useMemo(() => {
     const existingLabels = new Set(checklist.map((i) => i.label));
-    const q = addStepSearch.trim().toLocaleLowerCase('pt-BR');
     return serviceStages
       .filter((stage) => stage.ativo && stage.apareceNoChecklist && !existingLabels.has(stage.nome))
-      .filter((stage) => !q || stage.nome.toLocaleLowerCase('pt-BR').includes(q) || stage.categoria.toLocaleLowerCase('pt-BR').includes(q))
       .sort((a, b) => a.ordemExecucao - b.ordemExecucao);
-  }, [serviceStages, checklist, addStepSearch]);
+  }, [serviceStages, checklist]);
 
   // Reload the catalog whenever the user opens the picker so freshly-created
   // catalog steps (from Cronograma → Serviços e etapas) show up immediately.
@@ -489,6 +514,7 @@ export default function ApartmentDetailScreen() {
   };
 
   const updateItemStatus = (itemId: string, state: ChecklistState) => {
+    if (!canWrite) return; // viewer: sem escrita (o banco também bloqueia)
     const prev = checklist;
     // Concluir (→ ok) desce a etapa para o fim do grupo → toast especial (mais
     // longo). Marca ANTES de qualquer scheduleSave para que o feedback já apareça
@@ -527,6 +553,7 @@ export default function ApartmentDetailScreen() {
   };
 
   const updateItemComment = (itemId: string, comment: string) => {
+    if (!canWrite) return;
     setChecklist((cur) => {
       const next = cur.map((i) => i.id === itemId ? { ...i, comment } : i);
       const changed = next.find((i) => i.id === itemId);
@@ -538,6 +565,7 @@ export default function ApartmentDetailScreen() {
   };
 
   const updateItemIssue = (itemId: string, field: 'issueCriticality' | 'issueComment', value: string) => {
+    if (!canWrite) return;
     setChecklist((cur) => {
       const next = cur.map((i) =>
         i.id === itemId && field === 'issueCriticality' && isIssueCriticality(value) ? { ...i, issueCriticality: value }
@@ -552,6 +580,7 @@ export default function ApartmentDetailScreen() {
   };
 
   const updateItemSchedule = (itemId: string, field: keyof ScheduleFields, value: string) => {
+    if (!canWrite) return;
     const masked = maskDateBr(value);
     if (masked.length === 10 && !isValidBrDate(masked)) setScheduleAlert('Data inválida. Use DD/MM/AAAA.');
     else if (masked.length > 0 && masked.length < 10) setScheduleAlert('Use DD/MM/AAAA.');
@@ -568,7 +597,7 @@ export default function ApartmentDetailScreen() {
   };
 
   const addPhotoToItem = (item: EditableChecklistItem) => {
-    if (!apartment || !tower) return;
+    if (!canWrite || !apartment || !tower) return;
     setPhotoPickerTarget({ itemId: item.id });
   };
 
@@ -590,8 +619,9 @@ export default function ApartmentDetailScreen() {
     if (result.canceled || !result.assets?.[0]) return;
     const asset = result.assets[0];
     const pickedUri = Platform.OS === 'web' ? `data:image/jpeg;base64,${asset.base64}` : asset.uri;
-    // Re-encode to strip EXIF metadata (GPS, device info) before anything is stored.
-    const stripped = await manipulateAsync(pickedUri, [], { compress: 0.85, format: SaveFormat.JPEG });
+    // Limita o maior lado (1600px) e re-encoda — o re-encode também remove o EXIF
+    // (GPS, dispositivo) antes de qualquer gravação.
+    const stripped = await preparePhotoForUpload(pickedUri, asset.width, asset.height);
     const localUri = stripped.uri;
     const createdAt = new Date().toISOString();
     const fileName = asset.fileName ?? `foto-${Date.now()}.jpg`;
@@ -605,7 +635,8 @@ export default function ApartmentDetailScreen() {
     const item = checklist.find((i) => i.id === photoPickerTarget.itemId);
     if (!item) return;
     const photoId = crypto.randomUUID();
-    const storagePath = `${apartment.id}/${item.id}/${photoId}.jpg`;
+    // Prefixo obra_id/ → as políticas de Storage escopam o acesso por obra.
+    const storagePath = `${apartment.obraId}/${apartment.id}/${item.id}/${photoId}.jpg`;
 
     // Optimistic insert with the local URI so the thumb shows immediately.
     const optimisticPhoto = {
@@ -662,6 +693,7 @@ export default function ApartmentDetailScreen() {
   // Comentário da foto: edita um rascunho e só grava no "Salvar" (evita 1 escrita
   // por tecla, que causava erros). "Cancelar" descarta o rascunho.
   const savePhotoComment = (photoId: string) => {
+    if (!canWrite) return;
     const value = draftPhotoComments[photoId] ?? photos.find((p) => p.id === photoId)?.comment ?? '';
     updatePhotoComment(photoId, value);
     setDraftPhotoComments((cur) => { const n = { ...cur }; delete n[photoId]; return n; });
@@ -671,6 +703,7 @@ export default function ApartmentDetailScreen() {
   };
 
   const removePhoto = (photoId: string) => {
+    if (!canWrite) return;
     setPhotos((cur) => {
       const target = cur.find((p) => p.id === photoId);
       // Delete is a single discrete intent — fire it now so the user knows it's gone.
@@ -685,6 +718,7 @@ export default function ApartmentDetailScreen() {
   };
 
   const updateOpenVisitNote = (generalNote: string) => {
+    if (!canWrite) return;
     setVisits((cur) => cur.map((v) => {
       if (v.finalized) return v;
       const updated = { ...v, generalNote, observacaoGeral: generalNote };
@@ -695,7 +729,7 @@ export default function ApartmentDetailScreen() {
   };
 
   const finishVisit = () => {
-    if (!apartment) return;
+    if (!canWrite || !apartment) return;
     // Cancel any pending debounced save — finishVisit writes the canonical row.
     if (flushTimerRef.current) { clearTimeout(flushTimerRef.current); flushTimerRef.current = null; }
     pendingRef.current = { checklistItems: new Map(), photos: new Map(), visits: new Map() };
@@ -727,7 +761,7 @@ export default function ApartmentDetailScreen() {
   };
 
   const startNewVisit = () => {
-    if (!apartment) return;
+    if (!canWrite || !apartment) return;
     setVisits((cur) => {
       if (cur.some((v) => !v.finalized)) return cur;
       const now = new Date().toISOString();
@@ -754,11 +788,12 @@ export default function ApartmentDetailScreen() {
   };
 
   const addMeasurementEvidence = (itemId: string) => {
+    if (!canWrite) return;
     setPhotoPickerTarget({ itemId, forMeasurement: true });
   };
 
   const createMeasurement = (item: EditableChecklistItem) => {
-    if (!apartment) return;
+    if (!canWrite || !apartment) return;
     const draft = getMeasurementDraft(item.id);
     const contractor = draft.contractor.trim();
     if (!contractor) { setMeasurementAlert('Empreiteiro é obrigatório.'); return; }
@@ -791,6 +826,7 @@ export default function ApartmentDetailScreen() {
   };
 
   const clearApartmentMeasurements = () => {
+    if (!canWrite) return;
     measurements.forEach((m) => dbApi.deleteMeasurement(m.id).catch(() => showToast('error')));
     setMeasurements([]);
     setMeasurementDrafts({});
@@ -798,7 +834,7 @@ export default function ApartmentDetailScreen() {
   };
 
   const addStepToApartment = (stageLabel: string) => {
-    if (!apartamentoId || !apartment) return;
+    if (!canWrite || !apartamentoId || !apartment) return;
     const newItem: EditableChecklistItem = {
       id: crypto.randomUUID(),
       label: stageLabel,
@@ -807,8 +843,8 @@ export default function ApartmentDetailScreen() {
       emergency: '',
       issueCriticality: 'Média',
       issueComment: '',
-      // Area is chosen in the add-step popup — the catalog stage carries no area.
-      area: addStepArea,
+      // Etapas recriadas vão sempre para o grupo default (Interior).
+      area: DEFAULT_STEP_AREA,
       isExtra: true,
     };
     const prev = checklist;
@@ -823,10 +859,8 @@ export default function ApartmentDetailScreen() {
     updateApartmentLocal(apartamentoId, np, ns, next);
     registerVisitUpdate({ changedItemId: newItem.id, nextChecklist: next, nextPhotos: photos, progressBeforeFallback: calculateProgress(prev) });
     scheduleSave();
-    // Land on the area the step was added to so it's immediately visible.
-    if (areaFilter !== addStepArea) setAreaFilter(addStepArea);
-    setAddStepOpen(false);
-    setAddStepSearch('');
+    // Fica no grupo default para a etapa aparecer; o modal NÃO fecha (pode adicionar mais).
+    if (areaFilter !== DEFAULT_STEP_AREA) setAreaFilter(DEFAULT_STEP_AREA);
   };
 
   const requestRemoveStep = (item: EditableChecklistItem) => {
@@ -835,7 +869,7 @@ export default function ApartmentDetailScreen() {
 
   const confirmRemoveStepNow = () => {
     const target = confirmRemoveStep;
-    if (!target || !apartamentoId || !apartment) return;
+    if (!canWrite || !target || !apartamentoId || !apartment) return;
     setConfirmRemoveStep(null);
 
     // Cascade photos: soft-delete the inspection_photos rows (Storage objects kept for restore).
@@ -867,26 +901,152 @@ export default function ApartmentDetailScreen() {
     showToast('saved');
   };
 
+  // ── Ações em lote por grupo (categoria) ─────────────────────────────────────
+  // Itens do grupo = os da categoria, na área atualmente exibida.
+  const groupItemsOf = (cat: string) =>
+    checklist.filter(
+      (i) => (i.area ?? 'Interior') === areaFilter && (categoryByLabel.get(i.label) || 'Sem categoria') === cat,
+    );
+
+  // Marca TODAS as etapas visíveis do grupo com um status (concluído, em andamento,
+  // não iniciado ou não se aplica) — uma única gravação em lote. Para uma etapa-pai
+  // (group-step) aplica nas sub-etapas; o pai auto-resolve via applyGroupStepStates.
+  const setGroupStatus = (cat: string, state: ChecklistState) => {
+    if (!canWrite || !apartamentoId) return;
+    setGroupStatusOpen(false); // fecha o dropdown, mas mantém o menu do grupo aberto
+    const prev = checklist;
+    // Etapas visíveis que vão mudar (para a mensagem de feedback).
+    const visibleChanging = groupItemsOf(cat).filter((i) => !allGroupSubStepLabels.has(i.label) && i.state !== state);
+    const targetIds = new Set<string>();
+    for (const i of visibleChanging) {
+      if (i.label in groupStepChildren) {
+        for (const childLabel of groupStepChildren[i.label]) {
+          const child = checklist.find((c) => c.label === childLabel);
+          if (child && child.state !== state) targetIds.add(child.id);
+        }
+      } else {
+        targetIds.add(i.id);
+      }
+    }
+    if (targetIds.size === 0) {
+      setGroupMsg(`Nenhuma etapa a alterar — todas já estão em "${checklistConfig[state].label}".`);
+      return;
+    }
+    const isIssue = state === 'pending' || state === 'partial';
+    const baseNext = prev.map((i) =>
+      targetIds.has(i.id)
+        ? { ...i, state, issueCriticality: isIssue ? i.issueCriticality ?? 'Média' : undefined, issueComment: isIssue ? i.issueComment ?? '' : '' }
+        : i,
+    );
+    const grouped = applyGroupStepStates(baseNext, groupStepChildren);
+    const next = grouped.map((item) => {
+      const prevItem = prev.find((p) => p.id === item.id);
+      if (!prevItem || prevItem.state === item.state) return item;
+      return { ...item, ...stampActuals(prevItem, item.state) };
+    });
+    setChecklist(next);
+    for (const item of next) {
+      const prevItem = prev.find((p) => p.id === item.id);
+      if (prevItem?.state !== item.state) {
+        pendingRef.current.checklistItems.set(item.id, item);
+        dbApi.logStatusEvent({ apartmentId: apartamentoId, itemId: item.id, fromState: prevItem?.state, toState: item.state }).catch(() => {});
+      }
+    }
+    const np = calculateProgress(next);
+    const ns = calculateApartmentStatus(next, np);
+    dbApi.updateApartmentStats(apartamentoId, np, ns).catch(() => showToast('error'));
+    updateApartmentLocal(apartamentoId, np, ns, next);
+    registerVisitUpdate({ changedItemId: [...targetIds][0], nextChecklist: next, nextPhotos: photos, progressBeforeFallback: calculateProgress(prev) });
+    if (state === 'ok') pendingMovedToastRef.current = true; // concluir → desce para o fim
+    scheduleSave();
+    setGroupMsg(`${visibleChanging.length} etapa(s) marcada(s) como "${checklistConfig[state].label}".`);
+  };
+
+  // Restaura o grupo: adiciona todas as etapas do catálogo daquela categoria ainda
+  // ausentes, no grupo default. O modal NÃO fecha (dá para continuar adicionando).
+  const addGroupStages = (cat: string) => {
+    if (!canWrite || !apartamentoId || !apartment) return;
+    const existing = new Set(checklist.map((i) => i.label));
+    const stages = serviceStages.filter(
+      (st) => st.ativo && st.apareceNoChecklist && (st.categoria?.trim() || 'Sem categoria') === cat && !existing.has(st.nome),
+    );
+    if (stages.length === 0) return;
+    const newItems: EditableChecklistItem[] = stages.map((st) => ({
+      id: crypto.randomUUID(), label: st.nome, state: 'pending', comment: '', emergency: '',
+      issueCriticality: 'Média', issueComment: '', area: DEFAULT_STEP_AREA, isExtra: true,
+    }));
+    const prev = checklist;
+    const next = [...prev, ...newItems];
+    const np = calculateProgress(next);
+    const ns = calculateApartmentStatus(next, np);
+    for (const it of newItems) pendingRef.current.checklistItems.set(it.id, it);
+    setChecklist(next);
+    dbApi.updateApartmentStats(apartamentoId, np, ns).catch(() => showToast('error'));
+    updateApartmentLocal(apartamentoId, np, ns, next);
+    registerVisitUpdate({ changedItemId: newItems[0].id, nextChecklist: next, nextPhotos: photos, progressBeforeFallback: calculateProgress(prev) });
+    scheduleSave();
+    if (areaFilter !== DEFAULT_STEP_AREA) setAreaFilter(DEFAULT_STEP_AREA);
+    setRestoreMsg(`Grupo "${cat}" restaurado — ${newItems.length} etapa(s) adicionada(s).`);
+  };
+
+  const confirmRestoreGroupNow = () => {
+    const cat = confirmRestoreGroup;
+    setConfirmRestoreGroup(null);
+    if (cat) addGroupStages(cat);
+  };
+
+  const confirmRemoveGroupNow = () => {
+    const cat = confirmRemoveGroup;
+    if (!canWrite || !cat || !apartamentoId) return;
+    setConfirmRemoveGroup(null);
+    const prev = checklist;
+    const removeIds = new Set(groupItemsOf(cat).map((i) => i.id));
+    if (removeIds.size === 0) return;
+
+    // Cascata: fotos e medições dos itens removidos (mesmo tratamento do remove unitário).
+    const remPhotos = photos.filter((p) => removeIds.has(p.serviceId) || removeIds.has(p.itemId ?? ''));
+    remPhotos.forEach((p) => dbApi.deletePhoto(p.id, p.storagePath).catch(() => showToast('error')));
+    const nextPhotos = remPhotos.length ? photos.filter((p) => !removeIds.has(p.serviceId) && !removeIds.has(p.itemId ?? '')) : photos;
+    if (remPhotos.length) setPhotos(nextPhotos);
+    const remMeas = measurements.filter((m) => removeIds.has(m.serviceId ?? ''));
+    remMeas.forEach((m) => dbApi.deleteMeasurement(m.id).catch(() => showToast('error')));
+    if (remMeas.length) setMeasurements((cur) => cur.filter((m) => !removeIds.has(m.serviceId ?? '')));
+
+    for (const id of removeIds) {
+      dbApi.deleteChecklistItem(id).catch(() => showToast('error'));
+      pendingRef.current.checklistItems.delete(id);
+    }
+    const next = prev.filter((i) => !removeIds.has(i.id));
+    const np = calculateProgress(next);
+    const ns = calculateApartmentStatus(next, np);
+    setChecklist(next);
+    dbApi.updateApartmentStats(apartamentoId, np, ns).catch(() => showToast('error'));
+    updateApartmentLocal(apartamentoId, np, ns, next);
+    registerVisitUpdate({ changedItemId: [...removeIds][0], nextChecklist: next, nextPhotos, progressBeforeFallback: calculateProgress(prev) });
+    showToast('saved');
+  };
+
   const confirmResetNow = () => {
-    if (!apartment) return;
+    if (!canWrite || !apartment) return;
     setConfirmReset(false);
     // Soft-delete every photo row from this apartment (Storage objects kept for restore).
     photos.forEach((p) => dbApi.deletePhoto(p.id, p.storagePath).catch(() => showToast('error')));
     setPhotos([]);
-    setChecklist(initialChecklist);
+    setChecklist(baseChecklist);
     showToast('saved');
   };
 
   // ── worker assignment ─────────────────────────────────────────────────────
 
   const openComment = (itemId: string, currentComment: string) => {
+    if (!canWrite) return;
     draftCommentsRef.current[itemId] = currentComment;
     setDraftComments((cur) => ({ ...cur, [itemId]: currentComment }));
     setExpandedComments((cur) => ({ ...cur, [itemId]: true }));
   };
 
   const closeComment = (itemId: string, saveDraft = false) => {
-    if (saveDraft) {
+    if (saveDraft && canWrite) {
       const comment = (draftCommentsRef.current[itemId] ?? '').trim();
       if (apartamentoId) {
         const existing = checklist.find((i) => i.id === itemId);
@@ -908,13 +1068,14 @@ export default function ApartmentDetailScreen() {
   };
 
   const openEmergency = (itemId: string, currentEmergency: string) => {
+    if (!canWrite) return;
     draftEmergenciesRef.current[itemId] = currentEmergency;
     setDraftEmergencies((cur) => ({ ...cur, [itemId]: currentEmergency }));
     setExpandedEmergencies((cur) => ({ ...cur, [itemId]: true }));
   };
 
   const closeEmergency = (itemId: string, saveDraft = false) => {
-    if (saveDraft) {
+    if (saveDraft && canWrite) {
       const emergency = (draftEmergenciesRef.current[itemId] ?? '').trim();
       if (apartamentoId) {
         const existing = checklist.find((i) => i.id === itemId);
@@ -934,6 +1095,7 @@ export default function ApartmentDetailScreen() {
   };
 
   const openWorkerPicker = (item: EditableChecklistItem) => {
+    if (!canWrite) return;
     setWorkerPickerItem(item);
     setDraftWorkerIds(assignments[item.id] ?? []);
     setWorkerSearch('');
@@ -946,7 +1108,7 @@ export default function ApartmentDetailScreen() {
   };
 
   const saveWorkerAssignment = async () => {
-    if (!workerPickerItem || !apartamentoId) return;
+    if (!canWrite || !workerPickerItem || !apartamentoId) return;
     setSavingAssignment(true);
     try {
       await dbApi.setStepAssignments(apartamentoId, workerPickerItem.id, draftWorkerIds);
@@ -1015,6 +1177,8 @@ export default function ApartmentDetailScreen() {
           </View>
         </View>
 
+        {!canWrite && <ReadOnlyBanner />}
+
         {/* VISIT BANNER */}
         {openVisit ? (
           <View style={s.visitBannerOpen}>
@@ -1025,18 +1189,20 @@ export default function ApartmentDetailScreen() {
                 <Text style={s.visitBannerSub}>Iniciada {formatPhotoDateTime(openVisit.date)}</Text>
               </View>
             </View>
-            <Pressable onPress={finishVisit} style={s.visitFinishBtn}>
-              <Text style={s.visitFinishBtnText}>Finalizar</Text>
-            </Pressable>
+            {canWrite && (
+              <Pressable onPress={finishVisit} style={s.visitFinishBtn}>
+                <Text style={s.visitFinishBtnText}>Finalizar</Text>
+              </Pressable>
+            )}
           </View>
-        ) : (
+        ) : canWrite ? (
           <Pressable onPress={startNewVisit} style={s.visitBannerNew}>
             <MaterialCommunityIcons name="plus-circle-outline" size={18} color="#2563EB" />
             <Text style={s.visitBannerNewText}>
               {finalizedVisits.length > 0 ? `${finalizedVisits.length} visita(s) · Iniciar nova` : 'Iniciar primeira visita'}
             </Text>
           </Pressable>
-        )}
+        ) : null}
 
         {/* KPI ROW */}
         <View style={s.kpiRow}>
@@ -1191,23 +1357,24 @@ export default function ApartmentDetailScreen() {
             <View style={s.checklistHeader}>
               <Text style={s.checklistProgress}>{areaOkCount} / {areaChecklist.length} concluídos</Text>
               <View style={s.checklistHeaderActions}>
-                <Pressable
-                  onPress={() => {
-                    setAddStepSearch('');
-                    setAddStepArea(areaFilter);
-                    const cats: Record<string, boolean> = {};
-                    for (const stg of serviceStages) {
-                      const cat = stg.categoria?.trim() || 'Sem categoria';
-                      cats[cat] = true;
-                    }
-                    setCollapsedAddStepGroups(cats);
-                    setAddStepOpen(true);
-                  }}
-                  style={s.addStepBtn}
-                  testID="add-step-btn">
-                  <MaterialCommunityIcons name="plus-circle-outline" size={14} color="#2563EB" />
-                  <Text style={s.addStepBtnText}>Adicionar etapa</Text>
-                </Pressable>
+                {canWrite && (
+                  <Pressable
+                    onPress={() => {
+                      const cats: Record<string, boolean> = {};
+                      for (const stg of serviceStages) {
+                        const cat = stg.categoria?.trim() || 'Sem categoria';
+                        cats[cat] = true;
+                      }
+                      setCollapsedAddStepGroups(cats);
+                      setRestoreMsg(null);
+                      setAddStepOpen(true);
+                    }}
+                    style={s.addStepBtn}
+                    testID="add-step-btn">
+                    <MaterialCommunityIcons name="plus-circle-outline" size={14} color="#2563EB" />
+                    <Text style={s.addStepBtnText}>Adicionar grupo</Text>
+                  </Pressable>
+                )}
               </View>
             </View>
             <View style={s.checklistAreaRow}>
@@ -1261,14 +1428,21 @@ export default function ApartmentDetailScreen() {
               if (renderItems.length === 0) return null;
               return (
                 <View key={`chk-grp-${cat}`} style={s.checklistGroup}>
-                  <Pressable
-                    onPress={() => setCollapsedChecklistGroups((cur) => ({ ...cur, [cat]: !collapsed }))}
-                    style={s.checklistGroupHeader}>
-                    <MaterialCommunityIcons name={collapsed ? 'chevron-right' : 'chevron-down'} size={18} color="#64748B" />
-                    <View style={[s.checklistGroupDot, { backgroundColor: color }]} />
-                    <Text style={s.checklistGroupTitle}>{cat}</Text>
-                    <Text style={s.checklistGroupCount}>{okInGroup}/{visibleItems.length} OK</Text>
-                  </Pressable>
+                  <View style={s.checklistGroupHeader}>
+                    <Pressable
+                      onPress={() => setCollapsedChecklistGroups((cur) => ({ ...cur, [cat]: !collapsed }))}
+                      style={s.checklistGroupHeaderMain}>
+                      <MaterialCommunityIcons name={collapsed ? 'chevron-right' : 'chevron-down'} size={18} color="#64748B" />
+                      <View style={[s.checklistGroupDot, { backgroundColor: color }]} />
+                      <Text style={s.checklistGroupTitle}>{cat}</Text>
+                      <Text style={s.checklistGroupCount}>{okInGroup}/{visibleItems.length} OK</Text>
+                    </Pressable>
+                    {canWrite && (
+                      <Pressable onPress={() => { setGroupMenu(cat); setGroupMsg(null); setGroupStatusOpen(false); }} hitSlop={8} style={s.groupMenuBtn} testID={`group-menu-${cat}`}>
+                        <MaterialCommunityIcons name="dots-vertical" size={18} color="#94A3B8" />
+                      </Pressable>
+                    )}
+                  </View>
                   {!collapsed && renderItems.map(({ item, indented }) => {
                     const cfg = checklistConfig[item.state];
                     const itemPhotos = photosByServiceId[item.id] ?? [];
@@ -1312,9 +1486,11 @@ export default function ApartmentDetailScreen() {
                         </View>
                         <MaterialCommunityIcons name={isExpanded ? 'chevron-up' : 'chevron-down'} size={20} color="#0891B2" />
                       </Pressable>
-                      <Pressable onPress={() => openWorkerPicker(item)} style={s.menuDotsBtn} hitSlop={8}>
-                        <MaterialCommunityIcons name="account-plus-outline" size={20} color="#94A3B8" />
-                      </Pressable>
+                      {canWrite && (
+                        <Pressable onPress={() => openWorkerPicker(item)} style={s.menuDotsBtn} hitSlop={8}>
+                          <MaterialCommunityIcons name="account-plus-outline" size={20} color="#94A3B8" />
+                        </Pressable>
+                      )}
                     </View>
                   ) : (
                     <View style={s.checkCardTop}>
@@ -1342,16 +1518,20 @@ export default function ApartmentDetailScreen() {
                           </Text>
                         )}
                       </View>
-                      <Pressable onPress={() => openWorkerPicker(item)} style={s.menuDotsBtn} hitSlop={8}>
-                        <MaterialCommunityIcons name="account-plus-outline" size={20} color="#94A3B8" />
-                      </Pressable>
-                      <Pressable
-                        onPress={() => requestRemoveStep(item)}
-                        style={s.removeStepBtn}
-                        testID={`remove-step-${item.id}`}
-                        hitSlop={8}>
-                        <MaterialCommunityIcons name="close" size={16} color="#94A3B8" />
-                      </Pressable>
+                      {canWrite && (
+                        <>
+                          <Pressable onPress={() => openWorkerPicker(item)} style={s.menuDotsBtn} hitSlop={8}>
+                            <MaterialCommunityIcons name="account-plus-outline" size={20} color="#94A3B8" />
+                          </Pressable>
+                          <Pressable
+                            onPress={() => requestRemoveStep(item)}
+                            style={s.removeStepBtn}
+                            testID={`remove-step-${item.id}`}
+                            hitSlop={8}>
+                            <MaterialCommunityIcons name="close" size={16} color="#94A3B8" />
+                          </Pressable>
+                        </>
+                      )}
                     </View>
                   )}
 
@@ -1407,24 +1587,33 @@ export default function ApartmentDetailScreen() {
                     </View>
                   ) : (
                     <>
-                      <View style={s.statusBtnRow}>
-                        {progressOrder.map((opt) => {
-                          const oc = checklistConfig[opt];
-                          const sel = item.state === opt;
-                          return (
-                            <Pressable
-                              key={opt}
-                              onPress={() => updateItemStatus(item.id, opt)}
-                              testID={`checklist-${item.id}-${opt}`}
-                              accessibilityRole="button"
-                              accessibilityState={{ selected: sel }}
-                              accessibilityLabel={oc.label}
-                              style={[s.statusBtn, sel && { backgroundColor: oc.background, borderColor: oc.color }]}>
-                              <Text style={[s.statusBtnLabel, { color: sel ? oc.color : '#64748B' }]} numberOfLines={2}>{oc.label}</Text>
-                            </Pressable>
-                          );
-                        })}
-                      </View>
+                      {canWrite ? (
+                        <View style={s.statusBtnRow}>
+                          {progressOrder.map((opt) => {
+                            const oc = checklistConfig[opt];
+                            const sel = item.state === opt;
+                            return (
+                              <Pressable
+                                key={opt}
+                                onPress={() => updateItemStatus(item.id, opt)}
+                                testID={`checklist-${item.id}-${opt}`}
+                                accessibilityRole="button"
+                                accessibilityState={{ selected: sel }}
+                                accessibilityLabel={oc.label}
+                                style={[s.statusBtn, sel && { backgroundColor: oc.background, borderColor: oc.color }]}>
+                                <Text style={[s.statusBtnLabel, { color: sel ? oc.color : '#64748B' }]} numberOfLines={2}>{oc.label}</Text>
+                              </Pressable>
+                            );
+                          })}
+                        </View>
+                      ) : (
+                        <View style={[s.statusReadOnly, { backgroundColor: cfg.background, borderColor: cfg.color }]}>
+                          {cfg.icon
+                            ? <MaterialCommunityIcons name={cfg.icon} size={13} color={cfg.color} />
+                            : <Text style={[s.statusReadOnlyText, { color: cfg.color }]}>{cfg.abbrev}</Text>}
+                          <Text style={[s.statusReadOnlyText, { color: cfg.color }]}>{cfg.label}</Text>
+                        </View>
+                      )}
 
                       {item.emergency?.trim() && !expandedEmergencies[item.id] && (
                         <Pressable
@@ -1510,30 +1699,32 @@ export default function ApartmentDetailScreen() {
                         </View>
                       )}
 
-                      <View style={s.cardActions}>
-                        <Pressable
-                          onPress={() => expandedEmergencies[item.id]
-                            ? closeEmergency(item.id, false)
-                            : openEmergency(item.id, item.emergency ?? '')}
-                          style={s.cardActionBtn}>
-                          <MaterialCommunityIcons name="alert-outline" size={15} color="#64748B" />
-                          <Text style={s.cardActionBtnText}>Emergência</Text>
-                        </Pressable>
-                        <Pressable
-                          onPress={() => expandedComments[item.id]
-                            ? closeComment(item.id, false)
-                            : openComment(item.id, item.comment ?? '')}
-                          style={s.cardActionBtn}>
-                          <MaterialCommunityIcons name="note-plus-outline" size={15} color="#64748B" />
-                          <Text style={s.cardActionBtnText}>Observação</Text>
-                        </Pressable>
-                        <Pressable onPress={() => addPhotoToItem(item)} style={s.cardActionBtn} testID={`add-photo-${item.id}`}>
-                          <MaterialCommunityIcons name="camera-plus-outline" size={15} color="#64748B" />
-                          <Text style={s.cardActionBtnText}>
-                            {itemPhotos.length > 0 ? `Fotos (${itemPhotos.length})` : 'Foto'}
-                          </Text>
-                        </Pressable>
-                      </View>
+                      {canWrite && (
+                        <View style={s.cardActions}>
+                          <Pressable
+                            onPress={() => expandedEmergencies[item.id]
+                              ? closeEmergency(item.id, false)
+                              : openEmergency(item.id, item.emergency ?? '')}
+                            style={s.cardActionBtn}>
+                            <MaterialCommunityIcons name="alert-outline" size={15} color="#64748B" />
+                            <Text style={s.cardActionBtnText}>Emergência</Text>
+                          </Pressable>
+                          <Pressable
+                            onPress={() => expandedComments[item.id]
+                              ? closeComment(item.id, false)
+                              : openComment(item.id, item.comment ?? '')}
+                            style={s.cardActionBtn}>
+                            <MaterialCommunityIcons name="note-plus-outline" size={15} color="#64748B" />
+                            <Text style={s.cardActionBtnText}>Observação</Text>
+                          </Pressable>
+                          <Pressable onPress={() => addPhotoToItem(item)} style={s.cardActionBtn} testID={`add-photo-${item.id}`}>
+                            <MaterialCommunityIcons name="camera-plus-outline" size={15} color="#64748B" />
+                            <Text style={s.cardActionBtnText}>
+                              {itemPhotos.length > 0 ? `Fotos (${itemPhotos.length})` : 'Foto'}
+                            </Text>
+                          </Pressable>
+                        </View>
+                      )}
 
                       {itemPhotos.length > 0 && (
                         <View style={s.thumbGrid}>
@@ -1541,7 +1732,7 @@ export default function ApartmentDetailScreen() {
                             <View key={photo.id} style={s.thumbCard}>
                               <Pressable onPress={() => setSelectedPhoto(photo)}>
                                 <View>
-                                  <Image source={{ uri: photo.uri }} style={s.thumb} />
+                                  <Image source={{ uri: photo.uri }} style={s.thumb} cachePolicy="memory-disk" recyclingKey={photo.id} transition={120} />
                                   {uploadStatus[photo.id] === 'uploading' && (
                                     <View style={s.thumbOverlay}>
                                       <MaterialCommunityIcons name="cloud-upload-outline" size={18} color="#FFFFFF" />
@@ -1557,29 +1748,34 @@ export default function ApartmentDetailScreen() {
                               </Pressable>
                               <View style={s.thumbBody}>
                                 <View style={s.obsBox}>
-                                  <Pressable onPress={() => setConfirmRemovePhoto(photo.id)} style={s.photoRemoveX} testID={`remove-photo-${photo.id}`} hitSlop={6}>
-                                    <MaterialCommunityIcons name="close" size={14} color="#64748B" />
-                                  </Pressable>
+                                  {canWrite && (
+                                    <Pressable onPress={() => setConfirmRemovePhoto(photo.id)} style={s.photoRemoveX} testID={`remove-photo-${photo.id}`} hitSlop={6}>
+                                      <MaterialCommunityIcons name="close" size={14} color="#64748B" />
+                                    </Pressable>
+                                  )}
                                   <TextInput
+                                    editable={canWrite}
                                     multiline
                                     onChangeText={(v) => setDraftPhotoComments((cur) => ({ ...cur, [photo.id]: v }))}
-                                    placeholder="Comentário..."
+                                    placeholder={canWrite ? 'Comentário...' : 'Sem comentário'}
                                     placeholderTextColor="#94A3B8"
-                                    style={[s.obsTextarea, { paddingRight: 26 }]}
+                                    style={[s.obsTextarea, canWrite && { paddingRight: 26 }]}
                                     testID={`photo-comment-${photo.id}`}
                                     value={draftPhotoComments[photo.id] ?? photo.comment ?? ''}
                                   />
-                                  <View style={s.obsBoxFooter}>
-                                    <View />
-                                    <View style={s.obsBoxFooterRight}>
-                                      <Pressable onPress={() => cancelPhotoComment(photo.id)} style={s.obsCancelBtn}>
-                                        <Text style={s.obsCancelBtnText}>Cancelar</Text>
-                                      </Pressable>
-                                      <Pressable onPress={() => savePhotoComment(photo.id)} style={s.obsDoneBtn} testID={`photo-comment-save-${photo.id}`}>
-                                        <Text style={s.obsDoneBtnText}>Salvar</Text>
-                                      </Pressable>
+                                  {canWrite && (
+                                    <View style={s.obsBoxFooter}>
+                                      <View />
+                                      <View style={s.obsBoxFooterRight}>
+                                        <Pressable onPress={() => cancelPhotoComment(photo.id)} style={s.obsCancelBtn}>
+                                          <Text style={s.obsCancelBtnText}>Cancelar</Text>
+                                        </Pressable>
+                                        <Pressable onPress={() => savePhotoComment(photo.id)} style={s.obsDoneBtn} testID={`photo-comment-save-${photo.id}`}>
+                                          <Text style={s.obsDoneBtnText}>Salvar</Text>
+                                        </Pressable>
+                                      </View>
                                     </View>
-                                  </View>
+                                  )}
                                 </View>
                               </View>
                             </View>
@@ -1659,7 +1855,7 @@ export default function ApartmentDetailScreen() {
             <View style={s.gallery}>
               {photos.map((photo) => (
                 <Pressable key={`g-${photo.id}`} onPress={() => setSelectedPhoto(photo)} style={s.galleryCard}>
-                  <Image source={{ uri: photo.uri }} style={s.galleryImage} />
+                  <Image source={{ uri: photo.uri }} style={s.galleryImage} cachePolicy="memory-disk" recyclingKey={photo.id} transition={120} />
                   <View style={s.galleryInfo}>
                     <Text style={s.galleryService}>{photo.service}</Text>
                     <Text style={s.galleryMeta}>{formatPhotoDateTime(photo.dataHora ?? photo.createdAt)}</Text>
@@ -1893,7 +2089,7 @@ export default function ApartmentDetailScreen() {
                       <Text style={s.fieldLabel}>Evidência</Text>
                       {draft.evidenceUri ? (
                         <Pressable onPress={() => setSelectedMeasurementEvidence({ id: 'draft', apartmentId: apartment.id, obraId: apartment.obraId, towerId: tower.id, serviceId: item.id, contractorId: getContractorId(draft.contractor || 'rascunho'), service: item.label, contractor: draft.contractor || 'Rascunho', quantity: toNumber(draft.quantity), unit: draft.unit || 'un', unitPrice: toNumber(draft.unitPrice), totalValue: draftTotal, periodStart: draft.periodStart, periodEnd: draft.periodEnd, status: draft.status, comment: draft.comment, measurementType: draft.measurementType, evidenceUri: draft.evidenceUri, evidenceFileName: draft.evidenceFileName })}>
-                          <Image source={{ uri: draft.evidenceUri }} style={s.evidenceThumb} />
+                          <Image source={{ uri: draft.evidenceUri }} style={s.evidenceThumb} cachePolicy="memory-disk" />
                         </Pressable>
                       ) : null}
                       <Pressable onPress={() => addMeasurementEvidence(item.id)} style={s.clearBtn}>
@@ -1995,7 +2191,7 @@ export default function ApartmentDetailScreen() {
           <View style={s.modalSheet}>
             {selectedPhoto && (
               <>
-                <Image source={{ uri: selectedPhoto.uri }} style={s.modalImage} />
+                <Image source={{ uri: selectedPhoto.uri }} style={s.modalImage} cachePolicy="memory-disk" />
                 <View style={s.modalInfo}>
                   <Text style={s.modalService}>{selectedPhoto.service}</Text>
                   <Text style={s.modalMeta}>{tower.name} / Apto {apartment.number}</Text>
@@ -2017,7 +2213,7 @@ export default function ApartmentDetailScreen() {
           <View style={s.modalSheet}>
             {selectedMeasurementEvidence?.evidenceUri && (
               <>
-                <Image source={{ uri: selectedMeasurementEvidence.evidenceUri }} style={s.modalImage} />
+                <Image source={{ uri: selectedMeasurementEvidence.evidenceUri }} style={s.modalImage} cachePolicy="memory-disk" />
                 <View style={s.modalInfo}>
                   <Text style={s.modalService}>{selectedMeasurementEvidence.service}</Text>
                   <Text style={s.modalMeta}>Empreiteiro: {selectedMeasurementEvidence.contractor}</Text>
@@ -2062,7 +2258,7 @@ export default function ApartmentDetailScreen() {
                   : <View style={s.thumbGrid}>
                     {photos.filter((p) => selectedVisit.addedPhotoIds.includes(p.id)).map((p) => (
                       <View key={`vp-${p.id}`} style={s.thumbCard}>
-                        <Image source={{ uri: p.uri }} style={s.thumb} />
+                        <Image source={{ uri: p.uri }} style={s.thumb} cachePolicy="memory-disk" recyclingKey={p.id} transition={120} />
                         <Text style={s.thumbLabel}>{p.service}</Text>
                       </View>
                     ))}
@@ -2082,6 +2278,115 @@ export default function ApartmentDetailScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* MODAL: ações em lote do grupo (categoria) */}
+      <Modal animationType="fade" onRequestClose={() => setGroupMenu(null)} transparent visible={Boolean(groupMenu)}>
+        <Pressable style={s.modalBackdrop} onPress={() => setGroupMenu(null)}>
+          <Pressable style={s.groupMenuSheet} onPress={() => setGroupStatusOpen(false)}>
+            {(() => {
+              const cat = groupMenu ?? '';
+              const gItems = groupItemsOf(cat);
+              return (
+                <>
+                  <View style={s.addStepGrabber} />
+                  <Text style={s.groupMenuTitle} numberOfLines={1}>{cat}</Text>
+                  <Text style={s.groupMenuSub}>{gItems.length} etapa(s) neste grupo</Text>
+
+                  {groupMsg && (
+                    <View style={s.groupMsgBanner}>
+                      <MaterialCommunityIcons name="check-circle" size={15} color="#047857" />
+                      <Text style={s.groupMsgText}>{groupMsg}</Text>
+                    </View>
+                  )}
+
+                  {/* Dropdown: escolher um dos 4 status para marcar todas */}
+                  <Text style={s.groupMenuSection}>Marcar todas como</Text>
+                  <Pressable
+                    onPress={() => setGroupStatusOpen((o) => !o)}
+                    style={s.groupDropdownTrigger}
+                    testID="group-status-dropdown">
+                    <MaterialCommunityIcons name="format-list-checks" size={18} color="#64748B" />
+                    <Text style={s.groupDropdownTriggerText}>Escolher status…</Text>
+                    <MaterialCommunityIcons name={groupStatusOpen ? 'chevron-up' : 'chevron-down'} size={20} color="#94A3B8" />
+                  </Pressable>
+                  {groupStatusOpen && (
+                    <View style={s.groupDropdownList}>
+                      {progressOrder.map((opt, idx) => {
+                        const oc = checklistConfig[opt];
+                        const remaining = gItems.filter((i) => i.state !== opt && !allGroupSubStepLabels.has(i.label)).length;
+                        return (
+                          <Pressable
+                            key={opt}
+                            disabled={remaining === 0}
+                            onPress={() => setGroupStatus(cat, opt)}
+                            style={[s.groupDropdownOption, idx === 0 && { borderTopWidth: 0 }, remaining === 0 && s.groupMenuItemDisabled]}
+                            testID={`group-status-${opt}`}>
+                            <View style={[s.groupMenuStatusIcon, { backgroundColor: oc.background }]}>
+                              {oc.icon
+                                ? <MaterialCommunityIcons name={oc.icon} size={16} color={oc.color} />
+                                : <Text style={[s.groupMenuStatusAbbrev, { color: oc.color }]}>{oc.abbrev}</Text>}
+                            </View>
+                            <Text style={s.groupDropdownOptionText}>{oc.label}</Text>
+                            <Text style={s.groupMenuItemHint}>{remaining > 0 ? `${remaining}` : '✓'}</Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  )}
+
+                  <View style={s.groupMenuDivider} />
+                  <Pressable
+                    onPress={() => { setGroupMenu(null); setConfirmRemoveGroup(cat); }}
+                    style={s.groupMenuItem}
+                    testID="group-delete">
+                    <View style={[s.groupMenuStatusIcon, { backgroundColor: '#FEE2E2' }]}>
+                      <MaterialCommunityIcons name="trash-can-outline" size={16} color="#B91C1C" />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[s.groupMenuItemText, { color: '#B91C1C' }]}>Excluir grupo</Text>
+                      <Text style={s.groupMenuItemHint}>Remove as {gItems.length} etapa(s) deste grupo</Text>
+                    </View>
+                  </Pressable>
+                </>
+              );
+            })()}
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      {/* MODAL: confirm remove group */}
+      <Modal animationType="fade" onRequestClose={() => setConfirmRemoveGroup(null)} transparent visible={Boolean(confirmRemoveGroup)}>
+        <View style={s.modalBackdrop}>
+          <View style={s.confirmSheet}>
+            <View style={[s.confirmIcon, { backgroundColor: '#FEE2E2' }]}>
+              <MaterialCommunityIcons name="trash-can-outline" size={26} color="#B91C1C" />
+            </View>
+            <Text style={s.confirmTitle}>Excluir o grupo inteiro?</Text>
+            <Text style={s.confirmSub}>
+              {confirmRemoveGroup}
+              {(() => {
+                if (!confirmRemoveGroup) return '';
+                const ids = new Set(groupItemsOf(confirmRemoveGroup).map((i) => i.id));
+                const pn = photos.filter((p) => ids.has(p.serviceId) || ids.has(p.itemId ?? '')).length;
+                const mn = measurements.filter((m) => ids.has(m.serviceId ?? '')).length;
+                const parts = [`${ids.size} etapa(s)`];
+                if (pn > 0) parts.push(`${pn} foto(s)`);
+                if (mn > 0) parts.push(`${mn} medição(ões)`);
+                return ` · ${parts.join(', ')} serão apagadas. Você pode readicionar o grupo depois.`;
+              })()}
+            </Text>
+            <View style={s.confirmActions}>
+              <Pressable onPress={() => setConfirmRemoveGroup(null)} style={s.confirmBtnGhost}>
+                <Text style={s.confirmBtnGhostText}>Cancelar</Text>
+              </Pressable>
+              <Pressable onPress={confirmRemoveGroupNow} style={s.confirmBtnDanger}>
+                <Text style={s.confirmBtnDangerText}>Excluir grupo</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
 
       {/* MODAL: confirm remove extra step */}
       <Modal animationType="fade" onRequestClose={() => setConfirmRemoveStep(null)} transparent visible={Boolean(confirmRemoveStep)}>
@@ -2170,52 +2475,25 @@ export default function ApartmentDetailScreen() {
                 <MaterialCommunityIcons name="playlist-plus" size={20} color="#2563EB" />
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={s.addStepTitle}>Adicionar etapa</Text>
-                <Text style={s.addStepSub}>Escolha uma etapa do catálogo para incluir neste apartamento.</Text>
+                <Text style={s.addStepTitle}>Adicionar grupo</Text>
+                <Text style={s.addStepSub}>Toque numa etapa para adicioná-la, ou restaure o grupo inteiro.</Text>
               </View>
               <Pressable onPress={() => setAddStepOpen(false)} hitSlop={8} style={s.addStepCloseBtn}>
                 <MaterialCommunityIcons name="close" size={18} color="#64748B" />
               </Pressable>
             </View>
-            <View style={s.addStepSearchWrap}>
-              <MaterialCommunityIcons name="magnify" size={18} color="#94A3B8" />
-              <TextInput
-                autoFocus={Platform.OS !== 'web'}
-                onChangeText={setAddStepSearch}
-                placeholder="Buscar por nome ou categoria…"
-                placeholderTextColor="#94A3B8"
-                style={s.addStepSearchInput}
-                value={addStepSearch}
-              />
-              {addStepSearch ? (
-                <Pressable onPress={() => setAddStepSearch('')} hitSlop={6}>
-                  <MaterialCommunityIcons name="close-circle" size={16} color="#94A3B8" />
-                </Pressable>
-              ) : null}
-            </View>
-            <View style={s.addStepAreaField}>
-              <Text style={s.addStepAreaLabel}>Adicionar como</Text>
-              <View style={s.addStepAreaRow}>
-                <Pressable
-                  onPress={() => setAddStepArea('Interior')}
-                  style={[s.addStepAreaBtn, addStepArea === 'Interior' && s.addStepAreaBtnInt]}>
-                  <MaterialCommunityIcons name="floor-plan" size={15} color={addStepArea === 'Interior' ? '#FFFFFF' : '#94A3B8'} />
-                  <Text style={[s.addStepAreaBtnText, addStepArea === 'Interior' && s.addStepAreaBtnTextActive]}>Interior</Text>
-                </Pressable>
-                <Pressable
-                  onPress={() => setAddStepArea('Exterior')}
-                  style={[s.addStepAreaBtn, addStepArea === 'Exterior' && s.addStepAreaBtnExt]}>
-                  <MaterialCommunityIcons name="domain" size={15} color={addStepArea === 'Exterior' ? '#FFFFFF' : '#94A3B8'} />
-                  <Text style={[s.addStepAreaBtnText, addStepArea === 'Exterior' && s.addStepAreaBtnTextActive]}>Exterior</Text>
-                </Pressable>
+            {restoreMsg && (
+              <View style={s.groupMsgBanner}>
+                <MaterialCommunityIcons name="check-circle" size={15} color="#047857" />
+                <Text style={s.groupMsgText}>{restoreMsg}</Text>
               </View>
-            </View>
-            <ScrollView style={s.addStepList} contentContainerStyle={{ gap: 20, paddingBottom: 12 }} showsVerticalScrollIndicator={false}>
+            )}
+            <ScrollView style={s.addStepList} contentContainerStyle={{ gap: 16, paddingBottom: 12 }} showsVerticalScrollIndicator={false}>
               {availableStages.length === 0 ? (
                 <View style={s.addStepEmpty}>
                   <MaterialCommunityIcons name="check-all" size={28} color="#CBD5E1" />
                   <Text style={s.addStepEmptyText}>
-                    {addStepSearch ? 'Nenhuma etapa corresponde à busca' : 'Todas as etapas do catálogo já estão neste apartamento'}
+                    Todas as etapas do catálogo já estão neste apartamento
                   </Text>
                 </View>
               ) : (
@@ -2226,22 +2504,27 @@ export default function ApartmentDetailScreen() {
                     if (!groups.has(cat)) groups.set(cat, [] as any);
                     (groups.get(cat) as any).push(stg);
                   }
-                  const searching = addStepSearch.trim().length > 0;
                   return [...groups.entries()]
                     .sort(([a], [b]) => a.localeCompare(b, 'pt-BR'))
                     .map(([cat, items]) => {
                       const color = categoryColor(cat);
-                      const collapsed = !searching && collapsedAddStepGroups[cat] === true;
+                      const collapsed = collapsedAddStepGroups[cat] === true;
                       return (
-                        <View key={`add-grp-${cat}`} style={s.addStepGroup}>
-                          <Pressable
-                            onPress={() => setCollapsedAddStepGroups((cur) => ({ ...cur, [cat]: !collapsed }))}
-                            style={s.addStepGroupHeader}>
-                            <MaterialCommunityIcons name={collapsed ? 'chevron-right' : 'chevron-down'} size={18} color="#64748B" />
-                            <View style={[s.addStepGroupDot, { backgroundColor: color }]} />
-                            <Text style={s.addStepGroupTitle}>{cat}</Text>
-                            <Text style={s.addStepGroupCount}>{items.length}</Text>
-                          </Pressable>
+                        <View key={`add-grp-${cat}`} style={[s.addStepGroupCard, { borderLeftColor: color }]}>
+                          <View style={s.addStepGroupHeader}>
+                            <Pressable
+                              onPress={() => setCollapsedAddStepGroups((cur) => ({ ...cur, [cat]: !collapsed }))}
+                              style={s.addStepGroupHeaderMain}>
+                              <MaterialCommunityIcons name={collapsed ? 'chevron-right' : 'chevron-down'} size={18} color="#64748B" />
+                              <View style={[s.addStepGroupDot, { backgroundColor: color }]} />
+                              <Text style={s.addStepGroupTitle}>{cat}</Text>
+                              <Text style={s.addStepGroupCount}>{items.length}</Text>
+                            </Pressable>
+                            <Pressable onPress={() => setConfirmRestoreGroup(cat)} style={s.addStepBtn} testID={`restore-group-${cat}`}>
+                              <MaterialCommunityIcons name="backup-restore" size={14} color="#2563EB" />
+                              <Text style={s.addStepBtnText}>Restaurar Grupo</Text>
+                            </Pressable>
+                          </View>
                           {!collapsed && items.map((stage) => (
                             <Pressable key={stage.id} onPress={() => addStepToApartment(stage.nome)} style={s.addStepItem} testID={`pick-stage-${stage.id}`}>
                               <View style={[s.addStepItemBullet, { backgroundColor: color }]} />
@@ -2274,6 +2557,36 @@ export default function ApartmentDetailScreen() {
               )}
             </ScrollView>
           </Pressable>
+          {/* Confirmação de "Restaurar Grupo" — overlay DENTRO deste modal para
+              ficar por cima do pop-up (não atrás, como um <Modal> irmão ficaria). */}
+          {confirmRestoreGroup && (
+            <Pressable style={s.restoreOverlay} onPress={() => setConfirmRestoreGroup(null)}>
+              <Pressable style={s.confirmSheet} onPress={() => {}}>
+                <View style={[s.confirmIcon, { backgroundColor: '#DBEAFE' }]}>
+                  <MaterialCommunityIcons name="backup-restore" size={26} color="#2563EB" />
+                </View>
+                <Text style={s.confirmTitle}>Restaurar o grupo?</Text>
+                <Text style={s.confirmSub}>
+                  {confirmRestoreGroup}
+                  {(() => {
+                    const existing = new Set(checklist.map((i) => i.label));
+                    const n = serviceStages.filter(
+                      (st) => st.ativo && st.apareceNoChecklist && (st.categoria?.trim() || 'Sem categoria') === confirmRestoreGroup && !existing.has(st.nome),
+                    ).length;
+                    return ` · ${n} etapa(s) do catálogo serão adicionadas ao grupo default (Interior).`;
+                  })()}
+                </Text>
+                <View style={s.confirmActions}>
+                  <Pressable onPress={() => setConfirmRestoreGroup(null)} style={s.confirmBtnGhost}>
+                    <Text style={s.confirmBtnGhostText}>Cancelar</Text>
+                  </Pressable>
+                  <Pressable onPress={confirmRestoreGroupNow} style={s.confirmBtnPrimary} testID="confirm-restore-group">
+                    <Text style={s.confirmBtnPrimaryText}>Restaurar</Text>
+                  </Pressable>
+                </View>
+              </Pressable>
+            </Pressable>
+          )}
         </Pressable>
       </Modal>
 

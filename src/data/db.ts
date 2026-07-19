@@ -3,11 +3,21 @@ import type { Apartment, ApartmentStatus, ChecklistItem, ChecklistState, Tower }
 import type { Measurement, MeasurementStatus, MeasurementType } from '@/src/data/localMeasurements';
 import type { InspectionVisit, VisitChecklistCounts } from '@/src/data/localInspectionVisits';
 import type { InspectionPhoto } from '@/src/data/localInspectionPhotos';
-import type { ServiceStage } from '@/src/data/serviceStages';
+import { getServiceStagesFromStorage, type ServiceStage } from '@/src/data/serviceStages';
+import {
+  setCachedChecklist,
+  setCachedTowerChecklist,
+} from '@/src/data/checklistCache';
 import type { ServiceCategory } from '@/src/data/serviceCategories';
 import type { ServiceUnit } from '@/src/data/serviceUnits';
 import type { Worker } from '@/src/data/serviceWorkers';
 import type { ScheduleFields } from '@/src/data/schedule';
+
+// A API do Supabase corta a resposta (padrão: 1000 linhas). Toda consulta que pode
+// passar disso PRECISA paginar — senão volta truncada SEM erro nenhum. Sempre
+// ordene por uma coluna única (ou use `id` como desempate) para a paginação ser
+// estável entre as páginas.
+const PAGE_SIZE = 1000;
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
 // DB stores dates as ISO (YYYY-MM-DD); the app uses DD/MM/YYYY (pt-BR).
@@ -253,6 +263,213 @@ export async function fetchProject() {
   return data as { id: string; name: string; summary: string };
 }
 
+// ─── Dashboard (Início) via RPC ───────────────────────────────────────────────
+// O banco calcula as etapas "Atrasada" (mesma regra do Gantt) e devolve só as
+// linhas relevantes — evita baixar ~17k itens no Início. `today` é a data LOCAL do
+// aparelho (YYYY-MM-DD), para o "hoje" bater com o cliente independentemente do fuso.
+export type DashboardLateStep = {
+  id: string;
+  apartmentId: string | null;
+  aptNumber: string | null;
+  towerName: string | null;
+  levelCode: string | null;
+  label: string;
+  plannedEnd: string; // ISO YYYY-MM-DD
+  delayDays: number;
+};
+
+// Emergência/observação: uma linha por item marcado (o Início agrupa e formata).
+export type DashboardFlagRow = {
+  scope: 'apt' | 'tower';
+  itemId: string | null;
+  aptId: string | null;
+  towerId: string | null;
+  towerName: string | null;
+  aptNumber: string | null;
+  levelCode: string | null;
+  label: string;
+  text: string;
+};
+
+export type ObraDashboard = {
+  lateCount: number;
+  lateUnits: number;
+  late: DashboardLateStep[];
+  emergencyUnits: number;
+  emergency: DashboardFlagRow[];
+  obsCount: number;
+  obsUnits: number;
+  observations: DashboardFlagRow[];
+  totalSteps: number;
+  pendingByService: { label: string; apartments: number }[];
+};
+
+type RawFlagRow = {
+  scope: 'apt' | 'tower'; item_id?: string | null; apt_id: string | null;
+  tower_id: string | null; tower_name: string | null; apt_number: string | null;
+  level_code: string | null; label: string; text: string | null;
+};
+
+const mapFlagRow = (r: RawFlagRow): DashboardFlagRow => ({
+  scope: r.scope,
+  itemId: r.item_id ?? null,
+  aptId: r.apt_id ?? null,
+  towerId: r.tower_id ?? null,
+  towerName: r.tower_name ?? null,
+  aptNumber: r.apt_number ?? null,
+  levelCode: r.level_code ?? null,
+  label: r.label,
+  text: r.text ?? '',
+});
+
+export async function loadObraDashboard(today: string): Promise<ObraDashboard> {
+  const { data, error } = await supabase.rpc('obra_dashboard', { p_obra: OBRA_ID, p_today: today });
+  if (error) throw error;
+  const d = (data ?? {}) as {
+    late_count?: number;
+    late_units?: number;
+    late?: Array<{
+      id: string; apartment_id: string | null; apt_number: string | null;
+      tower_name: string | null; level_code: string | null; label: string;
+      planned_end: string; delay_days: number;
+    }>;
+    emergency_units?: number;
+    emergency?: RawFlagRow[];
+    obs_count?: number;
+    obs_units?: number;
+    observations?: RawFlagRow[];
+    total_steps?: number;
+    pending_by_service?: Array<{ label: string; apartments: number }>;
+  };
+  return {
+    lateCount: d.late_count ?? 0,
+    lateUnits: d.late_units ?? 0,
+    late: (d.late ?? []).map((r) => ({
+      id: r.id,
+      apartmentId: r.apartment_id ?? null,
+      aptNumber: r.apt_number ?? null,
+      towerName: r.tower_name ?? null,
+      levelCode: r.level_code ?? null,
+      label: r.label,
+      plannedEnd: r.planned_end,
+      delayDays: r.delay_days ?? 0,
+    })),
+    emergencyUnits: d.emergency_units ?? 0,
+    emergency: (d.emergency ?? []).map(mapFlagRow),
+    obsCount: d.obs_count ?? 0,
+    obsUnits: d.obs_units ?? 0,
+    observations: (d.observations ?? []).map(mapFlagRow),
+    totalSteps: d.total_steps ?? 0,
+    pendingByService: (d.pending_by_service ?? []).map((p) => ({ label: p.label, apartments: p.apartments })),
+  };
+}
+
+// Só as colunas que o `mapChecklistItem` realmente usa. O `select('*')` trazia a
+// linha inteira (obra_id, tower_id, timestamps, deleted_at...) — bytes que
+// atravessam a rede e são descartados no mapeamento.
+const CHECKLIST_COLUMNS =
+  'id,label,state,comment,emergency,planned_start,planned_end,actual_start,actual_end,sort_order,area,is_extra';
+
+type PageResponse<T> = { data: T[] | null; count: number | null; error: unknown };
+
+// Busca TODAS as páginas de uma consulta em paralelo.
+//
+// A paginação anterior era um laço sequencial: pedia a página 1, esperava,
+// pedia a 2, esperava... Numa torre cheia (~36 aptos × ~160 etapas ≈ 5.7k
+// linhas) isso são 6 idas ao servidor ENFILEIRADAS — a latência de cada uma
+// somava, e era esse o ~1,5s de espera da tela de Corte.
+//
+// Com `expectedRows` (ex.: nº de aptos × tamanho do catálogo), TODAS as páginas
+// previstas saem numa leva só — o caso comum vira UMA ida ao servidor. A primeira
+// página ainda pede o total exato: se a estimativa ficou curta, uma segunda leva
+// paralela busca o que faltou; se ficou longa, as páginas extras voltam vazias
+// (custo desprezível). Sem estimativa, a primeira leva é só a página 0 e o resto
+// sai em paralelo depois do total chegar (~2 idas).
+// `Promise.all` preserva a ordem, então a ordenação por sort_order continua.
+async function fetchAllPages<T>(
+  page: (from: number, withCount: boolean) => PromiseLike<PageResponse<T>>,
+  expectedRows?: number,
+): Promise<T[]> {
+  // Teto da leva inicial: uma estimativa absurda não pode virar rajada de requests.
+  const MAX_FIRST_WAVE_PAGES = 20;
+  const guessPages = expectedRows
+    ? Math.min(Math.max(Math.ceil(expectedRows / PAGE_SIZE), 1), MAX_FIRST_WAVE_PAGES)
+    : 1;
+
+  const firstWave = await Promise.all(
+    Array.from({ length: guessPages }, (_, i) => page(i * PAGE_SIZE, i === 0)),
+  );
+  const first = firstWave[0];
+  if (first.error) throw first.error;
+  const rows = [...(first.data ?? [])];
+  // Coube tudo na primeira página: as demais (se pedidas) vieram vazias.
+  if (rows.length < PAGE_SIZE) return rows;
+
+  for (const res of firstWave.slice(1)) {
+    if (res.error) throw res.error;
+    rows.push(...(res.data ?? []));
+  }
+
+  // Sem o total não dá para paralelizar o restante. Continua sequencial de onde a
+  // leva parou — truncar em silêncio é o pior desfecho aqui. (Páginas de range são
+  // contíguas: só a última não-vazia pode vir incompleta, então "última página da
+  // leva cheia" é o único caso em que pode haver mais.)
+  if (first.count == null) {
+    let lastLen = (firstWave[firstWave.length - 1].data ?? []).length;
+    for (let from = guessPages * PAGE_SIZE; lastLen === PAGE_SIZE; from += PAGE_SIZE) {
+      const res = await page(from, false);
+      if (res.error) throw res.error;
+      const more = res.data ?? [];
+      rows.push(...more);
+      lastLen = more.length;
+    }
+    return rows;
+  }
+
+  const totalPages = Math.ceil(first.count / PAGE_SIZE);
+  if (totalPages > guessPages) {
+    const rest = await Promise.all(
+      Array.from({ length: totalPages - guessPages }, (_, i) => page((guessPages + i) * PAGE_SIZE, false)),
+    );
+    for (const res of rest) {
+      if (res.error) throw res.error;
+      rows.push(...(res.data ?? []));
+    }
+  }
+  return rows;
+}
+
+// Checklists de um conjunto de apartamentos (ex.: os de uma torre), numa query.
+// Usado pelo Corte para o mapa de cobertura sem baixar a obra inteira.
+export async function loadChecklistsForApartments(apartmentIds: string[]): Promise<Map<string, (ChecklistItem & ScheduleFields)[]>> {
+  const byApartment = new Map<string, (ChecklistItem & ScheduleFields)[]>();
+  if (apartmentIds.length === 0) return byApartment;
+
+  // Estimativa para disparar todas as páginas numa leva só: cada apartamento tem
+  // ~1 item por etapa do catálogo. Errar para cima custa páginas vazias; para
+  // baixo, uma segunda leva — nunca truncamento (o count exato confere o total).
+  const catalogSize = getServiceStagesFromStorage().length;
+  const expectedRows = catalogSize > 0 ? apartmentIds.length * catalogSize : undefined;
+
+  const rows = await fetchAllPages<DbChecklistRow & { apartment_id: string }>((from, withCount) =>
+    supabase
+      .from('checklist_items')
+      .select(`${CHECKLIST_COLUMNS},apartment_id`, withCount ? { count: 'exact' } : undefined)
+      .in('apartment_id', apartmentIds)
+      .is('deleted_at', null)
+      .order('sort_order')
+      .order('id')
+      .range(from, from + PAGE_SIZE - 1) as unknown as PromiseLike<PageResponse<DbChecklistRow & { apartment_id: string }>>,
+  expectedRows);
+
+  // Todo id pedido entra no mapa (mesmo vazio) — e no cache: "sem itens" também é
+  // resposta, e o cache só serve um conjunto quando conhece TODOS os apartamentos.
+  for (const id of apartmentIds) byApartment.set(id, []);
+  for (const row of rows) byApartment.get(row.apartment_id)!.push(mapChecklistItem(row));
+  for (const [id, items] of byApartment) setCachedChecklist(id, items);
+  return byApartment;
+}
+
 // ─── Perfil + obras do usuário logado ────────────────────────────────────────────
 export type UserObra = { id: string; name: string; summary: string; role: string };
 export type Profile = { id: string; name: string; email: string };
@@ -295,15 +512,64 @@ export async function fetchTowers(): Promise<Tower[]> {
   return (data ?? []).map(mapTower);
 }
 
+// Apartamentos SEM o checklist aninhado. Antes: um join aninhado
+// (apartments + checklist_items) que trazia ~17k linhas numa query pesada; agora
+// é uma query plana e leve (110 linhas). O checklist vem em separado via
+// loadAllChecklistItems (bulk) ou loadChecklist (por apartamento).
 export async function fetchApartments(): Promise<Apartment[]> {
   const { data, error } = await supabase
     .from('apartments')
-    .select('*, checklist_items(*)')
+    .select('*')
     .eq('obra_id', OBRA_ID)
-    .is('checklist_items.deleted_at', null)
     .order('number');
   if (error) throw error;
-  return (data ?? []).map(mapApartment);
+  return (data ?? []).map((row) => mapApartment({ ...row, checklist_items: [] }));
+}
+
+// Todos os itens de checklist de apartamento da obra numa única query plana,
+// agrupados por apartamento. Roda em paralelo com fetchApartments no boot e é
+// mesclado no contexto — substitui o join aninhado por dois SELECTs indexados.
+export async function loadAllChecklistItems(): Promise<Map<string, (ChecklistItem & ScheduleFields)[]>> {
+  const byApartment = new Map<string, (ChecklistItem & ScheduleFields)[]>();
+  // PAGINADO E EM PARALELO: são ~17k itens e a API corta em 1000 linhas por
+  // requisição — 17 páginas, que enfileiradas custariam vários segundos.
+  // Ordena por (sort_order, id) — o id desempata e mantém a paginação estável.
+  const rows = await fetchAllPages<DbChecklistRow & { apartment_id: string }>((from, withCount) =>
+    supabase
+      .from('checklist_items')
+      .select(`${CHECKLIST_COLUMNS},apartment_id`, withCount ? { count: 'exact' } : undefined)
+      .eq('obra_id', OBRA_ID)
+      .not('apartment_id', 'is', null)
+      .is('deleted_at', null)
+      .order('sort_order')
+      .order('id')
+      .range(from, from + PAGE_SIZE - 1) as unknown as PromiseLike<PageResponse<DbChecklistRow & { apartment_id: string }>>,
+  );
+
+  for (const row of rows) {
+    const item = mapChecklistItem(row);
+    const list = byApartment.get(row.apartment_id);
+    if (list) list.push(item);
+    else byApartment.set(row.apartment_id, [item]);
+  }
+  return byApartment;
+}
+
+// Um apartamento só (com seu checklist). Usado para atualizar UM apartamento no
+// contexto sem baixar a obra inteira. RLS garante o escopo por obra; o filtro por
+// id (PK global) já é suficiente.
+export async function fetchApartment(apartmentId: string): Promise<Apartment | null> {
+  const { data, error } = await supabase
+    .from('apartments')
+    .select('*, checklist_items(*)')
+    .eq('id', apartmentId)
+    .is('checklist_items.deleted_at', null)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+  const apartment = mapApartment(data);
+  setCachedChecklist(apartment.id, apartment.checklist);
+  return apartment;
 }
 
 export async function updateApartmentStats(
@@ -323,12 +589,14 @@ export async function updateApartmentStats(
 export async function loadChecklist(apartmentId: string): Promise<(ChecklistItem & ScheduleFields)[]> {
   const { data, error } = await supabase
     .from('checklist_items')
-    .select('*')
+    .select(CHECKLIST_COLUMNS)
     .eq('apartment_id', apartmentId)
     .is('deleted_at', null)
     .order('sort_order');
   if (error) throw error;
-  return (data ?? []).map(mapChecklistItem);
+  const items = ((data ?? []) as DbChecklistRow[]).map(mapChecklistItem);
+  setCachedChecklist(apartmentId, items);
+  return items;
 }
 
 export async function upsertChecklistItem(
@@ -382,10 +650,12 @@ export async function loadTowerChecklist(towerId: string): Promise<TowerChecklis
     .order('sort_order')
     .order('label');
   if (error) throw error;
-  return (data ?? []).map((row) => ({
+  const items = (data ?? []).map((row) => ({
     ...mapChecklistItem(row as DbChecklistRow),
     levelCode: (row as { level_code?: string | null }).level_code ?? '',
   }));
+  setCachedTowerChecklist(towerId, items);
+  return items;
 }
 
 // Adiciona uma etapa ao nível da torre. Idempotente: se já existe uma etapa
@@ -469,14 +739,24 @@ export async function loadMeasurements(apartmentId: string): Promise<Measurement
 }
 
 export async function loadAllMeasurements(): Promise<Measurement[]> {
-  const { data, error } = await supabase
-    .from('measurements')
-    .select('*')
-    .eq('obra_id', OBRA_ID)
-    .is('deleted_at', null)
-    .order('created_at', { ascending: false });
-  if (error) throw error;
-  return (data ?? []).map(mapMeasurement);
+  // PAGINADO: uma obra real passa de 1000 medições. `id` desempata o created_at
+  // (que pode repetir) e mantém a paginação estável.
+  const out: Measurement[] = [];
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await supabase
+      .from('measurements')
+      .select('*')
+      .eq('obra_id', OBRA_ID)
+      .is('deleted_at', null)
+      .order('created_at', { ascending: false })
+      .order('id')
+      .range(from, from + PAGE_SIZE - 1);
+    if (error) throw error;
+    const rows = data ?? [];
+    for (const row of rows) out.push(mapMeasurement(row));
+    if (rows.length < PAGE_SIZE) break;
+  }
+  return out;
 }
 
 export async function saveMeasurement(m: Measurement): Promise<void> {
@@ -527,6 +807,33 @@ export async function loadVisits(apartmentId: string): Promise<InspectionVisit[]
     .order('date', { ascending: false });
   if (error) throw error;
   return (data ?? []).map(mapVisit);
+}
+
+// PAGINADO: todas as visitas de apartamento da obra, agrupadas por apartamento.
+// Usado pelos relatórios (antes vinha do localStorage). Exclui as visitas de
+// nível de torre, que moram na mesma tabela com apartment_id NULL.
+export async function loadVisitsByApartment(): Promise<Map<string, InspectionVisit[]>> {
+  const out = new Map<string, InspectionVisit[]>();
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await supabase
+      .from('inspection_visits')
+      .select('*')
+      .eq('obra_id', OBRA_ID)
+      .not('apartment_id', 'is', null)
+      .order('date', { ascending: false })
+      .order('id')
+      .range(from, from + PAGE_SIZE - 1);
+    if (error) throw error;
+    const rows = data ?? [];
+    for (const row of rows) {
+      const key = row.apartment_id as string;
+      const list = out.get(key);
+      if (list) list.push(mapVisit(row));
+      else out.set(key, [mapVisit(row)]);
+    }
+    if (rows.length < PAGE_SIZE) break;
+  }
+  return out;
 }
 
 export async function saveVisit(visit: InspectionVisit): Promise<void> {
@@ -624,6 +931,63 @@ export async function loadPhotos(apartmentId: string): Promise<InspectionPhoto[]
   }
 
   return rows.map((row) => mapPhoto(row, signedUrls));
+}
+
+// Quantas URLs assinar por chamada ao Storage.
+const SIGN_CHUNK = 100;
+
+// PAGINADO: todas as fotos de apartamento da obra, agrupadas por apartamento.
+// Assinar URL custa uma chamada ao Storage por lote, e o relatório nunca exibe
+// mais que `signLimit` fotos por apartamento — então só as primeiras de cada um
+// recebem URL. As demais entram sem `uri` (nunca são renderizadas), mas seguem
+// na lista para que a contagem total do relatório continue correta.
+export async function loadPhotosByApartment(signLimit = 6): Promise<Map<string, InspectionPhoto[]>> {
+  const rowsByApartment = new Map<string, Record<string, unknown>[]>();
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await supabase
+      .from('inspection_photos')
+      .select('*')
+      .eq('obra_id', OBRA_ID)
+      .not('apartment_id', 'is', null)
+      .is('deleted_at', null)
+      .order('created_at', { ascending: false })
+      .order('id')
+      .range(from, from + PAGE_SIZE - 1);
+    if (error) throw error;
+    const rows = data ?? [];
+    for (const row of rows) {
+      const key = row.apartment_id as string;
+      const list = rowsByApartment.get(key);
+      if (list) list.push(row);
+      else rowsByApartment.set(key, [row]);
+    }
+    if (rows.length < PAGE_SIZE) break;
+  }
+
+  const toSign: string[] = [];
+  for (const rows of rowsByApartment.values()) {
+    for (const row of rows.slice(0, signLimit)) {
+      const path = (row.storage_path as string) ?? '';
+      if (path && !isLegacyPhotoUri(path)) toSign.push(path);
+    }
+  }
+
+  const signedUrls = new Map<string, string>();
+  for (let i = 0; i < toSign.length; i += SIGN_CHUNK) {
+    const { data: signed, error } = await supabase.storage
+      .from(INSPECTION_PHOTOS_BUCKET)
+      .createSignedUrls(toSign.slice(i, i + SIGN_CHUNK), SIGNED_URL_TTL_SECONDS);
+    if (error) throw error;
+    for (const entry of signed ?? []) {
+      if (entry.path && entry.signedUrl) signedUrls.set(entry.path, entry.signedUrl);
+    }
+  }
+
+  const out = new Map<string, InspectionPhoto[]>();
+  for (const [key, rows] of rowsByApartment) {
+    out.set(key, rows.map((row) => mapPhoto(row, signedUrls)));
+  }
+  return out;
 }
 
 export async function savePhoto(photo: InspectionPhoto): Promise<void> {
@@ -1040,6 +1404,34 @@ export async function loadStepAssignments(apartmentId: string): Promise<Record<s
     const workerId = row.worker_id as string;
     if (!result[itemId]) result[itemId] = [];
     result[itemId].push(workerId);
+  }
+  return result;
+}
+
+// Todas as alocações de colaboradores da obra numa única query, agrupadas por
+// apartamento e etapa: Record<apartmentId, Record<itemId, workerId[]>>. Evita o
+// fan-out de 1 request por apartamento no Cronograma.
+export async function loadAllStepAssignments(): Promise<Record<string, Record<string, string[]>>> {
+  // PAGINADO: alocações crescem com apartamentos × etapas × colaboradores.
+  const result: Record<string, Record<string, string[]>> = {};
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await supabase
+      .from('step_assignments')
+      .select('apartment_id, item_id, worker_id')
+      .eq('obra_id', OBRA_ID)
+      .order('id')
+      .range(from, from + PAGE_SIZE - 1);
+    if (error) throw error;
+    const rows = data ?? [];
+    for (const row of rows) {
+      const apartmentId = row.apartment_id as string;
+      const itemId = row.item_id as string;
+      const workerId = row.worker_id as string;
+      if (!result[apartmentId]) result[apartmentId] = {};
+      if (!result[apartmentId][itemId]) result[apartmentId][itemId] = [];
+      result[apartmentId][itemId].push(workerId);
+    }
+    if (rows.length < PAGE_SIZE) break;
   }
   return result;
 }

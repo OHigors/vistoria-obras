@@ -6,6 +6,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { Text } from '@/src/ui/Text';
+import { ReadOnlyBanner } from '@/src/ui/ReadOnlyBanner';
 import { Skeleton } from '@/src/ui/Skeleton';
 import { useToast } from '@/src/ui/Toast';
 import * as db from '@/src/data/db';
@@ -33,7 +34,7 @@ export default function CatalogosScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { tab: initialTab } = useLocalSearchParams<{ tab?: string }>();
-  const { refreshServiceCategories, refreshServiceUnits, refreshServiceStages } = useObras();
+  const { refreshServiceCategories, refreshServiceUnits, refreshServiceStages, canWrite } = useObras();
 
   const [tab, setTab] = useState<Tab>(
     initialTab === 'unidades' ? 'unidades' : initialTab === 'colaboradores' ? 'colaboradores' : 'categorias'
@@ -47,6 +48,8 @@ export default function CatalogosScreen() {
           <Text style={s.backBtnText}>Serviços e Etapas</Text>
         </Pressable>
       </View>
+
+      {!canWrite && <ReadOnlyBanner />}
 
       <View style={s.toggleWrap}>
         <View style={s.viewToggle}>
@@ -147,6 +150,7 @@ function CatalogPanel({
   afterMutation: () => Promise<void>;
 }) {
   const toast = useToast();
+  const { canWrite } = useObras();
   const [items, setItems] = useState<Item[]>([]);
   const [loading, setLoading] = useState(true);
   const [draftNome, setDraftNome] = useState('');
@@ -181,6 +185,7 @@ function CatalogPanel({
   };
 
   const doSave = async () => {
+    if (!canWrite) return;
     const nome = draftNome.trim();
     if (!nome) {
       setError(`Informe o nome da ${title}`);
@@ -228,7 +233,7 @@ function CatalogPanel({
   };
 
   const confirmDelete = async () => {
-    if (deleteState.kind !== 'confirm' || deleteState.usage > 0) return;
+    if (!canWrite || deleteState.kind !== 'confirm' || deleteState.usage > 0) return;
     setBusy(true);
     const cap = title[0].toUpperCase() + title.slice(1);
     toast.saving(`Excluindo ${title}…`);
@@ -250,6 +255,7 @@ function CatalogPanel({
     <>
       <ScrollView style={s.scroll} contentContainerStyle={s.container}>
         {/* FORM */}
+        {canWrite && (
         <View style={[s.section, s.sectionPurple, editingId && s.sectionEditing]}>
           <View style={s.formHeader}>
             <Text style={[s.sectionTitle, { color: '#6D28D9' }]}>{editingId ? `Editar ${title}` : `Nova ${title}`}</Text>
@@ -288,6 +294,7 @@ function CatalogPanel({
             )}
           </View>
         </View>
+        )}
 
         {/* LIST */}
         <View style={[s.section, s.sectionBlue]}>
@@ -313,14 +320,16 @@ function CatalogPanel({
                   <View key={item.id} style={[s.itemRow, idx === 0 && s.itemRowFirst, isEditing && s.itemRowEditing]}>
                     <View style={[s.itemDot, { backgroundColor: colorFor(item.nome) }]} />
                     <Text style={s.itemName} numberOfLines={1} ellipsizeMode="tail">{item.nome}</Text>
-                    <View style={s.itemIconActions}>
-                      <Pressable onPress={() => startEdit(item)} style={s.iconBtn} hitSlop={6}>
-                        <MaterialCommunityIcons name="pencil-outline" size={16} color="#1D4ED8" />
-                      </Pressable>
-                      <Pressable onPress={() => askDelete(item)} style={[s.iconBtn, s.iconBtnDanger]} hitSlop={6}>
-                        <MaterialCommunityIcons name="trash-can-outline" size={16} color="#B91C1C" />
-                      </Pressable>
-                    </View>
+                    {canWrite && (
+                      <View style={s.itemIconActions}>
+                        <Pressable onPress={() => startEdit(item)} style={s.iconBtn} hitSlop={6}>
+                          <MaterialCommunityIcons name="pencil-outline" size={16} color="#1D4ED8" />
+                        </Pressable>
+                        <Pressable onPress={() => askDelete(item)} style={[s.iconBtn, s.iconBtnDanger]} hitSlop={6}>
+                          <MaterialCommunityIcons name="trash-can-outline" size={16} color="#B91C1C" />
+                        </Pressable>
+                      </View>
+                    )}
                   </View>
                 );
               })}
@@ -377,6 +386,7 @@ function CatalogPanel({
 
 function WorkerPanel() {
   const toast = useToast();
+  const { canWrite } = useObras();
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [loading, setLoading] = useState(true);
   const [draftNome, setDraftNome] = useState('');
@@ -412,6 +422,7 @@ function WorkerPanel() {
   };
 
   const doSave = async () => {
+    if (!canWrite) return;
     const nome = draftNome.trim();
     const funcao = draftFuncao.trim();
     const nextErrors: typeof errors = {};
@@ -442,7 +453,7 @@ function WorkerPanel() {
   };
 
   const confirmDelete = async () => {
-    if (!deleteTarget) return;
+    if (!canWrite || !deleteTarget) return;
     setBusy(true);
     toast.saving('Excluindo colaborador…');
     try {
@@ -461,6 +472,7 @@ function WorkerPanel() {
   return (
     <>
       <ScrollView style={s.scroll} contentContainerStyle={s.container}>
+        {canWrite && (
         <View style={[s.section, s.sectionPurple, editingId !== undefined && s.sectionEditing]}>
           <View style={s.formHeader}>
             <Text style={[s.sectionTitle, { color: '#6D28D9' }]}>
@@ -512,6 +524,7 @@ function WorkerPanel() {
             )}
           </View>
         </View>
+        )}
 
         <View style={[s.section, s.sectionBlue]}>
           <Text style={[s.sectionTitle, { color: '#1D4ED8' }]}>Colaboradores cadastrados</Text>
@@ -539,14 +552,16 @@ function WorkerPanel() {
                       <Text style={s.itemName} numberOfLines={1}>{w.nome}</Text>
                       <Text style={s.workerFuncao} numberOfLines={1}>{w.funcao}</Text>
                     </View>
-                    <View style={s.itemIconActions}>
-                      <Pressable onPress={() => startEdit(w)} style={s.iconBtn} hitSlop={6}>
-                        <MaterialCommunityIcons name="pencil-outline" size={16} color="#1D4ED8" />
-                      </Pressable>
-                      <Pressable onPress={() => setDeleteTarget(w)} style={[s.iconBtn, s.iconBtnDanger]} hitSlop={6}>
-                        <MaterialCommunityIcons name="trash-can-outline" size={16} color="#B91C1C" />
-                      </Pressable>
-                    </View>
+                    {canWrite && (
+                      <View style={s.itemIconActions}>
+                        <Pressable onPress={() => startEdit(w)} style={s.iconBtn} hitSlop={6}>
+                          <MaterialCommunityIcons name="pencil-outline" size={16} color="#1D4ED8" />
+                        </Pressable>
+                        <Pressable onPress={() => setDeleteTarget(w)} style={[s.iconBtn, s.iconBtnDanger]} hitSlop={6}>
+                          <MaterialCommunityIcons name="trash-can-outline" size={16} color="#B91C1C" />
+                        </Pressable>
+                      </View>
+                    )}
                   </View>
                 );
               })}

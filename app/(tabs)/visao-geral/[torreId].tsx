@@ -1,4 +1,4 @@
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -7,11 +7,13 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import type { Apartment, ApartmentStatus, ChecklistItem } from '@/src/data/mockObras';
 import { useObras } from '@/src/data/ObrasContext';
+import { useObraScopeGuard } from '@/src/data/useObraScopeGuard';
 import * as db from '@/src/data/db';
+import { getCachedChecklistsFor } from '@/src/data/checklistCache';
 import type { ServiceStage } from '@/src/data/serviceStages';
-import { summarizeApartmentSchedule } from '@/src/data/schedule';
+import { summarizeApartmentSchedule, type ScheduleFields } from '@/src/data/schedule';
 import { getBlockedServiceGroups, getChecklistForApartment } from '@/src/data/serviceBlockers';
-import { isCriticalStageForStatus } from '@/src/data/serviceStages';
+import { computeApartmentStatus as calcStatus } from '@/src/data/apartmentStatus';
 import { getProgressMapStyle, statusConfig } from '@/src/ui/status';
 
 // ── Color token for this modal ─────────────────────────────────────────────────
@@ -53,18 +55,7 @@ const calcProgress = (items: ChecklistItem[]) => {
   return items.length ? Math.round((score / items.length) * 100) : 0;
 };
 
-const calcStatus = (items: ChecklistItem[], progress: number): ApartmentStatus => {
-  const pending  = items.filter((i) => i.state === 'pending').length;
-  const partial  = items.filter((i) => i.state === 'partial').length;
-  const manyPend = pending >= Math.max(3, Math.ceil(items.length * 0.35));
-  const hasCrit  = items.some(
-    (i) => (i.state === 'pending' || i.state === 'partial') && isCriticalStageForStatus(i.label),
-  );
-  if (progress < 50 || manyPend || hasCrit) return 'critical';
-  if ((progress >= 50 && progress <= 74) || partial > 0) return 'attention';
-  if (progress >= 90 && pending === 0) return 'excellent';
-  return 'good';
-};
+// calcStatus vem de @/src/data/apartmentStatus (fórmula única compartilhada).
 
 const normalizeAptSearch = (v: string) =>
   v.toLocaleLowerCase('pt-BR').replace(/apartamento|ap|\s/g, '');
@@ -94,9 +85,37 @@ export default function TowerApartmentsScreen() {
   const { torreId } = useLocalSearchParams<{ torreId: string }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { getTowerById, getApartmentsByTower, serviceStages, refreshData, loading } = useObras();
+  const { getTowerById, getApartmentsByTower, serviceStages, refreshData, loading, canWrite } = useObras();
   const tower          = getTowerById(torreId);
-  const towerApartments = getApartmentsByTower(torreId);
+  // Array novo a cada chamada — sem o useMemo, o memo que depende dele (abaixo)
+  // nunca segura e refaz os cálculos em todo render.
+  const contextTowerApartments = useMemo(
+    () => getApartmentsByTower(torreId),
+    [getApartmentsByTower, torreId],
+  );
+  // Trocou de obra? A torre desta URL não existe mais aqui — volta pra Visão Geral.
+  useObraScopeGuard(Boolean(tower), '/visao-geral');
+
+  // LAZY: o contexto não traz mais os checklists no boot. Carregamos os itens dos
+  // apartamentos DESTA torre sob demanda (ao focar) e mesclamos, para os cálculos
+  // de cobertura/cronograma/bloqueios continuarem funcionando.
+  const [checklistByApt, setChecklistByApt] = useState<Map<string, (ChecklistItem & ScheduleFields)[]>>(new Map());
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
+      const ids = getApartmentsByTower(torreId).map((a) => a.id);
+      // Stale-while-revalidate: pinta com o último download (se completo) e
+      // atualiza por baixo — sem "sumir e voltar" dos números a cada foco.
+      const cached = getCachedChecklistsFor(ids);
+      if (cached) setChecklistByApt(cached);
+      db.loadChecklistsForApartments(ids).then((m) => alive && setChecklistByApt(m)).catch(() => {});
+      return () => { alive = false; };
+    }, [torreId, getApartmentsByTower]),
+  );
+  const towerApartments = useMemo(
+    () => contextTowerApartments.map((a) => ({ ...a, checklist: checklistByApt.get(a.id) ?? [] })),
+    [contextTowerApartments, checklistByApt],
+  );
 
   // ── Main screen ────────────────────────────────────────────────────────────
   const scrollRef       = useRef<ScrollView | null>(null);
@@ -176,18 +195,21 @@ export default function TowerApartmentsScreen() {
 
   // ── Handlers ──────────────────────────────────────────────────────────────
   const handleAddStage = useCallback(async (stage: ServiceStage) => {
+    if (!canWrite) return;
     setAssocLoadingId(stage.id);
     try { await db.addStageToApartments(stage, towerAptIds); await refreshData(); }
     finally { setAssocLoadingId(null); }
-  }, [towerAptIds, refreshData]);
+  }, [canWrite, towerAptIds, refreshData]);
 
   const handleRemoveStage = useCallback(async (stage: ServiceStage) => {
+    if (!canWrite) return;
     setAssocLoadingId(stage.id);
     try { await db.removeStageFromApartments(stage.nome, towerAptIds); await refreshData(); }
     finally { setAssocLoadingId(null); }
-  }, [towerAptIds, refreshData]);
+  }, [canWrite, towerAptIds, refreshData]);
 
   const handleAddAll = useCallback(async () => {
+    if (!canWrite) return;
     setAssocBusy(true);
     try {
       const total = towerApartments.length;
@@ -195,9 +217,10 @@ export default function TowerApartmentsScreen() {
         await db.addStageToApartments(stage, towerAptIds);
       await refreshData();
     } finally { setAssocBusy(false); }
-  }, [activeChecklistStages, coverageMap, towerApartments.length, towerAptIds, refreshData]);
+  }, [canWrite, activeChecklistStages, coverageMap, towerApartments.length, towerAptIds, refreshData]);
 
   const handleRemoveAll = useCallback(async () => {
+    if (!canWrite) return;
     setConfirmRemoveAll(false);
     setAssocBusy(true);
     try {
@@ -205,7 +228,7 @@ export default function TowerApartmentsScreen() {
         await db.removeStageFromApartments(stage.nome, towerAptIds);
       await refreshData();
     } finally { setAssocBusy(false); }
-  }, [activeChecklistStages, towerAptIds, refreshData]);
+  }, [canWrite, activeChecklistStages, towerAptIds, refreshData]);
 
   const toggleGroup = useCallback((cat: string) =>
     setAssocCollapsed((cur) => ({ ...cur, [cat]: !cur[cat] })), []);
@@ -318,10 +341,12 @@ export default function TowerApartmentsScreen() {
           </View>
           <View style={s.headerMetaRow}>
             <Text style={s.headerBarLabel}>{`${towerStats.avgProgress}% de avanço médio`}</Text>
-            <Pressable onPress={openModal} style={s.assocTrigger}>
-              <MaterialCommunityIcons name="format-list-checks" size={16} color="#FFFFFF" />
-              <Text style={s.assocTriggerText}>Etapas</Text>
-            </Pressable>
+            {canWrite && (
+              <Pressable onPress={openModal} style={s.assocTrigger}>
+                <MaterialCommunityIcons name="format-list-checks" size={16} color="#FFFFFF" />
+                <Text style={s.assocTriggerText}>Etapas</Text>
+              </Pressable>
+            )}
           </View>
         </View>
 

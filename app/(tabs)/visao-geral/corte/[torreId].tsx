@@ -1,7 +1,6 @@
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useMemo, useState } from 'react';
 import {
-  ActivityIndicator,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -13,15 +12,23 @@ import { Text } from '@/src/ui/Text';
 
 import * as db from '@/src/data/db';
 import { useObras } from '@/src/data/ObrasContext';
+import { useObraScopeGuard } from '@/src/data/useObraScopeGuard';
 import type { Apartment, ApartmentStatus, ChecklistItem, ChecklistState } from '@/src/data/mockObras';
+import { getCachedChecklistsFor, getCachedTowerChecklist } from '@/src/data/checklistCache';
 import { getBlockedServiceGroups, getChecklistForApartment } from '@/src/data/serviceBlockers';
 import { isCriticalStageForStatus } from '@/src/data/serviceStages';
+import { computeApartmentStatus as calcStatus } from '@/src/data/apartmentStatus';
 import {
+  FLOOR_SEGMENTS,
+  floorSegmentCode,
   LEVELS_ABOVE_FLOORS,
   LEVELS_BELOW_FLOORS,
+  type FloorSegmentPrefix,
   type TowerLevelDef,
 } from '@/src/data/towerLevels';
 import { getProgressMapStyle } from '@/src/ui/status';
+import { ReadOnlyBanner } from '@/src/ui/ReadOnlyBanner';
+import { Skeleton } from '@/src/ui/Skeleton';
 
 // ── Prancha (technical drawing) tokens ────────────────────────────────────────
 const INK = '#0F172A';
@@ -29,7 +36,6 @@ const PAPER = '#FFFFFF';
 const SHEET_BG = '#F1F5F9';
 const GUIDE = '#CBD5E1';
 const HATCH_BLUE = '#93C5FD'; // hachura azul do corte original
-const CRIT_BG = '#FEE2E2';
 
 // Larguras da silhueta por tipo de nível (reproduz o degrau do corte).
 const KIND_WIDTH: Record<TowerLevelDef['kind'], `${number}%`> = {
@@ -59,18 +65,7 @@ const getFloorOrder = (floor: string) => {
 };
 
 // Mesma regra de status da tela de apartamentos (para o KPI de "Críticos").
-const calcStatus = (items: ChecklistItem[], progress: number): ApartmentStatus => {
-  const pending = items.filter((i) => i.state === 'pending').length;
-  const partial = items.filter((i) => i.state === 'partial').length;
-  const manyPend = pending >= Math.max(3, Math.ceil(items.length * 0.35));
-  const hasCrit = items.some(
-    (i) => (i.state === 'pending' || i.state === 'partial') && isCriticalStageForStatus(i.label),
-  );
-  if (progress < 50 || manyPend || hasCrit) return 'critical';
-  if ((progress >= 50 && progress <= 74) || partial > 0) return 'attention';
-  if (progress >= 90 && pending === 0) return 'excellent';
-  return 'good';
-};
+// calcStatus vem de @/src/data/apartmentStatus (fórmula única compartilhada).
 
 // Hachura diagonal dos níveis enterrados (como no corte original).
 function Hatch({ height }: { height: number }) {
@@ -99,29 +94,56 @@ export default function CorteDaTorreScreen() {
   const { torreId } = useLocalSearchParams<{ torreId: string }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { getTowerById, getApartmentsByTower } = useObras();
+  const { getTowerById, getApartmentsByTower, canWrite } = useObras();
 
   const tower = getTowerById(torreId);
-  const towerApartments = getApartmentsByTower(torreId);
+  // `getApartmentsByTower` faz um .filter() e devolve um ARRAY NOVO a cada chamada.
+  // Sem este useMemo, a identidade dele mudava a cada render e derrubava toda a
+  // cadeia de memos abaixo (towerApartmentsFull → towerStats → floors), refazendo
+  // os cálculos pesados dos KPIs em TODO render em vez de só quando os dados mudam.
+  const towerApartments = useMemo(() => getApartmentsByTower(torreId), [getApartmentsByTower, torreId]);
+  // Trocou de obra? A torre desta URL não existe mais aqui — volta pra Visão Geral.
+  useObraScopeGuard(Boolean(tower), '/visao-geral');
 
   const [towerItems, setTowerItems] = useState<TowerItem[]>([]);
+  // LAZY: o contexto não traz mais o checklist dos apartamentos — esta tela carrega
+  // o dos apartamentos DESTA torre (senão os KPIs abaixo ficam zerados).
+  const [checklistByApt, setChecklistByApt] = useState<Awaited<ReturnType<typeof db.loadChecklistsForApartments>>>(new Map());
   const [loadingItems, setLoadingItems] = useState(true);
   const [needsMigration, setNeedsMigration] = useState(false);
   const [expandedFloor, setExpandedFloor] = useState<string | null>(null);
 
   const loadItems = useCallback(async () => {
     if (!torreId) return;
-    setLoadingItems(true);
-    try {
-      const items = await db.loadTowerChecklist(torreId);
-      setTowerItems(items);
-      setNeedsMigration(false);
-    } catch (e) {
-      if (db.isMissingTowerColumns(e)) setNeedsMigration(true);
-    } finally {
+    const aptIds = getApartmentsByTower(torreId).map((a) => a.id);
+    // Stale-while-revalidate: se a última visita já baixou tudo, pinta na hora
+    // com o cache e atualiza por baixo — o skeleton só aparece na PRIMEIRA visita
+    // à torre. Antes, cada volta do apartamento/nível refazia o download inteiro
+    // com skeleton na frente, e era essa a espera percebida.
+    const cachedTower = getCachedTowerChecklist(torreId);
+    const cachedByApt = getCachedChecklistsFor(aptIds);
+    if (cachedTower && cachedByApt) {
+      setTowerItems(cachedTower);
+      setChecklistByApt(cachedByApt);
       setLoadingItems(false);
+    } else {
+      setLoadingItems(true);
     }
-  }, [torreId]);
+    // Espera os DOIS carregamentos (itens de nível + checklists dos apartamentos)
+    // antes de baixar o skeleton — assim os KPIs nunca aparecem parcialmente.
+    const [itemsRes, checklistRes] = await Promise.allSettled([
+      db.loadTowerChecklist(torreId),
+      db.loadChecklistsForApartments(aptIds),
+    ]);
+    if (itemsRes.status === 'fulfilled') {
+      setTowerItems(itemsRes.value);
+      setNeedsMigration(false);
+    } else if (db.isMissingTowerColumns(itemsRes.reason)) {
+      setNeedsMigration(true);
+    }
+    if (checklistRes.status === 'fulfilled') setChecklistByApt(checklistRes.value);
+    setLoadingItems(false);
+  }, [torreId, getApartmentsByTower]);
 
   // Recarrega ao focar — reflete as marcações feitas na tela do nível.
   useFocusEffect(useCallback(() => { loadItems(); }, [loadItems]));
@@ -153,14 +175,23 @@ export default function CorteDaTorreScreen() {
       .sort((a, b) => b.order - a.order); // topo do prédio primeiro
   }, [towerApartments]);
 
+  // Apartamentos da torre com o checklist carregado sob demanda (o contexto vem vazio).
+  const towerApartmentsFull = useMemo(
+    () => towerApartments.map((a) => ({ ...a, checklist: checklistByApt.get(a.id) ?? [] })),
+    [towerApartments, checklistByApt],
+  );
+
   // KPIs iguais aos da tela de apartamentos (computados a partir do checklist).
   const towerStats = useMemo(() => {
-    const summaries = towerApartments.map((apartment) => {
+    const summaries = towerApartmentsFull.map((apartment) => {
       const checklist = getChecklistForApartment(apartment);
-      const progress = calcProgress(checklist);
+      // Itens ainda não baixados? progress/status denormalizados (tabela
+      // apartments, já no contexto) valem como fallback — o cabeçalho e os KPIs
+      // de avanço/críticos aparecem certos desde o primeiro frame, em vez de 0%.
+      const progress = checklist.length ? calcProgress(checklist) : apartment.progress;
       return {
         progress,
-        statusKey: calcStatus(checklist, progress),
+        statusKey: checklist.length ? calcStatus(checklist, progress) : apartment.status,
         pendingCount: checklist.filter((i) => i.state === 'pending' || i.state === 'partial').length,
         blockedCount: getBlockedServiceGroups(checklist).reduce((t, g) => t + g.blockedServices.length, 0),
         observationCount: checklist.filter((i) => i.comment?.trim()).length,
@@ -169,14 +200,23 @@ export default function CorteDaTorreScreen() {
     const avgProgress = summaries.length
       ? Math.round(summaries.reduce((t, sm) => t + sm.progress, 0) / summaries.length)
       : 0;
+
+    // Os KPIs de CONTAGEM cobrem a torre inteira — apartamentos E níveis (fundação,
+    // reservatório, elevador, escada...). Antes só somavam apartamentos, então uma
+    // observação criada num nível não aparecia aqui.
+    const levelPending = towerItems.filter((i) => i.state === 'pending' || i.state === 'partial').length;
+    const levelBlocked = getBlockedServiceGroups(towerItems).reduce((t, g) => t + g.blockedServices.length, 0);
+    const levelObservations = towerItems.filter((i) => i.comment?.trim()).length;
+
     return {
+      // Avanço e Críticos seguem por apartamento (cada nível já mostra seu % na faixa).
       avgProgress,
       criticalCount: summaries.filter((sm) => sm.statusKey === 'critical').length,
-      totalPending: summaries.reduce((t, sm) => t + sm.pendingCount, 0),
-      totalBlocked: summaries.reduce((t, sm) => t + sm.blockedCount, 0),
-      totalObservations: summaries.reduce((t, sm) => t + sm.observationCount, 0),
+      totalPending: summaries.reduce((t, sm) => t + sm.pendingCount, 0) + levelPending,
+      totalBlocked: summaries.reduce((t, sm) => t + sm.blockedCount, 0) + levelBlocked,
+      totalObservations: summaries.reduce((t, sm) => t + sm.observationCount, 0) + levelObservations,
     };
-  }, [towerApartments]);
+  }, [towerApartmentsFull, towerItems]);
 
   const levelAgg = useCallback(
     (def: TowerLevelDef) => {
@@ -237,22 +277,56 @@ export default function CorteDaTorreScreen() {
     );
   };
 
+  // Trecho do túnel do elevador / escada que passa por um pavimento. Cada trecho é
+  // um "nível" dinâmico (level_code `elevador-<n>` / `escada-<n>`) — toque abre a
+  // mesma tela de etapas usada pelos níveis.
+  const renderSegmentStrip = (prefix: FloorSegmentPrefix, floorOrder: number) => {
+    const seg = FLOOR_SEGMENTS.find((sg) => sg.prefix === prefix)!;
+    const code = floorSegmentCode(prefix, floorOrder);
+    const items = itemsByLevel.get(code) ?? [];
+    const ghost = items.length === 0;
+    const progress = calcProgress(items);
+    const map = getProgressMapStyle(progress);
+    return (
+      <Pressable
+        key={code}
+        onPress={() => router.push(`/visao-geral/nivel/${torreId}/${code}` as never)}
+        disabled={needsMigration}
+        accessibilityRole="button"
+        accessibilityLabel={`${seg.label} do pavimento ${floorOrder || 'térreo'}`}
+        style={[
+          s.segStrip,
+          ghost ? s.segStripGhost : { backgroundColor: map.bg, borderColor: INK },
+          needsMigration && s.bandDisabled,
+        ]}>
+        <MaterialCommunityIcons name={seg.icon as never} size={14} color={ghost ? '#94A3B8' : map.fg} />
+        <Text style={[s.segPct, { color: ghost ? '#94A3B8' : map.fg }]}>
+          {ghost ? '—' : `${progress}%`}
+        </Text>
+      </Pressable>
+    );
+  };
+
   const renderFloorBand = (floor: (typeof floors)[number]) => {
     // Cor puramente por % de conclusão (mesma paleta dos níveis e apartamentos).
     const map = getProgressMapStyle(floor.progress);
     const fg = map.fg;
     const bg = map.bg;
     const expanded = expandedFloor === floor.floor;
+    const floorOrder = getFloorOrder(floor.floor);
     return (
       <View key={floor.floor}>
         <View style={s.row}>
           {renderGuide()}
-          <Text style={s.rail}>{getFloorOrder(floor.floor) || 'T'}</Text>
+          <Text style={s.rail}>{floorOrder || 'T'}</Text>
+          <View style={s.floorCore}>
+          {/* Pavimento · escada e elevador, ambos à direita (as duas prumadas do core) */}
           <Pressable
             onPress={() => setExpandedFloor(expanded ? null : floor.floor)}
             style={[
               s.band,
-              { width: KIND_WIDTH.body, backgroundColor: bg },
+              s.bandFlush,
+              { backgroundColor: bg },
               expanded && s.bandExpanded,
               expanded && s.bandExpandedFlush,
             ]}>
@@ -272,11 +346,15 @@ export default function CorteDaTorreScreen() {
               />
             </View>
           </Pressable>
+          {renderSegmentStrip('escada', floorOrder)}
+          {renderSegmentStrip('elevador', floorOrder)}
+          </View>
         </View>
         {expanded && (
           <View style={s.aptDrawerRow}>
             <View style={s.aptDrawerRail} />
-            <View style={[s.aptDrawer, { width: KIND_WIDTH.body, backgroundColor: bg, borderColor: INK }]}>
+            <View style={s.floorCore}>
+            <View style={[s.aptDrawer, s.bandFlush, { backgroundColor: bg, borderColor: INK }]}>
               <Text style={[s.aptDrawerHint, { color: fg }]}>Apartamentos deste pavimento</Text>
               <View style={s.aptRow}>
                 {floor.apts.map((apt) => {
@@ -294,6 +372,10 @@ export default function CorteDaTorreScreen() {
                   );
                 })}
               </View>
+            </View>
+            {/* Dois espaçadores à direita = prumadas da escada e do elevador */}
+            <View style={s.segSpacer} />
+            <View style={s.segSpacer} />
             </View>
           </View>
         )}
@@ -329,10 +411,6 @@ export default function CorteDaTorreScreen() {
             <Text style={s.headerTitle}>{tower.name}</Text>
             <Text style={s.headerSub}>{[tower.block, tower.position].filter(Boolean).join(' · ')}</Text>
           </View>
-          <View style={s.headerCount}>
-            <Text style={s.headerCountValue}>{towerApartments.length}</Text>
-            <Text style={s.headerCountLabel}>unid.</Text>
-          </View>
         </View>
         <View style={s.headerBar}>
           <View style={[s.headerBarFill, { width: `${towerStats.avgProgress}%` as `${number}%` }]} />
@@ -346,22 +424,31 @@ export default function CorteDaTorreScreen() {
         </View>
       </View>
 
+      {!canWrite && <ReadOnlyBanner />}
+
       <ScrollView contentContainerStyle={[s.scroll, { paddingBottom: insets.bottom + 32 }]}>
-        {/* ── KPIs (mesmos da tela de apartamentos) ── */}
+        {/* ── KPIs ── */}
         <View style={s.kpiRow}>
-          {[
-            { icon: 'check-circle-outline', value: `${towerStats.avgProgress}%`, label: 'Avanço', color: '#2563EB', bg: '#EFF6FF' },
-            { icon: 'close-circle-outline', value: towerStats.criticalCount, label: 'Críticos', color: towerStats.criticalCount > 0 ? '#B91C1C' : '#047857', bg: towerStats.criticalCount > 0 ? '#FEE2E2' : '#D1FAE5' },
-            { icon: 'alert-outline', value: towerStats.totalPending, label: 'Em aberto', color: towerStats.totalPending > 0 ? '#B45309' : '#047857', bg: towerStats.totalPending > 0 ? '#FEF3C7' : '#D1FAE5' },
-            { icon: 'lock-outline', value: towerStats.totalBlocked, label: 'Travados', color: towerStats.totalBlocked > 0 ? '#7C3AED' : '#047857', bg: towerStats.totalBlocked > 0 ? '#EDE9FE' : '#D1FAE5' },
-            { icon: 'note-text-outline', value: towerStats.totalObservations, label: 'Observações', color: towerStats.totalObservations > 0 ? '#0891B2' : '#047857', bg: towerStats.totalObservations > 0 ? '#E0F2FE' : '#D1FAE5' },
-          ].map((k) => (
-            <View key={k.label} style={[s.kpiCard, { backgroundColor: k.bg }]}>
-              <MaterialCommunityIcons name={k.icon as never} size={18} color={k.color} />
-              <Text style={[s.kpiValue, { color: k.color }]}>{k.value}</Text>
-              <Text style={[s.kpiLabel, { color: k.color }]}>{k.label}</Text>
-            </View>
-          ))}
+          {loadingItems
+            ? [0, 1, 2, 3].map((i) => (
+                <View key={i} style={[s.kpiCard, { backgroundColor: '#F8FAFC' }]}>
+                  <Skeleton width={18} height={18} radius={9} />
+                  <Skeleton width={26} height={16} radius={4} style={{ marginTop: 3 }} />
+                  <Skeleton width={48} height={9} radius={4} style={{ marginTop: 3 }} />
+                </View>
+              ))
+            : [
+                { icon: 'floor-plan', value: floors.length, label: 'Pavimentos', color: '#2563EB', bg: '#EFF6FF' },
+                { icon: 'home-city-outline', value: towerApartments.length, label: 'Apartamentos', color: '#7C3AED', bg: '#EDE9FE' },
+                { icon: 'layers-triple-outline', value: towerItems.length, label: 'Etapas de nível', color: '#0891B2', bg: '#E0F2FE' },
+                { icon: 'note-text-outline', value: towerStats.totalObservations, label: 'Observações', color: towerStats.totalObservations > 0 ? '#0F766E' : '#047857', bg: towerStats.totalObservations > 0 ? '#CCFBF1' : '#D1FAE5' },
+              ].map((k) => (
+                <View key={k.label} style={[s.kpiCard, { backgroundColor: k.bg }]}>
+                  <MaterialCommunityIcons name={k.icon as never} size={18} color={k.color} />
+                  <Text style={[s.kpiValue, { color: k.color }]}>{k.value}</Text>
+                  <Text style={[s.kpiLabel, { color: k.color }]}>{k.label}</Text>
+                </View>
+              ))}
         </View>
 
         {needsMigration && (
@@ -379,30 +466,47 @@ export default function CorteDaTorreScreen() {
           </View>
         )}
 
-        {/* ── Legenda ── */}
+        {/* ── Legenda: reflete o "jogo de cores" real (paleta por % de conclusão),
+            + sem etapas (tracejado) e hachurado (níveis enterrados). ── */}
         <View style={s.legend}>
-          <View style={s.legendItem}>
-            <View style={[s.legendSwatch, { backgroundColor: '#D1FAE5', borderColor: '#A7F3D0' }]} />
-            <Text style={s.legendText}>avançado</Text>
-          </View>
-          <View style={s.legendItem}>
-            <View style={[s.legendSwatch, { backgroundColor: '#FEF3C7', borderColor: '#FDE68A' }]} />
-            <Text style={s.legendText}>em andamento</Text>
-          </View>
-          <View style={s.legendItem}>
-            <View style={[s.legendSwatch, { backgroundColor: CRIT_BG, borderColor: '#FCA5A5' }]} />
-            <Text style={s.legendText}>crítico</Text>
-          </View>
+          {[10, 30, 50, 70, 90].map((pct) => {
+            const m = getProgressMapStyle(pct);
+            return (
+              <View key={pct} style={s.legendItem}>
+                <View style={[s.legendSwatch, { backgroundColor: m.bg, borderColor: m.border }]} />
+                <Text style={s.legendText}>{`${pct - 10}–${pct + 10}%`}</Text>
+              </View>
+            );
+          })}
           <View style={s.legendItem}>
             <View style={[s.legendSwatch, s.legendSwatchGhost]} />
             <Text style={s.legendText}>sem etapas</Text>
+          </View>
+          <View style={s.legendItem}>
+            <View style={[s.legendSwatch, s.legendSwatchHatch]}>
+              <Hatch height={12} />
+            </View>
+            <Text style={s.legendText}>hachurado (enterrado)</Text>
           </View>
         </View>
 
         {/* ── O corte ── */}
         {loadingItems && !needsMigration ? (
-          <View style={s.center}>
-            <ActivityIndicator color="#2563EB" />
+          // Skeleton com a forma do corte (trilho + faixa do pavimento + escada
+          // e elevador à direita), para a tela não "pular" quando os dados chegam.
+          <View style={s.sheet}>
+            {/* A contagem de faixas vem do contexto (já carregado), então o
+                skeleton tem a MESMA altura do corte final: nada pula no lugar. */}
+            {Array.from({ length: aboveLevels.length + floors.length + belowLevels.length }).map((_, i) => (
+              <View key={i} style={s.row}>
+                <Skeleton width={18} height={10} radius={3} style={{ marginHorizontal: 6 }} />
+                <View style={{ flex: 1 }}>
+                  <Skeleton height={BAND_MIN_H - 10} radius={6} />
+                </View>
+                <Skeleton width={26} height={BAND_MIN_H - 10} radius={4} style={{ marginLeft: 6 }} />
+                <Skeleton width={26} height={BAND_MIN_H - 10} radius={4} style={{ marginLeft: 4 }} />
+              </View>
+            ))}
           </View>
         ) : (
           <View style={s.sheet}>
@@ -495,6 +599,7 @@ const s = StyleSheet.create({
   legend: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, marginBottom: 10, paddingHorizontal: 2 },
   legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   legendSwatch: { width: 12, height: 12, borderRadius: 3, borderWidth: 1 },
+  legendSwatchHatch: { borderRadius: 3, borderWidth: 1, borderColor: INK, backgroundColor: PAPER, overflow: 'hidden' },
   legendSwatchGhost: {
     backgroundColor: PAPER,
     borderColor: '#94A3B8',
@@ -558,6 +663,31 @@ const s = StyleSheet.create({
     paddingVertical: 6,
     gap: 8,
   },
+  // Trechos verticais de elevador/escada ao lado de cada pavimento. Mesma
+  // linguagem visual das faixas (borda INK, cor por % de conclusão); alinhados
+  // entre andares, formam as duas "prumadas" do core no corte.
+  // Linha do pavimento: escada · faixa (preenche o meio) · elevador. As prumadas
+  // ficam nas mesmas posições em todo andar, formando as duas colunas do core.
+  floorCore: { flex: 1, flexDirection: 'row', alignItems: 'center' },
+  // Anula as margens automáticas do `band` (que centram as faixas de nível) — aqui
+  // quem posiciona é o floorCore.
+  bandFlush: { flex: 1, marginLeft: 0, marginRight: 0 },
+  segStrip: {
+    width: 34,
+    minHeight: BAND_MIN_H,
+    marginVertical: 3,
+    marginHorizontal: 4,
+    borderWidth: 1.5,
+    borderColor: INK,
+    backgroundColor: PAPER,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+  },
+  segStripGhost: { borderStyle: 'dashed', borderColor: '#94A3B8', backgroundColor: PAPER },
+  segPct: { fontSize: 8.5, fontWeight: '800' },
+  // Largura de uma prumada (34 + 4 de margem de cada lado).
+  segSpacer: { width: 42 },
   bandTextWrap: { flex: 1 },
   bandLabel: { fontSize: 12.5, fontWeight: '800', color: INK, letterSpacing: 0.4 },
   bandLabelGhost: { color: '#94A3B8' },

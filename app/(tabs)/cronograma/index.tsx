@@ -1,29 +1,60 @@
-import { useRouter } from 'expo-router';
-import { useMemo } from 'react';
+import { useFocusEffect, useRouter } from 'expo-router';
+import { useCallback, useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native'
 import { Text } from '@/src/ui/Text';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
+import * as db from '@/src/data/db';
 import { useObras } from '@/src/data/ObrasContext';
-import { summarizeBottlenecks } from '@/src/data/serviceBlockers';
-import { summarizeSchedule } from '@/src/data/schedule';
+import { summarizeSchedule, summarizeScheduleBoard } from '@/src/data/schedule';
+import { ReadOnlyBanner } from '@/src/ui/ReadOnlyBanner';
 import { Skeleton } from '@/src/ui/Skeleton';
+
+// Teal é a cor do cronograma no restante do app; aqui ela sai da borda e vira o
+// fundo do card principal — é o único elemento colorido da tela, e é o que põe
+// "Cronograma da Obra" em evidência sem precisar competir com os indicadores.
+const TEAL = '#0D9488';
+const TEAL_DEEP = '#0F766E';
 
 export default function CronogramaScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { apartments, towers, loading } = useObras();
+  const { apartments, towers, loading, canWrite } = useObras();
 
-  const bottleneckSummary = useMemo(() => summarizeBottlenecks(apartments), [apartments]);
-  const scheduleSummary = useMemo(
-    () => summarizeSchedule(apartments, (id) => towers.find((t) => t.id === id)?.name ?? id),
-    [apartments, towers],
+  // LAZY: o contexto não traz mais o checklist — carrega ao focar a aba (os resumos
+  // abaixo varrem os itens de todos os apartamentos).
+  const [checklistByApt, setChecklistByApt] = useState<Awaited<ReturnType<typeof db.loadAllChecklistItems>>>(new Map());
+  // Os indicadores dependem do checklist, não só do contexto. Sem este estado a
+  // tela mostrava "0 atrasados" como se fosse resultado, e só depois pulava para
+  // o número real — o skeleton precisa cobrir a espera que existe de fato.
+  const [loadingSchedule, setLoadingSchedule] = useState(true);
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
+      db.loadAllChecklistItems()
+        .then((m) => {
+          if (!alive) return;
+          setChecklistByApt(m);
+          setLoadingSchedule(false);
+        })
+        .catch(() => alive && setLoadingSchedule(false));
+      return () => { alive = false; };
+    }, []),
+  );
+  const apartmentsFull = useMemo(
+    () => apartments.map((a) => ({ ...a, checklist: checklistByApt.get(a.id) ?? [] })),
+    [apartments, checklistByApt],
   );
 
-  const hasIssues = bottleneckSummary.mostBlockedServices.length > 0 || scheduleSummary.delayedApartments > 0;
-  const hasBlockers = bottleneckSummary.mostBlockedServices.length > 0;
-  const hasDelays = scheduleSummary.delayedApartments > 0;
+  const board = useMemo(() => summarizeScheduleBoard(apartmentsFull), [apartmentsFull]);
+  const scheduleSummary = useMemo(
+    () => summarizeSchedule(apartmentsFull, (id) => towers.find((t) => t.id === id)?.name ?? id),
+    [apartmentsFull, towers],
+  );
+
+  const busy = loading || loadingSchedule;
+  const hasDelays = board.delayedApartments > 0;
 
   return (
     <ScrollView
@@ -31,110 +62,91 @@ export default function CronogramaScreen() {
       contentContainerStyle={[s.container, { paddingTop: insets.top + 16 }]}
       showsVerticalScrollIndicator={false}>
 
-      {/* KPI ROW — amber border when issues, green when all ok */}
-      {loading ? (
+      {!canWrite && <ReadOnlyBanner style={s.readOnly} />}
+
+      {/* CRONOGRAMA DA OBRA — o destino principal da aba, em fundo teal */}
+      <Pressable
+        onPress={() => router.push('/cronograma/obra' as any)}
+        accessibilityRole="button"
+        accessibilityLabel="Abrir o Cronograma da Obra"
+        style={({ pressed }) => [s.hero, pressed && s.heroPressed]}>
+        <View style={s.heroIcon}>
+          <MaterialCommunityIcons name="chart-gantt" size={26} color="#FFFFFF" />
+        </View>
+        <View style={s.heroText}>
+          <Text style={s.heroTitle}>Cronograma da Obra</Text>
+          <Text style={s.heroSub}>Planejado × Executado por frente e pavimento</Text>
+        </View>
+        <MaterialCommunityIcons name="chevron-right" size={22} color="rgba(255,255,255,0.85)" />
+      </Pressable>
+
+      {/* INDICADORES DO CRONOGRAMA */}
+      {busy ? (
         <View style={s.kpiRow}>
-          <Skeleton height={100} radius={14} style={{ flex: 1 }} />
-          <Skeleton height={100} radius={14} style={{ flex: 1 }} />
+          <Skeleton height={104} radius={14} style={{ flex: 1 }} />
+          <Skeleton height={104} radius={14} style={{ flex: 1 }} />
         </View>
       ) : (
         <View style={s.kpiRow}>
-          <View style={[s.kpiCard, hasBlockers ? s.kpiBorderRed : s.kpiBorderGreen]}>
-            <MaterialCommunityIcons
-              name="lock-alert-outline"
-              size={28}
-              color={hasBlockers ? '#B91C1C' : '#047857'}
-            />
-            <Text style={[s.kpiValue, { color: hasBlockers ? '#B91C1C' : '#047857' }]}>
-              {bottleneckSummary.mostBlockedServices.length}
-            </Text>
-            <Text style={s.kpiLabel}>Serviços travados</Text>
-          </View>
-          <View style={[s.kpiCard, hasDelays ? s.kpiBorderAmber : s.kpiBorderGreen]}>
+          <View style={s.kpiCard}>
             <MaterialCommunityIcons
               name={hasDelays ? 'calendar-remove' : 'calendar-check'}
-              size={28}
+              size={26}
               color={hasDelays ? '#B45309' : '#047857'}
             />
             <Text style={[s.kpiValue, { color: hasDelays ? '#B45309' : '#047857' }]}>
-              {scheduleSummary.delayedApartments}
+              {board.delayedApartments}
             </Text>
             <Text style={s.kpiLabel}>Apt. atrasados</Text>
+          </View>
+          <View style={s.kpiCard}>
+            <MaterialCommunityIcons name="calendar-clock" size={26} color="#334155" />
+            <Text style={[s.kpiValue, { color: '#334155' }]}>{board.pendingSteps}</Text>
+            <Text style={s.kpiLabel}>Etapas pendentes</Text>
           </View>
         </View>
       )}
 
-      {/* ALL CLEAR — green border */}
-      {loading ? (
-        <Skeleton height={120} radius={14} />
-      ) : !hasIssues ? (
-        <View style={[s.section, s.sectionGreen, s.sectionCentered]}>
-          <MaterialCommunityIcons name="check-all" size={44} color="#047857" />
-          <Text style={s.allClearTitle}>Obra sem gargalos</Text>
-          <Text style={s.allClearSub}>Nenhum serviço travado nem atrasos detectados.</Text>
-        </View>
-      ) : null}
-
-      {/* GARGALO PRINCIPAL — red border */}
-      {!loading && bottleneckSummary.mostPendingService && (
-        <View style={[s.section, s.sectionRed]}>
-          <Text style={[s.sectionTitle, { color: '#B91C1C' }]}>Principal serviço em aberto</Text>
-          <View style={s.blockerRow}>
-            <View style={s.blockerIconWrap}>
-              <MaterialCommunityIcons name="alert-circle" size={26} color="#B91C1C" />
+      {/* PRINCIPAL ETAPA DO CRONOGRAMA */}
+      {busy ? (
+        <Skeleton height={116} radius={16} />
+      ) : board.topStep ? (
+        <View style={s.section}>
+          <Text style={s.sectionTitle}>Principal etapa do Cronograma</Text>
+          <View style={s.topStepRow}>
+            <View style={s.topStepIcon}>
+              <MaterialCommunityIcons name="calendar-star" size={24} color={TEAL_DEEP} />
             </View>
             <View style={{ flex: 1 }}>
-              <Text style={s.blockerService}>{bottleneckSummary.mostPendingService.service}</Text>
-              <Text style={s.blockerMeta}>
-                Afeta {bottleneckSummary.mostPendingService.affectedApartments} apartamento(s)
+              <Text style={s.topStepName}>{board.topStep.service}</Text>
+              <Text style={s.topStepMeta}>
+                Planejada em {board.topStep.apartments} apartamento(s)
               </Text>
             </View>
           </View>
         </View>
+      ) : (
+        <View style={[s.section, s.sectionCentered]}>
+          <MaterialCommunityIcons name="calendar-blank-outline" size={40} color="#CBD5E1" />
+          <Text style={s.emptyTitle}>Nenhuma etapa planejada</Text>
+          <Text style={s.emptySub}>
+            Abra o Cronograma da Obra e defina as datas das etapas para acompanhar prazos aqui.
+          </Text>
+        </View>
       )}
 
-      {/* SERVIÇOS IMPACTADOS — amber border */}
-      {loading ? (
-        <Skeleton height={160} radius={14} />
-      ) : hasBlockers ? (
-        <View style={[s.section, s.sectionAmber]}>
-          <Text style={[s.sectionTitle, { color: '#B45309' }]}>Serviços mais impactados</Text>
-          {bottleneckSummary.mostBlockedServices.map((svc) => {
-            const pct = apartments.length ? Math.round((svc.affectedApartments / apartments.length) * 100) : 0;
-            const isHigh = svc.occurrences > 5;
-            return (
-              <View key={svc.service} style={s.svcRow}>
-                <View style={s.svcRowHeader}>
-                  <Text style={s.svcName} numberOfLines={1}>{svc.service}</Text>
-                  <View style={[s.impactBadge, { backgroundColor: isHigh ? '#FEE2E2' : '#FEF3C7' }]}>
-                    <Text style={[s.impactText, { color: isHigh ? '#B91C1C' : '#B45309' }]}>
-                      {isHigh ? 'ALTO' : 'MÉDIO'}
-                    </Text>
-                  </View>
-                </View>
-                <View style={s.barTrack}>
-                  <View style={[s.barFill, {
-                    width: `${pct}%` as `${number}%`,
-                    backgroundColor: isHigh ? '#B91C1C' : '#D97706',
-                  }]} />
-                </View>
-                <Text style={s.barMeta}>{svc.occurrences} ocorrência(s) · {svc.affectedApartments} apt. afetados</Text>
-              </View>
-            );
-          })}
-        </View>
-      ) : null}
-
-      {/* ATRASOS — amber border */}
-      {loading ? (
-        <Skeleton height={100} radius={14} />
+      {/* ATRASOS */}
+      {busy ? (
+        <Skeleton height={100} radius={16} />
       ) : hasDelays ? (
-        <View style={[s.section, s.sectionAmber]}>
-          <Text style={[s.sectionTitle, { color: '#B45309' }]}>Atrasos no cronograma</Text>
+        <View style={s.section}>
+          <Text style={s.sectionTitle}>Atrasos no cronograma</Text>
           <View style={s.delayRow}>
             <MaterialCommunityIcons name="clock-alert-outline" size={24} color="#B45309" />
             <View style={{ flex: 1 }}>
-              <Text style={s.delayText}>{scheduleSummary.delayedApartments} apartamento(s) com atrasos detectados</Text>
+              <Text style={s.delayText}>
+                {board.delayedApartments} apartamento(s) com etapas fora do prazo
+              </Text>
               {scheduleSummary.mostDelayedService && (
                 <Text style={s.delayMeta}>
                   Maior atraso: {scheduleSummary.mostDelayedService.service} ({scheduleSummary.mostDelayedService.delayDays}d)
@@ -151,31 +163,13 @@ export default function CronogramaScreen() {
             </View>
           )}
         </View>
+      ) : board.scheduledSteps > 0 ? (
+        <View style={[s.section, s.sectionCentered]}>
+          <MaterialCommunityIcons name="check-all" size={40} color="#047857" />
+          <Text style={s.allClearTitle}>Cronograma em dia</Text>
+          <Text style={s.emptySub}>Nenhuma etapa planejada passou do prazo.</Text>
+        </View>
       ) : null}
-
-      {/* FERRAMENTAS — each card has its own border color */}
-      <View style={s.linksSection}>
-        {[
-          { href: '/cronograma/obra', icon: 'chart-gantt', label: 'Cronograma da Obra', sub: 'Planejado × Executado por frente e pavimento', color: '#0D9488', border: '#14B8A6', bg: '#F0FDFA' },
-          { href: '/cronograma/diagnostico', icon: 'stethoscope', label: 'Diagnóstico do MVP', sub: 'Análise completa do estado da obra', color: '#1D4ED8', border: '#3B82F6', bg: '#EFF6FF' },
-          { href: '/cronograma/servicos-etapas', icon: 'cog-outline', label: 'Serviços e Etapas', sub: 'Configure checklist, cronograma e medições', color: '#6D28D9', border: '#8B5CF6', bg: '#F5F3FF' },
-          { href: '/cronograma/medicoes', icon: 'ruler', label: 'Medições', sub: 'Registros financeiros por serviço', color: '#047857', border: '#10B981', bg: '#F0FDF4' },
-        ].map((item) => (
-          <Pressable
-            key={item.href}
-            onPress={() => router.push(item.href as any)}
-            style={[s.linkCard, { borderColor: '#E2E8F0', backgroundColor: '#FFFFFF' }]}>
-            <View style={[s.linkIcon, { backgroundColor: item.bg }]}>
-              <MaterialCommunityIcons name={item.icon as any} size={20} color={item.color} />
-            </View>
-            <View style={s.linkContent}>
-              <Text style={[s.linkLabel, { color: item.color }]}>{item.label}</Text>
-              <Text style={s.linkSub}>{item.sub}</Text>
-            </View>
-            <MaterialCommunityIcons name="chevron-right" size={18} color={item.border} />
-          </Pressable>
-        ))}
-      </View>
 
     </ScrollView>
   );
@@ -185,42 +179,61 @@ const s = StyleSheet.create({
   scroll: { backgroundColor: '#F8FAFC' },
   container: { gap: 12, paddingBottom: 40, paddingHorizontal: 16 },
 
+  // o container já aplica padding/gap; o banner não precisa das margens próprias
+  readOnly: { marginHorizontal: 0, marginTop: 0 },
+
+  // hero — Cronograma da Obra
+  hero: {
+    backgroundColor: TEAL,
+    borderRadius: 16,
+    padding: 18,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+  },
+  heroPressed: { backgroundColor: TEAL_DEEP },
+  heroIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  heroText: { flex: 1, gap: 3 },
+  heroTitle: { color: '#FFFFFF', fontSize: 17, fontWeight: '900' },
+  heroSub: { color: 'rgba(255,255,255,0.85)', fontSize: 12.5, lineHeight: 17 },
+
   // kpi
   kpiRow: { flexDirection: 'row', gap: 12 },
-  kpiCard: { flex: 1, borderRadius: 14, padding: 16, alignItems: 'center', gap: 6, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#E2E8F0' },
-  kpiBorderRed:   { borderColor: '#E2E8F0' },
-  kpiBorderAmber: { borderColor: '#E2E8F0' },
-  kpiBorderGreen: { borderColor: '#E2E8F0' },
+  kpiCard: {
+    flex: 1,
+    borderRadius: 14,
+    padding: 16,
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
   kpiValue: { fontSize: 32, fontWeight: '900' },
   kpiLabel: { color: '#475569', fontSize: 12, fontWeight: '600', textAlign: 'center' },
 
   // section containers
   section: { backgroundColor: '#FFFFFF', borderRadius: 16, padding: 16, gap: 12, borderWidth: 1, borderColor: '#E2E8F0' },
-  sectionRed:     { borderColor: '#E2E8F0' },
-  sectionAmber:   { borderColor: '#E2E8F0' },
-  sectionGreen:   { borderColor: '#E2E8F0' },
-  sectionCentered: { alignItems: 'center', paddingVertical: 28 },
-  sectionTitle: { fontSize: 15, fontWeight: '900' },
+  sectionCentered: { alignItems: 'center', paddingVertical: 26, gap: 8 },
+  sectionTitle: { fontSize: 15, fontWeight: '900', color: '#0F172A' },
 
-  // all clear
+  // principal etapa
+  topStepRow: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#F0FDFA', borderRadius: 10, padding: 12 },
+  topStepIcon: { width: 44, height: 44, borderRadius: 12, backgroundColor: '#CCFBF1', alignItems: 'center', justifyContent: 'center' },
+  topStepName: { color: '#0F172A', fontSize: 14, fontWeight: '800' },
+  topStepMeta: { color: TEAL_DEEP, fontSize: 12, fontWeight: '600', marginTop: 2 },
+
+  // estados vazios / tudo certo
   allClearTitle: { color: '#047857', fontSize: 16, fontWeight: '800' },
-  allClearSub: { color: '#94A3B8', fontSize: 13, textAlign: 'center', lineHeight: 20 },
-
-  // bottleneck
-  blockerRow: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#FEF2F2', borderRadius: 10, padding: 12 },
-  blockerIconWrap: { width: 44, height: 44, borderRadius: 12, backgroundColor: '#FEE2E2', alignItems: 'center', justifyContent: 'center' },
-  blockerService: { color: '#0F172A', fontSize: 14, fontWeight: '800' },
-  blockerMeta: { color: '#B91C1C', fontSize: 12, fontWeight: '600', marginTop: 2 },
-
-  // chart
-  svcRow: { gap: 6 },
-  svcRowHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 8 },
-  svcName: { color: '#0F172A', flex: 1, fontSize: 13, fontWeight: '700' },
-  impactBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 },
-  impactText: { fontSize: 10, fontWeight: '900' },
-  barTrack: { height: 8, backgroundColor: '#E2E8F0', borderRadius: 999, overflow: 'hidden' },
-  barFill: { height: '100%', borderRadius: 999 },
-  barMeta: { color: '#94A3B8', fontSize: 11 },
+  emptyTitle: { color: '#334155', fontSize: 16, fontWeight: '800' },
+  emptySub: { color: '#94A3B8', fontSize: 13, textAlign: 'center', lineHeight: 19 },
 
   // delays
   delayRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, backgroundColor: '#FFFBEB', borderRadius: 10, padding: 12 },
@@ -228,12 +241,4 @@ const s = StyleSheet.create({
   delayMeta: { color: '#B45309', fontSize: 12, fontWeight: '600', marginTop: 4 },
   delayTowerRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   delayTowerText: { color: '#B45309', fontSize: 13, fontWeight: '600' },
-
-  // links
-  linksSection: { gap: 10 },
-  linkCard: { borderRadius: 14, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12, borderWidth: 1 },
-  linkIcon: { width: 44, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  linkContent: { flex: 1, gap: 2 },
-  linkLabel: { fontSize: 14, fontWeight: '800' },
-  linkSub: { color: '#64748B', fontSize: 12 },
 });

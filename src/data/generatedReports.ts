@@ -1,7 +1,7 @@
-import { getInspectionPhotosFromStorage, getInspectionPhotoStorageKey } from '@/src/data/localInspectionPhotos';
-import { getInspectionVisitsFromStorage, getInspectionVisitStorageKey, localResponsible } from '@/src/data/localInspectionVisits';
-import { formatCurrency, loadAllMeasurements, parseBrDateForMeasurement } from '@/src/data/localMeasurements';
-import { apartments, getTowerById, project } from '@/src/data/mockObras';
+import type { InspectionPhoto } from '@/src/data/localInspectionPhotos';
+import type { InspectionVisit } from '@/src/data/localInspectionVisits';
+import { formatCurrency, parseBrDateForMeasurement, type Measurement } from '@/src/data/localMeasurements';
+import type { Apartment, Tower } from '@/src/data/mockObras';
 import { getScheduleRows, getScheduledChecklistForApartment } from '@/src/data/schedule';
 import { getBlockedServiceGroups } from '@/src/data/serviceBlockers';
 import { isCriticalStageForStatus } from '@/src/data/serviceStages';
@@ -28,6 +28,30 @@ export type ReportFilters = {
   periodStart: string;
   service: string;
   tower: string;
+};
+
+// Dados reais do banco, injetados pela tela. Este módulo é puro e síncrono: não
+// consulta o Supabase nem o localStorage, só formata o que recebe. Os
+// apartamentos precisam chegar com o `checklist` já carregado (o contexto os
+// entrega vazios por causa do lazy loading).
+export type ReportDataSource = {
+  projectName: string;
+  responsible: string;
+  towers: Tower[];
+  apartments: Apartment[];
+  measurements: Measurement[];
+  photosByApartment: Map<string, InspectionPhoto[]>;
+  visitsByApartment: Map<string, InspectionVisit[]>;
+};
+
+export const emptyReportDataSource: ReportDataSource = {
+  projectName: '',
+  responsible: '',
+  towers: [],
+  apartments: [],
+  measurements: [],
+  photosByApartment: new Map(),
+  visitsByApartment: new Map(),
 };
 
 export type GeneratedReport = {
@@ -202,14 +226,14 @@ const renderTable = (headers: string[], rows: (string | number)[][], emptyMessag
 
 const getVisitVariationLabel = (variation: number) => {
   if (variation > 0) {
-    return `EvoluÃ§Ã£o: +${variation} p.p.`;
+    return `Evolução: +${variation} p.p.`;
   }
 
   if (variation < 0) {
-    return `RegressÃ£o: ${variation} p.p.`;
+    return `Regressão: ${variation} p.p.`;
   }
 
-  return 'Sem variaÃ§Ã£o: 0 p.p.';
+  return 'Sem variação: 0 p.p.';
 };
 
 const escapeCsvValue = (value: string | number) => {
@@ -237,10 +261,13 @@ export const createGeneratedReport = (
   kind: ReportKind,
   filters: ReportFilters,
   options: ReportContentOptions,
+  data: ReportDataSource,
 ): GeneratedReport => {
   const validationMessage = validateReportFilters(kind, filters);
   const isValid = !validationMessage;
-  const measurements = loadAllMeasurements(apartments.map((apartment) => apartment.id));
+  const { apartments, measurements } = data;
+  const towersById = new Map(data.towers.map((tower) => [tower.id, tower]));
+  const getTowerById = (id: string) => towersById.get(id);
   const apartmentFilter = normalizeApartmentFilter(filters.apartment);
   const selectedApartments = isValid ? apartments.filter((apartment) => {
     const tower = getTowerById(apartment.towerId);
@@ -267,10 +294,10 @@ export const createGeneratedReport = (
 
   const textLines = [
     'RELATÓRIO DE OBRA',
-    `Obra: ${project.name}`,
+    `Obra: ${data.projectName}`,
     `Data: ${filters.date || getToday()}`,
     `Tipo: ${getReportTitle(kind)}`,
-    `Responsável: ${localResponsible}`,
+    `Responsável: ${data.responsible}`,
     '',
   ];
   if (validationMessage) {
@@ -300,8 +327,8 @@ export const createGeneratedReport = (
       matchesText(measurement.contractor, filters.contractor) &&
       isInPeriod(measurement.periodStart, filters.periodStart, filters.periodEnd),
     );
-    const photos = getInspectionPhotosFromStorage(getInspectionPhotoStorageKey(apartment.id));
-    const visits = getInspectionVisitsFromStorage(getInspectionVisitStorageKey(apartment.id));
+    const photos = data.photosByApartment.get(apartment.id) ?? [];
+    const visits = data.visitsByApartment.get(apartment.id) ?? [];
     const latestVisit = [...visits].sort((first, second) => new Date(second.date).getTime() - new Date(first.date).getTime())[0];
 
     if (options.includeSummary) {
@@ -314,46 +341,46 @@ export const createGeneratedReport = (
       textLines.push(`Atrasos: ${delayedRows.length}`);
       textLines.push(`Medições: ${formatCurrency(apartmentMeasurements.reduce((total, measurement) => total + measurement.totalValue, 0))}`);
       textLines.push('');
-      csvRows.push(['resumo', project.name, towerLabel, apartment.number, emptyValue, status.label, emptyValue, emptyValue, emptyBlockValue, Math.max(0, ...scheduleRows.map((row) => row.delayDays)), emptyValue, emptyValue, emptyValue, emptyValue, apartmentMeasurements.reduce((total, measurement) => total + measurement.totalValue, 0), filters.date || getToday()]);
+      csvRows.push(['resumo', data.projectName, towerLabel, apartment.number, emptyValue, status.label, emptyValue, emptyValue, emptyBlockValue, Math.max(0, ...scheduleRows.map((row) => row.delayDays)), emptyValue, emptyValue, emptyValue, emptyValue, apartmentMeasurements.reduce((total, measurement) => total + measurement.totalValue, 0), filters.date || getToday()]);
     }
 
     if (options.includeChecklist) {
       checklist.forEach((item) => {
-        csvRows.push(['checklist', project.name, towerLabel, apartment.number, item.label, item.state, emptyValue, item.comment ?? emptyValue, emptyBlockValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, filters.date || getToday()]);
+        csvRows.push(['checklist', data.projectName, towerLabel, apartment.number, item.label, item.state, emptyValue, item.comment ?? emptyValue, emptyBlockValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, filters.date || getToday()]);
       });
     }
 
     if (options.includeIssues) {
       pendingItems.forEach((item) => {
-        csvRows.push(['pendencia', project.name, towerLabel, apartment.number, item.label, item.state === 'pending' ? 'Não iniciado' : 'Em andamento', 'Média', item.comment ?? 'Pendência de vistoria', (getBlockedServiceGroups([item])[0]?.blockedServices ?? []).join(', ') || emptyBlockValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, filters.date || getToday()]);
+        csvRows.push(['pendencia', data.projectName, towerLabel, apartment.number, item.label, item.state === 'pending' ? 'Não iniciado' : 'Em andamento', 'Média', item.comment ?? 'Pendência de vistoria', (getBlockedServiceGroups([item])[0]?.blockedServices ?? []).join(', ') || emptyBlockValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, filters.date || getToday()]);
       });
     }
 
     if (options.includeBlocked) {
       blockedGroups.forEach((group) => {
-        csvRows.push(['servico_travado', project.name, towerLabel, apartment.number, group.pendingService, group.currentStatus, emptyValue, emptyValue, group.pendingService, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, filters.date || getToday()]);
+        csvRows.push(['servico_travado', data.projectName, towerLabel, apartment.number, group.pendingService, group.currentStatus, emptyValue, emptyValue, group.pendingService, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, filters.date || getToday()]);
       });
     }
 
     if (options.includeSchedule) {
       scheduleRows.forEach((row) => {
-        csvRows.push(['cronograma', project.name, towerLabel, apartment.number, row.service, row.scheduleStatus, emptyValue, emptyValue, row.blockedServices.join(', ') || emptyBlockValue, row.delayDays, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, row.plannedEnd || filters.date || getToday()]);
+        csvRows.push(['cronograma', data.projectName, towerLabel, apartment.number, row.service, row.scheduleStatus, emptyValue, emptyValue, row.blockedServices.join(', ') || emptyBlockValue, row.delayDays, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, row.plannedEnd || filters.date || getToday()]);
       });
     }
 
     if (options.includeMeasurements) {
       apartmentMeasurements.forEach((measurement) => {
-        csvRows.push(['medicao', project.name, towerLabel, apartment.number, getNomeServicoOuEtapa(measurement), measurement.status, emptyValue, emptyValue, emptyBlockValue, emptyValue, measurement.contractor || emptyValue, measurement.quantity, measurement.unit || measurement.unidadeMedicao || emptyValue, measurement.unitPrice, measurement.totalValue, measurement.periodStart || measurement.periodoInicio || filters.date || getToday()]);
+        csvRows.push(['medicao', data.projectName, towerLabel, apartment.number, getNomeServicoOuEtapa(measurement), measurement.status, emptyValue, emptyValue, emptyBlockValue, emptyValue, measurement.contractor || emptyValue, measurement.quantity, measurement.unit || measurement.unidadeMedicao || emptyValue, measurement.unitPrice, measurement.totalValue, measurement.periodStart || measurement.periodoInicio || filters.date || getToday()]);
       });
     }
 
     if (options.includeHistory && latestVisit) {
-      csvRows.push(['visita', project.name, towerLabel, apartment.number, emptyValue, statusConfig[latestVisit.statusAfter].label, emptyValue, getVisitVariationLabel(latestVisit.evolution), emptyBlockValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, formatReportDateTime(latestVisit.date)]);
+      csvRows.push(['visita', data.projectName, towerLabel, apartment.number, emptyValue, statusConfig[latestVisit.statusAfter].label, emptyValue, getVisitVariationLabel(latestVisit.evolution), emptyBlockValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, formatReportDateTime(latestVisit.date)]);
     }
 
     if (options.includePhotos) {
       photos.slice(0, 6).forEach((photo) => {
-        csvRows.push(['foto', project.name, towerLabel, apartment.number, photo.service, 'Anexada', emptyValue, photo.comment || emptyValue, emptyBlockValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, formatReportDateTime(photo.dataHora ?? photo.createdAt)]);
+        csvRows.push(['foto', data.projectName, towerLabel, apartment.number, photo.service, 'Anexada', emptyValue, photo.comment || emptyValue, emptyBlockValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, emptyValue, formatReportDateTime(photo.dataHora ?? photo.createdAt)]);
       });
     }
 
@@ -529,10 +556,10 @@ export const createGeneratedReport = (
           <header class="report-header">
             <h1>${escapeHtml(getReportTitle(kind))}</h1>
             <div class="header-grid">
-              <span><strong>Obra:</strong> ${escapeHtml(project.name)}</span>
+              <span><strong>Obra:</strong> ${escapeHtml(data.projectName)}</span>
               <span><strong>Data:</strong> ${escapeHtml(filters.date || getToday())}</span>
               <span><strong>Gerado em:</strong> ${escapeHtml(generatedAtText)}</span>
-              <span><strong>Responsável:</strong> ${escapeHtml(localResponsible)}</span>
+              <span><strong>Responsável:</strong> ${escapeHtml(data.responsible)}</span>
               <span><strong>Tipo:</strong> ${escapeHtml(getReportTitle(kind))}</span>
             </div>
           </header>
@@ -564,7 +591,7 @@ export const createGeneratedReport = (
   };
 };
 
-export const canGenerateReportText = () =>
+export const canGenerateReportText = (data: ReportDataSource) =>
   createGeneratedReport('daily', {
     apartment: '',
     contractor: '',
@@ -582,4 +609,4 @@ export const canGenerateReportText = () =>
     includePhotos: false,
     includeSchedule: true,
     includeSummary: true,
-  }).text.length > 0;
+  }, data).text.length > 0;

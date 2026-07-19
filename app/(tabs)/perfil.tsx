@@ -1,6 +1,6 @@
 import { useRouter } from 'expo-router';
-import { useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Animated, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Text } from '@/src/ui/Text';
@@ -21,10 +21,29 @@ export default function PerfilScreen() {
   const [nameDraft, setNameDraft] = useState('');
   const [savingName, setSavingName] = useState(false);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
+  const [switchedTo, setSwitchedTo] = useState<string | null>(null);
 
   const displayName = profile?.name?.trim() || user?.email?.split('@')[0] || 'Usuário';
   const email = profile?.email || user?.email || '';
   const initial = displayName.charAt(0).toUpperCase();
+
+  // Toast de troca de obra — mesmo padrão do aviso de etapa concluída na tela
+  // de apartamentos: pílula ancorada embaixo, some sozinha.
+  const toastAnim = useRef(new Animated.Value(0)).current;
+  const hideToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showSwitchToast = useCallback((obraName: string) => {
+    setSwitchedTo(obraName);
+    Animated.timing(toastAnim, { toValue: 1, duration: 180, useNativeDriver: true }).start();
+    if (hideToastTimerRef.current) clearTimeout(hideToastTimerRef.current);
+    hideToastTimerRef.current = setTimeout(() => {
+      Animated.timing(toastAnim, { toValue: 0, duration: 220, useNativeDriver: true }).start(() => setSwitchedTo(null));
+    }, 3400);
+  }, [toastAnim]);
+
+  useEffect(() => () => {
+    if (hideToastTimerRef.current) clearTimeout(hideToastTimerRef.current);
+  }, []);
 
   const startEdit = () => {
     setNameDraft(profile?.name ?? '');
@@ -46,15 +65,17 @@ export default function PerfilScreen() {
     }
   };
 
+  // Troca a obra sem sair do Perfil: o toast confirma qual obra ficou ativa.
   const onPickObra = async (id: string) => {
-    if (id === activeObraId) {
-      router.back();
-      return;
-    }
+    if (id === activeObraId || switchingId) return;
+    const obra = myObras.find((o) => o.id === id);
     setSwitchingId(id);
-    await switchObra(id);
-    setSwitchingId(null);
-    router.back();
+    try {
+      await switchObra(id);
+      if (obra) showSwitchToast(obra.name);
+    } finally {
+      setSwitchingId(null);
+    }
   };
 
   return (
@@ -100,7 +121,7 @@ export default function PerfilScreen() {
         </View>
       </View>
 
-      <ScrollView contentContainerStyle={[s.scroll, { paddingBottom: insets.bottom + 24 }]} showsVerticalScrollIndicator={false}>
+      <ScrollView contentContainerStyle={s.scroll} showsVerticalScrollIndicator={false}>
         {/* ── Minhas obras ── */}
         <View style={s.sectionHeader}>
           <Text style={s.sectionTitle}>Minhas obras</Text>
@@ -142,13 +163,29 @@ export default function PerfilScreen() {
             );
           })
         )}
-
-        {/* ── Sair ── */}
-        <Pressable onPress={() => signOut()} style={s.logoutBtn}>
-          <MaterialCommunityIcons name="logout-variant" size={18} color="#B91C1C" />
-          <Text style={s.logoutText}>Sair da conta</Text>
-        </Pressable>
       </ScrollView>
+
+      {/* ── Sair — ancorado embaixo, acima da barra de abas ── */}
+      <Pressable onPress={() => signOut()} style={s.logoutBtn}>
+        <MaterialCommunityIcons name="logout-variant" size={18} color="#B91C1C" />
+        <Text style={s.logoutText}>Sair da conta</Text>
+      </Pressable>
+
+      {/* ── Toast: obra alterada ── */}
+      {switchedTo && (
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            s.switchToast,
+            {
+              opacity: toastAnim,
+              transform: [{ translateY: toastAnim.interpolate({ inputRange: [0, 1], outputRange: [16, 0] }) }],
+            },
+          ]}>
+          <MaterialCommunityIcons name="swap-horizontal" size={16} color="#FFFFFF" />
+          <Text style={s.switchToastText} numberOfLines={1}>Obra alterada — {switchedTo}</Text>
+        </Animated.View>
+      )}
     </View>
   );
 }
@@ -192,6 +229,22 @@ const s = StyleSheet.create({
   activePill: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#2563EB', borderRadius: 999, paddingHorizontal: 9, paddingVertical: 4 },
   activePillText: { color: '#FFFFFF', fontSize: 10.5, fontWeight: '800' },
 
-  logoutBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#FFFFFF', borderRadius: 14, borderWidth: 1, borderColor: '#FECACA', paddingVertical: 14, marginTop: 16 },
+  // botão solto, ancorado embaixo — a barra de abas já cobre a safe area
+  logoutBtn: {
+    marginHorizontal: 16, marginBottom: 12,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    backgroundColor: '#FFFFFF', borderRadius: 14, borderWidth: 1, borderColor: '#FECACA', paddingVertical: 14,
+  },
   logoutText: { color: '#B91C1C', fontSize: 14, fontWeight: '800' },
+
+  // toast de troca de obra — mesmo visual do aviso de etapa concluída, mas
+  // ancorado acima do rodapé de "Sair"
+  switchToast: {
+    position: 'absolute', left: 24, right: 24, bottom: 80,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    paddingVertical: 10, paddingHorizontal: 18, borderRadius: 999,
+    backgroundColor: '#047857',
+    shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 4,
+  },
+  switchToastText: { flexShrink: 1, color: '#FFFFFF', fontSize: 13, fontWeight: '800', letterSpacing: 0.2 },
 });

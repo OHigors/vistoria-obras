@@ -1,8 +1,9 @@
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Text } from '@/src/ui/Text';
+import { ReadOnlyBanner } from '@/src/ui/ReadOnlyBanner';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { useObras } from '@/src/data/ObrasContext';
@@ -79,7 +80,7 @@ const StatusPill = ({ status }: { status: CronogramaStatus }) => {
 export default function CronogramaObraScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { apartments, towers, serviceStages, loading, refreshData } = useObras();
+  const { apartments, towers, serviceStages, loading, refreshData, canWrite } = useObras();
 
   const [view, setView] = useState<MainView>('pavimento');
   const [breakdown, setBreakdown] = useState<{ title: string; sub: string; tasks: CronogramaTask[] } | null>(null);
@@ -120,15 +121,21 @@ export default function CronogramaObraScreen() {
     };
   }, []);
 
-  useEffect(() => {
-    let alive = true;
-    Promise.all(apartments.map(async (a) => [a.id, await db.loadStepAssignments(a.id)] as const))
-      .then((entries) => alive && setAssignmentsByApt(Object.fromEntries(entries)))
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, [apartments]);
+  // Alocações de colaboradores: 1 query da obra inteira, recarregada quando a aba
+  // ganha foco (assim edições feitas na tela do apartamento aparecem ao voltar).
+  // Antes: 1 request por apartamento (~110), redisparado a cada toque de status
+  // porque o array `apartments` trocava de identidade mesmo com a aba em segundo plano.
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
+      db.loadAllStepAssignments()
+        .then((a) => alive && setAssignmentsByApt(a))
+        .catch(() => {});
+      return () => {
+        alive = false;
+      };
+    }, []),
+  );
 
   // Etapas de nível de torre (com datas) para o "Por pavimento".
   const loadTowerScheduled = useCallback(async () => {
@@ -156,9 +163,24 @@ export default function CronogramaObraScreen() {
     loadTowerScheduled().catch(() => {});
   }, [loadTowerScheduled]);
 
+  // LAZY: itens de todos os apartamentos, carregados ao FOCAR a aba (o boot não os
+  // traz mais). Cronograma não é a aba inicial, então isso só acontece ao abri-la.
+  const [checklistByApt, setChecklistByApt] = useState<Map<string, ScheduledChecklistItem[]>>(new Map());
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
+      db.loadAllChecklistItems().then((m) => alive && setChecklistByApt(m)).catch(() => {});
+      return () => { alive = false; };
+    }, []),
+  );
+  const apartmentsFull = useMemo(
+    () => apartments.map((a) => ({ ...a, checklist: checklistByApt.get(a.id) ?? [] })),
+    [apartments, checklistByApt],
+  );
+
   const result = useMemo(
-    () => buildCronogramaFromData(apartments, serviceStages, workers, assignmentsByApt, towers, towerScheduled),
-    [apartments, serviceStages, workers, assignmentsByApt, towers, towerScheduled],
+    () => buildCronogramaFromData(apartmentsFull, serviceStages, workers, assignmentsByApt, towers, towerScheduled),
+    [apartmentsFull, serviceStages, workers, assignmentsByApt, towers, towerScheduled],
   );
 
   // filtro de torre (aplica nas duas abas)
@@ -243,19 +265,20 @@ export default function CronogramaObraScreen() {
     const counts = new Map<string, number>();
     if (fApts.length === 0) return counts;
     const selectedSet = new Set(fApts);
-    for (const apt of apartments) {
+    for (const apt of apartmentsFull) {
       if (!selectedSet.has(apt.id)) continue;
       for (const item of apt.checklist as ScheduledChecklistItem[]) {
         counts.set(item.label, (counts.get(item.label) ?? 0) + 1);
       }
     }
     return counts;
-  }, [apartments, fApts]);
+  }, [apartmentsFull, fApts]);
 
   const hasTasks = result.tasks.length > 0;
   const isLoading = loading && apartments.length === 0;
 
   const openAdd = () => {
+    if (!canWrite) return;
     setFScope('apartamento');
     setFApts([]);
     setFNiveis([]);
@@ -304,6 +327,7 @@ export default function CronogramaObraScreen() {
     });
 
   const saveTask = async () => {
+    if (!canWrite) return;
     if (!fStage) return setFError('Selecione a etapa.');
     if (!isValidBrDate(fStart)) return setFError('Informe uma data de início válida (dd/mm/aaaa).');
     const days = Number(fDays);
@@ -349,7 +373,7 @@ export default function CronogramaObraScreen() {
 
     // ── Escopo: APARTAMENTOS ─────────────────────────────────────────────────
     if (fApts.length === 0) return setFError('Selecione ao menos um apartamento.');
-    const selectedApts = apartments.filter((a) => fApts.includes(a.id));
+    const selectedApts = apartmentsFull.filter((a) => fApts.includes(a.id));
     if (selectedApts.length === 0) return setFError('Apartamentos não encontrados.');
 
     setSaving(true);
@@ -416,9 +440,10 @@ export default function CronogramaObraScreen() {
   // Remove UMA etapa do cronograma limpando só as datas dela — o item continua
   // no checklist com o mesmo status. Se o breakdown atual ficar vazio, fecha-o.
   const removeOneStep = async () => {
+    if (!canWrite) return;
     const target = deleteTarget;
     if (!target) return;
-    const apt = apartments.find((a) => a.id === target.apartmentId);
+    const apt = apartmentsFull.find((a) => a.id === target.apartmentId);
     const item = (apt?.checklist as ScheduledChecklistItem[] | undefined)?.find((i) => i.id === target.id);
     if (!apt || !item) {
       setDeleteTarget(null);
@@ -451,10 +476,11 @@ export default function CronogramaObraScreen() {
   // Modo teste: tira todas as etapas do cronograma limpando as datas (previsto +
   // realizado). As etapas e o status continuam no checklist.
   const clearCronograma = async () => {
+    if (!canWrite) return;
     setClearing(true);
     try {
       for (const t of result.tasks) {
-        const apt = apartments.find((a) => a.id === t.apartmentId);
+        const apt = apartmentsFull.find((a) => a.id === t.apartmentId);
         const item = (apt?.checklist as ScheduledChecklistItem[] | undefined)?.find((i) => i.id === t.id);
         if (!apt || !item) continue;
         await db.upsertChecklistItem({
@@ -493,9 +519,11 @@ export default function CronogramaObraScreen() {
             <Pressable onPress={() => refreshData()} style={s.headerRefresh} hitSlop={8}>
               <MaterialCommunityIcons name="refresh" size={20} color="#FFFFFF" />
             </Pressable>
-            <Pressable onPress={openAdd} style={s.headerAdd} hitSlop={8}>
-              <MaterialCommunityIcons name="plus" size={22} color={C.primary} />
-            </Pressable>
+            {canWrite && (
+              <Pressable onPress={openAdd} style={s.headerAdd} hitSlop={8}>
+                <MaterialCommunityIcons name="plus" size={22} color={C.primary} />
+              </Pressable>
+            )}
           </View>
 
           {hasTasks && (
@@ -513,6 +541,8 @@ export default function CronogramaObraScreen() {
           )}
         </View>
 
+        {!canWrite && <ReadOnlyBanner />}
+
         {isLoading ? (
           <View style={s.empty}>
             <ActivityIndicator color={C.primary} />
@@ -529,10 +559,12 @@ export default function CronogramaObraScreen() {
               As barras aparecem para as etapas que já têm início e fim planejados no banco. Adicione uma tarefa para
               atribuir datas e responsáveis a uma etapa.
             </Text>
-            <Pressable onPress={openAdd} style={s.emptyBtn}>
-              <MaterialCommunityIcons name="plus" size={18} color="#FFFFFF" />
-              <Text style={s.emptyBtnText}>Adicionar tarefa</Text>
-            </Pressable>
+            {canWrite && (
+              <Pressable onPress={openAdd} style={s.emptyBtn}>
+                <MaterialCommunityIcons name="plus" size={18} color="#FFFFFF" />
+                <Text style={s.emptyBtnText}>Adicionar tarefa</Text>
+              </Pressable>
+            )}
           </View>
         ) : (
           <>
@@ -553,15 +585,19 @@ export default function CronogramaObraScreen() {
             </View>
 
             {/* ADD BUTTON */}
-            <Pressable onPress={openAdd} style={s.addBtn}>
-              <MaterialCommunityIcons name="plus-circle-outline" size={18} color={C.primary} />
-              <Text style={s.addBtnText}>Adicionar tarefa ao cronograma</Text>
-            </Pressable>
+            {canWrite && (
+              <>
+                <Pressable onPress={openAdd} style={s.addBtn}>
+                  <MaterialCommunityIcons name="plus-circle-outline" size={18} color={C.primary} />
+                  <Text style={s.addBtnText}>Adicionar tarefa ao cronograma</Text>
+                </Pressable>
 
-            <Pressable onPress={() => setClearOpen(true)} style={s.clearBtn}>
-              <MaterialCommunityIcons name="trash-can-outline" size={15} color="#B91C1C" />
-              <Text style={s.clearBtnText}>Limpar cronograma (teste)</Text>
-            </Pressable>
+                <Pressable onPress={() => setClearOpen(true)} style={s.clearBtn}>
+                  <MaterialCommunityIcons name="trash-can-outline" size={15} color="#B91C1C" />
+                  <Text style={s.clearBtnText}>Limpar cronograma (teste)</Text>
+                </Pressable>
+              </>
+            )}
 
             {/* TOWER FILTER (aplica nas duas abas) */}
             {towerOptions.length > 1 && (
