@@ -102,6 +102,10 @@ export const inspectionStyles = StyleSheet.create({
   obsDoneBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: '700' },
   // X para remover a foto — canto superior direito da caixa do comentário
   photoRemoveX: { position: 'absolute', top: 5, right: 5, zIndex: 2, width: 24, height: 24, alignItems: 'center', justifyContent: 'center' },
+  // Selo de leitura (viewer): pill que se ajusta ao conteúdo. NÃO reutiliza
+  // statusBtn, que é um botão flex:1 e distorce fora da linha de 4 botões.
+  statusReadOnly: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 7, paddingHorizontal: 12, borderRadius: 999, borderWidth: 1 },
+  statusReadOnlyText: { fontSize: 12, fontWeight: '800' },
   // emergency
   emergencyPreview: { alignItems: 'center', backgroundColor: '#FEF2F2', borderColor: '#FECACA', borderRadius: 8, borderWidth: 1, flexDirection: 'row', gap: 8, paddingHorizontal: 10, paddingVertical: 8 },
   emergencyPreviewText: { color: '#DC2626', flex: 1, fontSize: 12, fontWeight: '600' },
@@ -114,7 +118,9 @@ export const inspectionStyles = StyleSheet.create({
 
   // checklist
   checklistGroup: { gap: 10, paddingHorizontal: 16 },
-  checklistGroupHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingTop: 4 },
+  checklistGroupHeader: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingTop: 4 },
+  checklistGroupHeaderMain: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  groupMenuBtn: { padding: 4, borderRadius: 8 },
   checklistGroupDot: { width: 10, height: 10, borderRadius: 5 },
   checklistGroupTitle: { color: '#0F172A', fontSize: 13, fontWeight: '800', flex: 1 },
   checklistGroupCount: { color: '#94A3B8', fontSize: 11, fontWeight: '600' },
@@ -367,6 +373,27 @@ export const inspectionStyles = StyleSheet.create({
   // add-step modal
   addStepSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, maxHeight: '90%', paddingHorizontal: 22, paddingTop: 10, paddingBottom: 28, gap: 18 },
   addStepGrabber: { alignSelf: 'center', width: 40, height: 4, borderRadius: 999, backgroundColor: '#E2E8F0', marginBottom: 4 },
+  // Menu de ações em lote por grupo (bottom sheet).
+  groupMenuSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 18, paddingTop: 10, paddingBottom: 28, gap: 6 },
+  groupMenuTitle: { color: '#0F172A', fontSize: 15, fontWeight: '800' },
+  groupMenuSub: { color: '#94A3B8', fontSize: 12, fontWeight: '600', marginBottom: 6 },
+  groupMenuItem: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, paddingHorizontal: 10, borderRadius: 12, backgroundColor: '#F8FAFC' },
+  groupMenuItemDisabled: { opacity: 0.45 },
+  groupMenuItemText: { color: '#0F172A', fontSize: 14, fontWeight: '700' },
+  groupMenuItemHint: { color: '#64748B', fontSize: 11, marginTop: 1 },
+  groupMenuSection: { color: '#94A3B8', fontSize: 11, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 6, marginBottom: 2, marginLeft: 4 },
+  groupMenuStatusIcon: { width: 30, height: 30, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  groupMenuStatusAbbrev: { fontSize: 12, fontWeight: '800' },
+  groupMenuDivider: { height: 1, backgroundColor: '#E2E8F0', marginVertical: 6 },
+  // Feedback dentro do menu do grupo (não fecha o pop-up).
+  groupMsgBanner: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#ECFDF5', borderColor: '#A7F3D0', borderWidth: 1, borderRadius: 10, paddingVertical: 9, paddingHorizontal: 12, marginTop: 6, marginBottom: 2 },
+  groupMsgText: { flex: 1, color: '#047857', fontSize: 12, fontWeight: '700' },
+  // Dropdown de status.
+  groupDropdownTrigger: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 12, paddingHorizontal: 12, borderRadius: 12, borderWidth: 1, borderColor: '#E2E8F0', backgroundColor: '#F8FAFC' },
+  groupDropdownTriggerText: { flex: 1, color: '#0F172A', fontSize: 14, fontWeight: '700' },
+  groupDropdownList: { borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 12, backgroundColor: '#FFFFFF', overflow: 'hidden', marginTop: 4 },
+  groupDropdownOption: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 11, paddingHorizontal: 12, borderTopWidth: 1, borderTopColor: '#F1F5F9' },
+  groupDropdownOptionText: { flex: 1, color: '#0F172A', fontSize: 14, fontWeight: '700' },
   addStepHeader: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   addStepHeaderIcon: { width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: '#EFF6FF' },
   addStepCloseBtn: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', backgroundColor: '#F1F5F9' },
@@ -378,7 +405,11 @@ export const inspectionStyles = StyleSheet.create({
   addStepEmpty: { alignItems: 'center', justifyContent: 'center', paddingVertical: 28, gap: 8 },
   addStepEmptyText: { color: '#64748B', fontSize: 13, textAlign: 'center' },
   addStepGroup: { gap: 14 },
-  addStepGroupHeader: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, paddingHorizontal: 4 },
+  // Cada categoria vira um cartão (fundo + borda + faixa colorida à esquerda) para
+  // deixar clara a separação entre grupos; as etapas (brancas) contrastam com o fundo.
+  addStepGroupCard: { gap: 12, backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E2E8F0', borderLeftWidth: 4, borderRadius: 14, padding: 12 },
+  addStepGroupHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 12, paddingHorizontal: 4 },
+  addStepGroupHeaderMain: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 12 },
   addStepGroupDot: { width: 10, height: 10, borderRadius: 5 },
   addStepGroupTitle: { color: '#0F172A', fontSize: 14, fontWeight: '800', flex: 1 },
   addStepGroupCount: { color: '#64748B', fontSize: 12, fontWeight: '700', backgroundColor: '#F1F5F9', borderRadius: 999, paddingHorizontal: 9, paddingVertical: 2, minWidth: 24, textAlign: 'center' },
@@ -392,6 +423,8 @@ export const inspectionStyles = StyleSheet.create({
 
   // confirm dialogs
   confirmSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 22, gap: 12, alignItems: 'center' },
+  // Overlay de confirmação renderizado DENTRO de outro modal (fica por cima do sheet).
+  restoreOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.65)', justifyContent: 'flex-end' },
   confirmIcon: { width: 52, height: 52, borderRadius: 26, alignItems: 'center', justifyContent: 'center' },
   confirmTitle: { color: '#0F172A', fontSize: 17, fontWeight: '900', textAlign: 'center' },
   confirmSub: { color: '#475569', fontSize: 13, textAlign: 'center', lineHeight: 18 },
@@ -400,6 +433,8 @@ export const inspectionStyles = StyleSheet.create({
   confirmBtnGhostText: { color: '#475569', fontSize: 14, fontWeight: '800' },
   confirmBtnDanger: { flex: 1, borderRadius: 12, paddingVertical: 13, alignItems: 'center', backgroundColor: '#B91C1C' },
   confirmBtnDangerText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' },
+  confirmBtnPrimary: { flex: 1, borderRadius: 12, paddingVertical: 13, alignItems: 'center', backgroundColor: '#2563EB' },
+  confirmBtnPrimaryText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' },
 
   // back-to-top FAB
   backToTopFab: {

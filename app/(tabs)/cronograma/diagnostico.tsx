@@ -3,10 +3,12 @@ import { useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Text } from '@/src/ui/Text';
+import { ReadOnlyBanner } from '@/src/ui/ReadOnlyBanner';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import type { DiagnosticReport, DiagnosticStatus } from '@/src/data/diagnostics';
 import { createDiagnosticText, runMvpDiagnostics } from '@/src/data/diagnostics';
+import { useObras } from '@/src/data/ObrasContext';
 
 const statusStyle: Record<DiagnosticStatus, { background: string; color: string }> = {
   Atenção: { background: '#FEF3C7', color: '#B45309' },
@@ -17,6 +19,7 @@ const statusStyle: Record<DiagnosticStatus, { background: string; color: string 
 export default function DiagnosticsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { canWrite } = useObras();
   const [report, setReport] = useState<DiagnosticReport>(() => runMvpDiagnostics());
   const [copyMessage, setCopyMessage] = useState('');
   const reportText = useMemo(() => createDiagnosticText(report), [report]);
@@ -48,6 +51,7 @@ export default function DiagnosticsScreen() {
           <Text style={styles.backBtnText}>Cronograma</Text>
         </Pressable>
       </View>
+      {!canWrite && <ReadOnlyBanner />}
       <ScrollView contentContainerStyle={styles.container}>
       <View style={styles.header}>
         <View>

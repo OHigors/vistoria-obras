@@ -218,6 +218,8 @@ export default function GeneralReportScreen() {
   const [allMeasurements, setAllMeasurements] = useState<Measurement[]>([]);
   const [visitsByApt, setVisitsByApt] = useState<Record<string, InspectionVisit[]>>({});
   const [photosByApt, setPhotosByApt] = useState<Record<string, InspectionPhoto[]>>({});
+  // LAZY: o contexto não traz mais o checklist — o relatório carrega os itens aqui.
+  const [checklistByApt, setChecklistByApt] = useState<Awaited<ReturnType<typeof db.loadAllChecklistItems>>>(new Map());
 
   const getTowerLabel = (towerId: string) => {
     const tower = towers.find((t) => t.id === towerId);
@@ -245,6 +247,8 @@ export default function GeneralReportScreen() {
   useFocusEffect(
     useCallback(() => {
       const load = async () => {
+        setChecklistByApt(await db.loadAllChecklistItems());
+
         const measurements = await db.loadAllMeasurements();
         setAllMeasurements(measurements);
 
@@ -277,7 +281,9 @@ export default function GeneralReportScreen() {
       };
     });
 
-    const apartmentRows: ApartmentReportRow[] = apartments.map((apartment) => {
+    const apartmentRows: ApartmentReportRow[] = apartments.map((apt) => {
+      // Mescla o checklist carregado sob demanda (o do contexto vem vazio).
+      const apartment = { ...apt, checklist: checklistByApt.get(apt.id) ?? [] };
       const checklist = getStoredChecklist(apartment);
       const progress = calculateProgress(checklist);
       const status = calculateStatus(checklist, progress);
@@ -380,7 +386,7 @@ export default function GeneralReportScreen() {
     );
 
     return { apartmentRows, blockedRows, measurements, pendingRows, scheduleRows, visitRows };
-  }, [refreshToken, apartments, towers, allMeasurements, visitsByApt, photosByApt, getApartmentById, getTowerLabel]);
+  }, [refreshToken, apartments, checklistByApt, towers, allMeasurements, visitsByApt, photosByApt, getApartmentById, getTowerLabel]);
 
   const filterCommon = <T extends { apartmentNumber: string; service?: string; status?: string; towerId: string }>(row: T) => {
     const matchesTower = towerFilter === allFilter || row.towerId === towerFilter;

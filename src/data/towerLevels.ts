@@ -44,5 +44,34 @@ export const LEVELS_ABOVE_FLOORS = TOWER_LEVELS.filter(
   (l) => !LEVELS_BELOW_FLOORS.includes(l),
 );
 
-export const getTowerLevel = (code: string): TowerLevelDef | undefined =>
-  TOWER_LEVELS.find((l) => l.code === code);
+// ── Segmentos verticais por pavimento ────────────────────────────────────────
+// Túnel do elevador e escadas: cada pavimento tem o seu trecho, com level_code
+// dinâmico `elevador-<n>` / `escada-<n>` (n = número do pavimento). Vivem na
+// mesma tabela e com o mesmo escopo dos níveis (tower_id + level_code), então a
+// tela de nível e o cronograma funcionam sem mudança.
+export const FLOOR_SEGMENTS = [
+  { prefix: 'elevador', label: 'Elevador', rail: 'EL', icon: 'elevator-passenger-outline', hint: 'Poço, guias, portas de pavimento' },
+  { prefix: 'escada', label: 'Escada', rail: 'ES', icon: 'stairs', hint: 'Lances, corrimão, guarda-corpo' },
+] as const;
+
+export type FloorSegmentPrefix = (typeof FLOOR_SEGMENTS)[number]['prefix'];
+
+export const floorSegmentCode = (prefix: FloorSegmentPrefix, floorOrder: number) =>
+  `${prefix}-${floorOrder}`;
+
+export const getTowerLevel = (code: string): TowerLevelDef | undefined => {
+  const fixed = TOWER_LEVELS.find((l) => l.code === code);
+  if (fixed) return fixed;
+  // Códigos dinâmicos dos segmentos por pavimento (elevador-8, escada-2...).
+  const m = /^(elevador|escada)-(\d+)$/.exec(code);
+  if (!m) return undefined;
+  const seg = FLOOR_SEGMENTS.find((sg) => sg.prefix === m[1])!;
+  const n = Number(m[2]);
+  return {
+    code,
+    label: `${seg.label} — ${n === 0 ? 'térreo' : `${n}º pavimento`}`,
+    rail: seg.rail,
+    kind: 'body',
+    hint: seg.hint,
+  };
+};

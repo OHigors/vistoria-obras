@@ -59,6 +59,28 @@ export default function VisaoGeralScreen() {
             })}
       </View>
 
+      {/* FERRAMENTAS — vindas da aba Cronograma, que agora é só o cronograma */}
+      {[
+        { href: '/cronograma/servicos-etapas', icon: 'cog-outline', label: 'Serviços e Etapas', desc: 'Configure checklist, cronograma e medições', color: '#6D28D9', bg: '#F5F3FF' },
+        { href: '/cronograma/medicoes', icon: 'ruler', label: 'Medições', desc: 'Registros financeiros por serviço', color: '#047857', bg: '#F0FDF4' },
+      ].map((item) => (
+        <Pressable
+          key={item.href}
+          onPress={() => router.push(item.href as any)}
+          accessibilityRole="button"
+          accessibilityLabel={`Abrir ${item.label}`}
+          style={({ pressed }) => [s.toolCard, pressed && s.toolCardPressed]}>
+          <View style={[s.toolIcon, { backgroundColor: item.bg }]}>
+            <MaterialCommunityIcons name={item.icon as any} size={20} color={item.color} />
+          </View>
+          <View style={s.toolContent}>
+            <Text style={[s.toolLabel, { color: item.color }]}>{item.label}</Text>
+            <Text style={s.toolDesc}>{item.desc}</Text>
+          </View>
+          <MaterialCommunityIcons name="chevron-right" size={18} color="#94A3B8" />
+        </Pressable>
+      ))}
+
       {/* MEDIÇÕES RECENTES */}
       <View style={s.section}>
         <View style={s.sectionHeaderRow}>
@@ -153,6 +175,23 @@ const s = StyleSheet.create({
   badgeAmberText: { color: '#475569', fontSize: 11, fontWeight: '700' },
   badgeGreen: { backgroundColor: '#F1F5F9', borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
   badgeGreenText: { color: '#475569', fontSize: 11, fontWeight: '700' },
+
+  // tools (Serviços e Etapas · Medições)
+  toolCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  toolCardPressed: { backgroundColor: '#F8FAFC' },
+  toolIcon: { width: 44, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  toolContent: { flex: 1, gap: 2 },
+  toolLabel: { fontSize: 14, fontWeight: '800' },
+  toolDesc: { color: '#64748B', fontSize: 12 },
 
   // activity
   activityRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 4 },

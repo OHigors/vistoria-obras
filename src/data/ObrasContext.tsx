@@ -3,7 +3,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import type { Apartment, ApartmentStatus, ChecklistItem, Tower } from '@/src/data/mockObras';
 import type { Measurement } from '@/src/data/localMeasurements';
-import type { ServiceStage } from '@/src/data/serviceStages';
+import { clearChecklistCache, setCachedChecklist } from '@/src/data/checklistCache';
+import { setServiceStagesCache, type ServiceStage } from '@/src/data/serviceStages';
 import type { ServiceCategory } from '@/src/data/serviceCategories';
 import type { ServiceUnit } from '@/src/data/serviceUnits';
 import * as db from '@/src/data/db';
@@ -26,6 +27,10 @@ type ObrasContextValue = {
   myObras: db.UserObra[];
   activeObraId: string;
   profile: db.Profile | null;
+  // papel do usuário na obra ativa + atalhos de permissão (espelho das RLS do banco).
+  role: string | null;
+  canWrite: boolean;       // pode editar dados (admin/owner/editor)
+  canManageObra: boolean;  // pode editar/apagar a própria obra (admin/owner)
   switchObra: (id: string) => Promise<void>;
   refreshProfile: () => Promise<void>;
   // helpers
@@ -56,6 +61,9 @@ const ObrasContext = createContext<ObrasContextValue>({
   myObras: [],
   activeObraId: OBRA_ID,
   profile: null,
+  role: null,
+  canWrite: true,
+  canManageObra: false,
   switchObra: async () => {},
   refreshProfile: async () => {},
   getTowerById: () => undefined,
@@ -85,6 +93,14 @@ export function ObrasProvider({ children }: { children: React.ReactNode }) {
 
   const loadAll = useCallback(async () => {
     try {
+      // Recarga completa (boot, troca de obra, pull-to-refresh): o cache de
+      // checklists guarda dados da obra anterior — não podem pintar nem por um frame.
+      clearChecklistCache();
+      // LAZY: o boot NÃO baixa mais os ~17k checklist_items. Os apartamentos vêm
+      // só com progresso/status (colunas denormalizadas) e `checklist: []`. Quem
+      // precisa dos itens carrega sob demanda: a tela do apartamento (o seu),
+      // o Corte (os da torre), o Cronograma (todos, ao focar a aba) e o Início
+      // (agregados via RPC obra_dashboard).
       const [proj, towerData, apartmentData, stageData, categoryData, unitData, measurementData] = await Promise.all([
         db.fetchProject(),
         db.fetchTowers(),
@@ -97,6 +113,8 @@ export function ObrasProvider({ children }: { children: React.ReactNode }) {
       setProject(proj);
       setTowers(towerData);
       setApartments(apartmentData);
+      // Espelha o catálogo real nos helpers síncronos (status/dependências/filtros).
+      setServiceStagesCache(stageData);
       setServiceStages(stageData);
       setServiceCategories(categoryData);
       setServiceUnits(unitData);
@@ -150,6 +168,7 @@ export function ObrasProvider({ children }: { children: React.ReactNode }) {
 
   const refreshServiceStages = useCallback(async () => {
     const data = await db.loadServiceStages();
+    setServiceStagesCache(data);
     setServiceStages(data);
   }, []);
 
@@ -168,8 +187,8 @@ export function ObrasProvider({ children }: { children: React.ReactNode }) {
   }, [bootstrap]);
 
   const refreshApartment = useCallback(async (apartmentId: string) => {
-    const fresh = await db.fetchApartments();
-    const updated = fresh.find((a) => a.id === apartmentId);
+    // Busca só este apartamento (antes: baixava a obra inteira via fetchApartments).
+    const updated = await db.fetchApartment(apartmentId);
     if (updated) {
       setApartments((prev) => prev.map((a) => (a.id === apartmentId ? updated : a)));
     }
@@ -177,6 +196,9 @@ export function ObrasProvider({ children }: { children: React.ReactNode }) {
 
   const updateApartmentLocal = useCallback(
     (apartmentId: string, progress: number, status: ApartmentStatus, checklist?: ChecklistItem[]) => {
+      // Espelha a edição no cache de checklists: voltando ao Corte/torre, os KPIs
+      // pintam já com a mudança (a atualização de fundo confirma logo depois).
+      if (checklist) setCachedChecklist(apartmentId, checklist);
       setApartments((prev) =>
         prev.map((a) =>
           a.id === apartmentId
@@ -203,6 +225,12 @@ export function ObrasProvider({ children }: { children: React.ReactNode }) {
     [apartments],
   );
 
+  // Papel do usuário na obra ativa → atalhos de permissão que espelham as RLS.
+  // Enquanto o papel não resolve (null), liberamos a UI (o banco é a barreira real).
+  const role = myObras.find((o) => o.id === activeObraId)?.role ?? null;
+  const canWrite = role === null || role === 'admin' || role === 'owner' || role === 'editor';
+  const canManageObra = role === 'admin' || role === 'owner';
+
   return (
     <ObrasContext.Provider
       value={{
@@ -217,6 +245,9 @@ export function ObrasProvider({ children }: { children: React.ReactNode }) {
         myObras,
         activeObraId,
         profile,
+        role,
+        canWrite,
+        canManageObra,
         switchObra,
         refreshProfile,
         getTowerById,

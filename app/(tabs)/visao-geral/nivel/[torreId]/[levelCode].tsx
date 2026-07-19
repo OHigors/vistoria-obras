@@ -1,14 +1,18 @@
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useMemo, useRef, useState } from 'react';
-import { Animated, Image, Modal, Platform, Pressable, ScrollView, TextInput, View } from 'react-native';
+import { Animated, Modal, Platform, Pressable, ScrollView, TextInput, View } from 'react-native';
+// expo-image: cache em disco/memória (a Image do RN rebaixa a foto inteira toda vez).
+import { Image } from 'expo-image';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
-import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
+import { preparePhotoForUpload } from '@/src/features/inspection/preparePhoto';
 import { Text } from '@/src/ui/Text';
 
 import * as db from '@/src/data/db';
+import { getCachedTowerChecklist } from '@/src/data/checklistCache';
 import { useObras } from '@/src/data/ObrasContext';
+import { useObraScopeGuard } from '@/src/data/useObraScopeGuard';
 import type { InspectionPhoto } from '@/src/data/localInspectionPhotos';
 import type { InspectionVisit, VisitChecklistCounts } from '@/src/data/localInspectionVisits';
 import { localResponsible } from '@/src/data/localInspectionVisits';
@@ -18,6 +22,8 @@ import { categoryOrderIndex, isCriticalStageForStatus } from '@/src/data/service
 import { formatDateBr, getScheduleRows, maskDateBr, type ScheduleFields } from '@/src/data/schedule';
 import { getTowerLevel } from '@/src/data/towerLevels';
 import { checklistConfig, getProgressMapStyle, statusConfig } from '@/src/ui/status';
+import { computeApartmentStatus as calcStatus } from '@/src/data/apartmentStatus';
+import { ReadOnlyBanner } from '@/src/ui/ReadOnlyBanner';
 import { inspectionStyles as s } from '@/src/features/inspection/inspectionStyles';
 
 type TowerItem = db.TowerChecklistItem;
@@ -76,25 +82,18 @@ const sortVisitsDesc = (visits: InspectionVisit[]) =>
   [...visits].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 const getVariationColor = (v: number) => (v > 0 ? '#047857' : v < 0 ? '#B91C1C' : '#64748B');
 const getVariationLabel = (v: number) => (v > 0 ? `+${v} p.p.` : v < 0 ? `${v} p.p.` : '0 p.p.');
-const calcStatus = (list: { state: ChecklistState }[], progress: number): ApartmentStatus => {
-  const pending = list.filter((i) => i.state === 'pending').length;
-  const partial = list.filter((i) => i.state === 'partial').length;
-  const manyPend = pending >= Math.max(3, Math.ceil(list.length * 0.35));
-  if (list.length === 0) return 'attention';
-  if (progress < 50 || manyPend) return 'critical';
-  if ((progress >= 50 && progress <= 74) || partial > 0) return 'attention';
-  if (progress >= 90 && pending === 0) return 'excellent';
-  return 'good';
-};
+// calcStatus vem de @/src/data/apartmentStatus (fórmula única compartilhada).
 
 export default function NivelDaTorreScreen() {
   const { torreId, levelCode } = useLocalSearchParams<{ torreId: string; levelCode: string }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { getTowerById, serviceStages } = useObras();
+  const { getTowerById, serviceStages, canWrite } = useObras();
 
   const tower = getTowerById(torreId);
   const level = getTowerLevel(levelCode);
+  // Trocou de obra? A torre desta URL não existe mais aqui — volta pra Visão Geral.
+  useObraScopeGuard(Boolean(tower), '/visao-geral');
 
   const [items, setItems] = useState<TowerItem[]>([]);
   const [photos, setPhotos] = useState<InspectionPhoto[]>([]);
@@ -137,7 +136,15 @@ export default function NivelDaTorreScreen() {
 
   const loadItems = useCallback(async () => {
     if (!torreId || !levelCode) return;
-    setLoading(true);
+    // Stale-while-revalidate: o Corte acabou de baixar o checklist da torre —
+    // pinta com ele na hora e atualiza por baixo (skeleton só sem cache).
+    const cached = getCachedTowerChecklist(torreId);
+    if (cached) {
+      setItems(cached.filter((i) => i.levelCode === levelCode));
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
     try {
       const all = await db.loadTowerChecklist(torreId);
       setItems(all.filter((i) => i.levelCode === levelCode));
@@ -203,9 +210,9 @@ export default function NivelDaTorreScreen() {
 
   // ── persistence ───────────────────────────────────────────────────────────
   const persistItem = useCallback((item: TowerItem, revertTo: TowerItem[]) => {
-    if (!torreId) return;
+    if (!canWrite || !torreId) return;
     db.upsertTowerChecklistItem({ ...item, towerId: torreId, levelCode: item.levelCode }).catch(() => setItems(revertTo));
-  }, [torreId]);
+  }, [canWrite, torreId]);
 
   // Mantém a visita aberta em dia sempre que uma etapa muda de estado.
   const registerVisitUpdate = (nextItems: TowerItem[], changedItemId?: string) => {
@@ -230,7 +237,7 @@ export default function NivelDaTorreScreen() {
   };
 
   const startNewVisit = () => {
-    if (!torreId || !levelCode || visits.some((v) => !v.finalized)) return;
+    if (!canWrite || !torreId || !levelCode || visits.some((v) => !v.finalized)) return;
     const now = new Date().toISOString();
     const statusAfter = calcStatus(items, progress);
     const issueIds = pendingItems.map((i) => i.id);
@@ -249,7 +256,7 @@ export default function NivelDaTorreScreen() {
   };
 
   const finishVisit = () => {
-    if (!torreId || !levelCode) return;
+    if (!canWrite || !torreId || !levelCode) return;
     setVisits((cur) => {
       const open = cur.find((v) => !v.finalized);
       if (!open) return cur;
@@ -281,6 +288,7 @@ export default function NivelDaTorreScreen() {
   }, [movedAnim]);
 
   const updateItemStatus = (itemId: string, next: ChecklistState) => {
+    if (!canWrite) return; // viewer: sem escrita (o banco também bloqueia)
     const prev = items;
     const target = prev.find((i) => i.id === itemId);
     if (!target) return;
@@ -297,7 +305,7 @@ export default function NivelDaTorreScreen() {
   };
 
   const addStepToLevel = async (nome: string, ordemExecucao: number) => {
-    if (!torreId || !levelCode) return;
+    if (!canWrite || !torreId || !levelCode) return;
     setAddStepOpen(false);
     setAddStepSearch('');
     try {
@@ -307,6 +315,7 @@ export default function NivelDaTorreScreen() {
   };
 
   const removeStepNow = () => {
+    if (!canWrite) return;
     const target = confirmRemove;
     setConfirmRemove(null);
     if (!target) return;
@@ -316,6 +325,7 @@ export default function NivelDaTorreScreen() {
   };
 
   const openComment = (itemId: string, current: string) => {
+    if (!canWrite) return;
     draftCommentsRef.current[itemId] = current;
     setDraftComments((cur) => ({ ...cur, [itemId]: current }));
     setExpandedComments((cur) => ({ ...cur, [itemId]: true }));
@@ -335,6 +345,7 @@ export default function NivelDaTorreScreen() {
   };
 
   const openEmergency = (itemId: string, current: string) => {
+    if (!canWrite) return;
     draftEmergenciesRef.current[itemId] = current;
     setDraftEmergencies((cur) => ({ ...cur, [itemId]: current }));
     setExpandedEmergencies((cur) => ({ ...cur, [itemId]: true }));
@@ -371,6 +382,7 @@ export default function NivelDaTorreScreen() {
   // Comentário da foto: edita um rascunho e só grava no "Salvar" (evita 1 escrita
   // por tecla, que causava erros). "Cancelar" descarta o rascunho.
   const savePhotoComment = (photoId: string) => {
+    if (!canWrite) return;
     const value = draftPhotoComments[photoId] ?? photos.find((p) => p.id === photoId)?.comment ?? '';
     updatePhotoComment(photoId, value);
     setDraftPhotoComments((cur) => { const n = { ...cur }; delete n[photoId]; return n; });
@@ -380,6 +392,7 @@ export default function NivelDaTorreScreen() {
   };
 
   const handlePickImage = async (source: 'camera' | 'gallery') => {
+    if (!canWrite) return;
     const itemId = photoPickerTarget;
     setPhotoPickerTarget(null);
     if (!itemId || !tower || !levelCode) return;
@@ -397,12 +410,14 @@ export default function NivelDaTorreScreen() {
     if (result.canceled || !result.assets?.[0]) return;
     const asset = result.assets[0];
     const pickedUri = Platform.OS === 'web' ? `data:image/jpeg;base64,${asset.base64}` : asset.uri;
-    const stripped = await manipulateAsync(pickedUri, [], { compress: 0.85, format: SaveFormat.JPEG });
+    // Limita o maior lado (1600px) e re-encoda — o re-encode também remove o EXIF.
+    const stripped = await preparePhotoForUpload(pickedUri, asset.width, asset.height);
     const localUri = stripped.uri;
     const createdAt = new Date().toISOString();
     const fileName = asset.fileName ?? `foto-${Date.now()}.jpg`;
     const photoId = crypto.randomUUID();
-    const storagePath = `${tower.id}/${levelCode}/${item.id}/${photoId}.jpg`;
+    // Prefixo obra_id/ → as políticas de Storage escopam o acesso por obra.
+    const storagePath = `${tower.obraId}/torre/${tower.id}/${levelCode}/${item.id}/${photoId}.jpg`;
     const optimistic: InspectionPhoto = {
       id: photoId, towerId: tower.id, apartmentId: '', itemId: item.id, serviceId: item.id,
       service: item.label, uri: localUri, storagePath: '', fileName,
@@ -424,6 +439,7 @@ export default function NivelDaTorreScreen() {
   };
 
   const removePhoto = (photoId: string) => {
+    if (!canWrite) return;
     setPhotos((cur) => cur.filter((p) => p.id !== photoId));
     setSelectedPhoto((cur) => (cur?.id === photoId ? null : cur));
     db.deletePhoto(photoId).catch(() => {});
@@ -484,6 +500,8 @@ export default function NivelDaTorreScreen() {
           </View>
         </View>
 
+        {!canWrite && <ReadOnlyBanner />}
+
         {/* VISIT BANNER */}
         {openVisit ? (
           <View style={s.visitBannerOpen}>
@@ -494,18 +512,20 @@ export default function NivelDaTorreScreen() {
                 <Text style={s.visitBannerSub}>Iniciada {formatPhotoDateTime(openVisit.date)}</Text>
               </View>
             </View>
-            <Pressable onPress={finishVisit} style={s.visitFinishBtn}>
-              <Text style={s.visitFinishBtnText}>Finalizar</Text>
-            </Pressable>
+            {canWrite && (
+              <Pressable onPress={finishVisit} style={s.visitFinishBtn}>
+                <Text style={s.visitFinishBtnText}>Finalizar</Text>
+              </Pressable>
+            )}
           </View>
-        ) : (
+        ) : canWrite ? (
           <Pressable onPress={startNewVisit} style={s.visitBannerNew}>
             <MaterialCommunityIcons name="plus-circle-outline" size={18} color="#2563EB" />
             <Text style={s.visitBannerNewText}>
               {finalizedVisits.length > 0 ? `${finalizedVisits.length} visita(s) · Iniciar nova` : 'Iniciar primeira visita'}
             </Text>
           </Pressable>
-        )}
+        ) : null}
 
         {/* KPI ROW */}
         <View style={s.kpiRow}>
@@ -609,10 +629,12 @@ export default function NivelDaTorreScreen() {
             <View style={s.checklistHeader}>
               <Text style={s.checklistProgress}>{okCount} / {items.length} concluídos</Text>
               <View style={s.checklistHeaderActions}>
-                <Pressable onPress={() => { setAddStepSearch(''); setAddStepOpen(true); }} style={s.addStepBtn}>
-                  <MaterialCommunityIcons name="plus-circle-outline" size={14} color="#2563EB" />
-                  <Text style={s.addStepBtnText}>Adicionar etapa</Text>
-                </Pressable>
+                {canWrite && (
+                  <Pressable onPress={() => { setAddStepSearch(''); setAddStepOpen(true); }} style={s.addStepBtn}>
+                    <MaterialCommunityIcons name="plus-circle-outline" size={14} color="#2563EB" />
+                    <Text style={s.addStepBtnText}>Adicionar etapa</Text>
+                  </Pressable>
+                )}
               </View>
             </View>
 
@@ -648,28 +670,39 @@ export default function NivelDaTorreScreen() {
                             </View>
                             {itemPhotos.length > 0 && <Text style={s.checkPhotoCount}>· {itemPhotos.length} foto(s)</Text>}
                           </View>
-                          <Pressable onPress={() => setConfirmRemove(item)} style={s.removeStepBtn} hitSlop={8}>
-                            <MaterialCommunityIcons name="close" size={16} color="#94A3B8" />
-                          </Pressable>
+                          {canWrite && (
+                            <Pressable onPress={() => setConfirmRemove(item)} style={s.removeStepBtn} hitSlop={8}>
+                              <MaterialCommunityIcons name="close" size={16} color="#94A3B8" />
+                            </Pressable>
+                          )}
                         </View>
 
-                        <View style={s.statusBtnRow}>
-                          {progressOrder.map((opt) => {
-                            const oc = checklistConfig[opt];
-                            const sel = item.state === opt;
-                            return (
-                              <Pressable
-                                key={opt}
-                                onPress={() => updateItemStatus(item.id, opt)}
-                                accessibilityRole="button"
-                                accessibilityState={{ selected: sel }}
-                                accessibilityLabel={oc.label}
-                                style={[s.statusBtn, sel && { backgroundColor: oc.background, borderColor: oc.color }]}>
-                                <Text style={[s.statusBtnLabel, { color: sel ? oc.color : '#64748B' }]} numberOfLines={2}>{oc.label}</Text>
-                              </Pressable>
-                            );
-                          })}
-                        </View>
+                        {canWrite ? (
+                          <View style={s.statusBtnRow}>
+                            {progressOrder.map((opt) => {
+                              const oc = checklistConfig[opt];
+                              const sel = item.state === opt;
+                              return (
+                                <Pressable
+                                  key={opt}
+                                  onPress={() => updateItemStatus(item.id, opt)}
+                                  accessibilityRole="button"
+                                  accessibilityState={{ selected: sel }}
+                                  accessibilityLabel={oc.label}
+                                  style={[s.statusBtn, sel && { backgroundColor: oc.background, borderColor: oc.color }]}>
+                                  <Text style={[s.statusBtnLabel, { color: sel ? oc.color : '#64748B' }]} numberOfLines={2}>{oc.label}</Text>
+                                </Pressable>
+                              );
+                            })}
+                          </View>
+                        ) : (
+                          <View style={[s.statusReadOnly, { backgroundColor: checklistConfig[item.state].background, borderColor: checklistConfig[item.state].color }]}>
+                            {checklistConfig[item.state].icon
+                              ? <MaterialCommunityIcons name={checklistConfig[item.state].icon!} size={13} color={checklistConfig[item.state].color} />
+                              : <Text style={[s.statusReadOnlyText, { color: checklistConfig[item.state].color }]}>{checklistConfig[item.state].abbrev}</Text>}
+                            <Text style={[s.statusReadOnlyText, { color: checklistConfig[item.state].color }]}>{checklistConfig[item.state].label}</Text>
+                          </View>
+                        )}
 
                         {item.emergency?.trim() && !expandedEmergencies[item.id] && (
                           <Pressable onPress={() => openEmergency(item.id, item.emergency ?? '')} style={s.emergencyPreview}>
@@ -732,24 +765,26 @@ export default function NivelDaTorreScreen() {
                           </View>
                         )}
 
-                        <View style={s.cardActions}>
-                          <Pressable
-                            onPress={() => expandedEmergencies[item.id] ? closeEmergency(item.id, false) : openEmergency(item.id, item.emergency ?? '')}
-                            style={s.cardActionBtn}>
-                            <MaterialCommunityIcons name="alert-outline" size={15} color="#64748B" />
-                            <Text style={s.cardActionBtnText}>Emergência</Text>
-                          </Pressable>
-                          <Pressable
-                            onPress={() => expandedComments[item.id] ? closeComment(item.id, false) : openComment(item.id, item.comment ?? '')}
-                            style={s.cardActionBtn}>
-                            <MaterialCommunityIcons name="note-plus-outline" size={15} color="#64748B" />
-                            <Text style={s.cardActionBtnText}>Observação</Text>
-                          </Pressable>
-                          <Pressable onPress={() => setPhotoPickerTarget(item.id)} style={s.cardActionBtn}>
-                            <MaterialCommunityIcons name="camera-plus-outline" size={15} color="#64748B" />
-                            <Text style={s.cardActionBtnText}>{itemPhotos.length > 0 ? `Fotos (${itemPhotos.length})` : 'Foto'}</Text>
-                          </Pressable>
-                        </View>
+                        {canWrite && (
+                          <View style={s.cardActions}>
+                            <Pressable
+                              onPress={() => expandedEmergencies[item.id] ? closeEmergency(item.id, false) : openEmergency(item.id, item.emergency ?? '')}
+                              style={s.cardActionBtn}>
+                              <MaterialCommunityIcons name="alert-outline" size={15} color="#64748B" />
+                              <Text style={s.cardActionBtnText}>Emergência</Text>
+                            </Pressable>
+                            <Pressable
+                              onPress={() => expandedComments[item.id] ? closeComment(item.id, false) : openComment(item.id, item.comment ?? '')}
+                              style={s.cardActionBtn}>
+                              <MaterialCommunityIcons name="note-plus-outline" size={15} color="#64748B" />
+                              <Text style={s.cardActionBtnText}>Observação</Text>
+                            </Pressable>
+                            <Pressable onPress={() => setPhotoPickerTarget(item.id)} style={s.cardActionBtn}>
+                              <MaterialCommunityIcons name="camera-plus-outline" size={15} color="#64748B" />
+                              <Text style={s.cardActionBtnText}>{itemPhotos.length > 0 ? `Fotos (${itemPhotos.length})` : 'Foto'}</Text>
+                            </Pressable>
+                          </View>
+                        )}
 
                         {itemPhotos.length > 0 && (
                           <View style={s.thumbGrid}>
@@ -757,7 +792,7 @@ export default function NivelDaTorreScreen() {
                               <View key={photo.id} style={s.thumbCard}>
                                 <Pressable onPress={() => setSelectedPhoto(photo)}>
                                   <View>
-                                    <Image source={{ uri: photo.uri }} style={s.thumb} />
+                                    <Image source={{ uri: photo.uri }} style={s.thumb} cachePolicy="memory-disk" recyclingKey={photo.id} transition={120} />
                                     {uploadStatus[photo.id] === 'uploading' && (
                                       <View style={s.thumbOverlay}>
                                         <MaterialCommunityIcons name="cloud-upload-outline" size={18} color="#FFFFFF" />
@@ -768,13 +803,17 @@ export default function NivelDaTorreScreen() {
                                 </Pressable>
                                 <View style={s.thumbBody}>
                                   <View style={s.obsBox}>
-                                    <Pressable onPress={() => setConfirmRemovePhoto(photo.id)} style={s.photoRemoveX} hitSlop={6}>
-                                      <MaterialCommunityIcons name="close" size={14} color="#64748B" />
-                                    </Pressable>
+                                    {canWrite && (
+                                      <Pressable onPress={() => setConfirmRemovePhoto(photo.id)} style={s.photoRemoveX} hitSlop={6}>
+                                        <MaterialCommunityIcons name="close" size={14} color="#64748B" />
+                                      </Pressable>
+                                    )}
                                     <TextInput
+                                      editable={canWrite}
                                       multiline onChangeText={(v) => setDraftPhotoComments((cur) => ({ ...cur, [photo.id]: v }))}
-                                      placeholder="Comentário..." placeholderTextColor="#94A3B8"
-                                      style={[s.obsTextarea, { paddingRight: 26 }]} value={draftPhotoComments[photo.id] ?? photo.comment ?? ''} />
+                                      placeholder={canWrite ? 'Comentário...' : 'Sem comentário'} placeholderTextColor="#94A3B8"
+                                      style={[s.obsTextarea, canWrite && { paddingRight: 26 }]} value={draftPhotoComments[photo.id] ?? photo.comment ?? ''} />
+                                    {canWrite && (
                                     <View style={s.obsBoxFooter}>
                                       <View />
                                       <View style={s.obsBoxFooterRight}>
@@ -786,6 +825,7 @@ export default function NivelDaTorreScreen() {
                                         </Pressable>
                                       </View>
                                     </View>
+                                    )}
                                   </View>
                                 </View>
                               </View>
@@ -859,7 +899,7 @@ export default function NivelDaTorreScreen() {
             <View style={s.gallery}>
               {photos.map((photo) => (
                 <Pressable key={`g-${photo.id}`} onPress={() => setSelectedPhoto(photo)} style={s.galleryCard}>
-                  <Image source={{ uri: photo.uri }} style={s.galleryImage} />
+                  <Image source={{ uri: photo.uri }} style={s.galleryImage} cachePolicy="memory-disk" recyclingKey={photo.id} transition={120} />
                   <View style={s.galleryInfo}>
                     <Text style={s.galleryService}>{photo.service}</Text>
                     <Text style={s.galleryMeta}>{formatPhotoDateTime(photo.dataHora ?? photo.createdAt)}</Text>
@@ -1028,7 +1068,7 @@ export default function NivelDaTorreScreen() {
           <View style={s.modalSheet}>
             {selectedPhoto && (
               <>
-                <Image source={{ uri: selectedPhoto.uri }} style={s.modalImage} />
+                <Image source={{ uri: selectedPhoto.uri }} style={s.modalImage} cachePolicy="memory-disk" />
                 <View style={s.modalInfo}>
                   <Text style={s.modalService}>{selectedPhoto.service}</Text>
                   <Text style={s.modalMeta}>{tower.name} / {level.label}</Text>

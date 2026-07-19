@@ -1,9 +1,12 @@
 import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
 import { useCallback, useMemo, useState } from 'react';
-import { Image, Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import { Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
+// expo-image: cache em disco/memória (a Image do RN rebaixa a foto inteira toda vez).
+import { Image } from 'expo-image';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Text } from '@/src/ui/Text';
+import { ReadOnlyBanner } from '@/src/ui/ReadOnlyBanner';
 import { useToast } from '@/src/ui/Toast';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
@@ -87,7 +90,7 @@ export default function MeasurementsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const toast = useToast();
-  const { towers, project, getApartmentById, getTowerById } = useObras();
+  const { towers, project, getApartmentById, getTowerById, canWrite } = useObras();
   const [measurements, setMeasurements] = useState<EnrichedMeasurement[]>([]);
   const [towerFilter, setTowerFilter] = useState(allFilter);
   const [apartmentFilter, setApartmentFilter] = useState('');
@@ -138,6 +141,7 @@ export default function MeasurementsScreen() {
   };
 
   const saveEdited = (measurement: EnrichedMeasurement) => {
+    if (!canWrite) return;
     if (!editDraft) return;
     const quantity = toNumber(editDraft.quantity);
     const unitPrice = toNumber(editDraft.unitPrice);
@@ -157,6 +161,7 @@ export default function MeasurementsScreen() {
   };
 
   const updateStatus = (measurement: EnrichedMeasurement, status: MeasurementStatus) => {
+    if (!canWrite) return;
     const approvedAt = status === 'Aprovado para pagamento' && measurement.status !== 'Aprovado para pagamento' ? new Date().toISOString() : measurement.approvedAt;
     const updated = { ...measurement, status, approvedAt };
     setMeasurements((prev) => prev.map((m) => (m.id === measurement.id ? updated : m)));
@@ -165,6 +170,7 @@ export default function MeasurementsScreen() {
   };
 
   const deleteMeasurement = (measurement: EnrichedMeasurement) => {
+    if (!canWrite) return;
     setMeasurements((prev) => prev.filter((m) => m.id !== measurement.id));
     db.deleteMeasurement(measurement.id).catch(() => toast.error('Erro ao excluir medição'));
     cancelEditing();
@@ -178,6 +184,7 @@ export default function MeasurementsScreen() {
           <Text style={s.backBtnText}>Cronograma</Text>
         </Pressable>
       </View>
+      {!canWrite && <ReadOnlyBanner />}
       <ScrollView style={s.scroll} contentContainerStyle={s.container}>
 
       {/* HEADER */}
@@ -364,7 +371,7 @@ export default function MeasurementsScreen() {
                   {measurement.comment ? <Text style={s.commentText}>{measurement.comment}</Text> : null}
                   {measurement.evidenceUri ? (
                     <Pressable onPress={() => setSelectedEvidence(measurement)} style={s.evidenceRow}>
-                      <Image source={{ uri: measurement.evidenceUri }} style={s.evidenceThumb} />
+                      <Image source={{ uri: measurement.evidenceUri }} style={s.evidenceThumb} cachePolicy="memory-disk" recyclingKey={measurement.id} transition={120} />
                       <Text style={s.detailChip}>Ver evidência: {measurement.evidenceFileName ?? 'foto local'}</Text>
                     </Pressable>
                   ) : null}
@@ -393,7 +400,7 @@ export default function MeasurementsScreen() {
           <View style={s.modalSheet}>
             {selectedEvidence?.evidenceUri && (
               <>
-                <Image source={{ uri: selectedEvidence.evidenceUri }} style={s.evidenceImage} />
+                <Image source={{ uri: selectedEvidence.evidenceUri }} style={s.evidenceImage} contentFit="contain" cachePolicy="memory-disk" />
                 <Text style={s.cardTitle}>{selectedEvidence.service}</Text>
                 <Text style={s.cardMeta}>{selectedEvidence.evidenceFileName ?? 'Evidência local'}</Text>
               </>
@@ -480,5 +487,6 @@ const s = StyleSheet.create({
   // modal
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(15,23,42,0.7)', justifyContent: 'flex-end' },
   modalSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 20, borderTopRightRadius: 20, gap: 12, padding: 20 },
-  evidenceImage: { borderRadius: 12, height: 320, resizeMode: 'contain', width: '100%' },
+  // contentFit="contain" agora é prop da Image (expo-image não lê resizeMode do estilo).
+  evidenceImage: { borderRadius: 12, height: 320, width: '100%' },
 });

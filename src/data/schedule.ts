@@ -222,6 +222,57 @@ export const getScheduleRows = (checklist: ScheduledChecklistItem[]): ScheduleRo
         : [],
   }));
 
+// Uma etapa "está no cronograma" quando recebeu data planejada. Toda etapa do
+// checklist existe desde que é criada, mas só entra no cronograma quando alguém
+// a planeja — e é essa diferença que os indicadores da aba Cronograma medem.
+export const isScheduledItem = (item: ScheduledChecklistItem) =>
+  Boolean(parseDate(item.plannedStart) || parseDate(item.plannedEnd));
+
+export type ScheduleBoardSummary = {
+  /** Apartamentos com ao menos uma etapa planejada que passou do prazo. */
+  delayedApartments: number;
+  /** Etapas planejadas que ainda não foram concluídas. */
+  pendingSteps: number;
+  /** Etapas planejadas, concluídas ou não — denominador do card de pendentes. */
+  scheduledSteps: number;
+  /** Etapa presente no cronograma do maior número de apartamentos. */
+  topStep?: { service: string; apartments: number };
+};
+
+export const summarizeScheduleBoard = (apartments: Apartment[]): ScheduleBoardSummary => {
+  let delayedApartments = 0;
+  let pendingSteps = 0;
+  let scheduledSteps = 0;
+  const apartmentsByStep = new Map<string, Set<string>>();
+
+  for (const apartment of apartments) {
+    const scheduled = getScheduledChecklistForApartment(apartment).filter(isScheduledItem);
+    let hasDelay = false;
+
+    for (const item of scheduled) {
+      scheduledSteps += 1;
+      if (getScheduleStatus(item) === 'Atrasado') hasDelay = true;
+      if (item.state !== 'ok' && item.state !== 'notApplicable') pendingSteps += 1;
+
+      const apartmentSet = apartmentsByStep.get(item.label) ?? new Set<string>();
+      apartmentSet.add(apartment.id);
+      apartmentsByStep.set(item.label, apartmentSet);
+    }
+
+    if (hasDelay) delayedApartments += 1;
+  }
+
+  // Empate resolvido por nome: sem isso a "principal etapa" trocava a cada
+  // render conforme a ordem em que os itens chegaram do banco.
+  const [topStep] = [...apartmentsByStep.entries()]
+    .map(([service, apartmentSet]) => ({ service, apartments: apartmentSet.size }))
+    .sort((first, second) =>
+      second.apartments - first.apartments || first.service.localeCompare(second.service, 'pt-BR'),
+    );
+
+  return { delayedApartments, pendingSteps, scheduledSteps, topStep };
+};
+
 export const summarizeApartmentSchedule = (apartment: Apartment): ApartmentScheduleSummary => {
   const rows = getScheduleRows(getScheduledChecklistForApartment(apartment));
   const delayedRows = rows.filter((row) => row.scheduleStatus === 'Atrasado');

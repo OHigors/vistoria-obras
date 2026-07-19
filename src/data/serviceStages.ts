@@ -24,7 +24,6 @@ export type ServiceStage = {
   dataFim: string;
 };
 
-export const serviceStagesStorageKey = 'config-etapas-servicos-obra';
 
 export const CATEGORY_ORDER = [
   'Serviços preliminares / Implantação',
@@ -174,10 +173,31 @@ const normalizeStage = (stage: Partial<ServiceStage>, index: number): ServiceSta
   };
 };
 
-// These sync shims are kept for backward compat with non-async callers (diagnostics.ts).
-// Real loading/saving goes through src/data/db.ts (loadServiceStages / saveServiceStages).
-export const getServiceStagesFromStorage = (): ServiceStage[] => defaultServiceStages;
-export const saveServiceStagesToStorage = (_stages: ServiceStage[]) => {};
+// Catálogo REAL (Supabase), espelhado aqui pelo ObrasContext em cada carga. Estes
+// helpers são síncronos e usados em pontos que não podem fazer await (cálculo de
+// status, mapa de dependências, filtro de etapas do checklist). Antes devolviam a
+// lista mock `defaultServiceStages`, cujos nomes NÃO batem com o catálogo real —
+// então dependências e etapas críticas nunca eram encontradas.
+let stagesCache: ServiceStage[] | null = null;
+
+// Índices derivados do catálogo. São reconstruídos só quando o catálogo muda.
+//
+// Antes eram recalculados A CADA CHAMADA, e as chamadas acontecem por ITEM de
+// checklist: o Corte de uma torre (36 aptos × ~160 etapas) fazia milhares de
+// reconstruções por render. Com o catálogo mock de ~12 etapas isso passava
+// despercebido; apontando para o catálogo real (176 etapas) virou o gargalo da
+// tela — e é gargalo de CPU, não de rede.
+let dependencyMapCache: Record<string, string[]> | null = null;
+let stagesByNameCache: Map<string, ServiceStage> | null = null;
+
+export const setServiceStagesCache = (stages: ServiceStage[]) => {
+  stagesCache = stages.length > 0 ? stages : null;
+  dependencyMapCache = null;
+  stagesByNameCache = null;
+};
+
+// Fallback para o mock só enquanto o catálogo real não carregou.
+export const getServiceStagesFromStorage = (): ServiceStage[] => stagesCache ?? defaultServiceStages;
 
 const sortStagesByExecution = (stages: ServiceStage[]) =>
   [...stages].sort((a, b) => a.ordemExecucao - b.ordemExecucao);
@@ -188,8 +208,16 @@ export const getEtapasChecklist = () => getEtapasAtivas().filter((s) => s.aparec
 export const getEtapasMedicao = () => getEtapasAtivas().filter((s) => s.apareceNaMedicao);
 export const getEtapasCronograma = () => getEtapasAtivas().filter((s) => s.apareceNoCronograma);
 
-export const getServiceStageByName = (serviceName: string) =>
-  getServiceStagesFromStorage().find((s) => s.nome === serviceName);
+// Índice por nome: o `.find` linear era refeito a cada item de checklist
+// (36 aptos × ~160 itens × 176 etapas ≈ 1 milhão de comparações por render).
+const getStagesByName = () => {
+  if (!stagesByNameCache) {
+    stagesByNameCache = new Map(getServiceStagesFromStorage().map((s) => [s.nome, s]));
+  }
+  return stagesByNameCache;
+};
+
+export const getServiceStageByName = (serviceName: string) => getStagesByName().get(serviceName);
 
 export const isCriticalStageForStatus = (serviceName: string) => {
   const stage = getServiceStageByName(serviceName);
@@ -249,8 +277,10 @@ export const getGroupStepChildren = (stages: ServiceStage[]): Record<string, str
   return map;
 };
 
-export const getServiceDependencyMap = () =>
-  getServiceStagesFromStorage().reduce<Record<string, string[]>>((dependencies, stage) => {
+export const getServiceDependencyMap = () => {
+  if (dependencyMapCache) return dependencyMapCache;
+
+  dependencyMapCache = getServiceStagesFromStorage().reduce<Record<string, string[]>>((dependencies, stage) => {
     if (stage.ativo && stage.servicosDependentes.length > 0) {
       dependencies[stage.nome] = stage.servicosDependentes;
     }
@@ -258,11 +288,14 @@ export const getServiceDependencyMap = () =>
     return dependencies;
   }, { ...defaultServiceDependencies });
 
+  return dependencyMapCache;
+};
+
 export const isServiceActiveForFeature = (
   serviceName: string,
   feature: 'checklist' | 'cronograma' | 'medicao',
 ) => {
-  const stage = getServiceStagesFromStorage().find((item) => item.nome === serviceName);
+  const stage = getStagesByName().get(serviceName);
 
   if (!stage) {
     return true;

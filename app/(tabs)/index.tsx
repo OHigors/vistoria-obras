@@ -1,19 +1,16 @@
-import { Link } from 'expo-router';
-import { useEffect, useMemo, useState } from 'react';
+import { Link, useFocusEffect } from 'expo-router';
+import { useCallback, useMemo, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { Text } from '@/src/ui/Text';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import Svg, { Circle, Text as SvgText } from 'react-native-svg';
 
 import * as db from '@/src/data/db';
 import type { Apartment } from '@/src/data/mockObras';
 import { formatCurrency } from '@/src/data/localMeasurements';
 import { useObras } from '@/src/data/ObrasContext';
-import { summarizeBottlenecks } from '@/src/data/serviceBlockers';
-import { summarizeSchedule } from '@/src/data/schedule';
-import { buildCronogramaFromData, type TowerScheduledInput } from '@/src/data/cronogramaReal';
-import { getTowerLevel, TOWER_LEVELS } from '@/src/data/towerLevels';
+import { getServiceDependencyMap } from '@/src/data/serviceStages';
+import { getTowerLevel } from '@/src/data/towerLevels';
 import { getProgressColor } from '@/src/ui/status';
 import { Skeleton } from '@/src/ui/Skeleton';
 
@@ -21,54 +18,6 @@ const pad2 = (n: number) => String(n).padStart(2, '0');
 const fmtDateBr = (d: Date) => `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()}`;
 
 type IconName = React.ComponentProps<typeof MaterialCommunityIcons>['name'];
-
-// ── Donut chart built with react-native-svg ─────────────────────────────────
-type Segment = { value: number; color: string };
-
-function DonutChart({ segments, size = 150 }: { segments: Segment[]; size?: number }) {
-  const r = Math.round(size * 0.34);
-  const sw = Math.round(size * 0.15);
-  const cx = size / 2;
-  const cy = size / 2;
-  const circumference = 2 * Math.PI * r;
-  const total = segments.reduce((t, seg) => t + seg.value, 0);
-
-  let angleDeg = -90;
-  return (
-    <Svg width={size} height={size}>
-      <Circle cx={cx} cy={cy} r={r} fill="none" stroke="#F1F5F9" strokeWidth={sw} />
-      {total > 0 && segments
-        .filter((seg) => seg.value > 0)
-        .map((seg, i) => {
-          const arc = (seg.value / total) * circumference;
-          const gap = circumference - arc;
-          const currentAngle = angleDeg;
-          angleDeg += (seg.value / total) * 360;
-          return (
-            <Circle
-              key={i}
-              cx={cx}
-              cy={cy}
-              r={r}
-              fill="none"
-              stroke={seg.color}
-              strokeWidth={sw}
-              strokeLinecap="round"
-              strokeDasharray={[arc, gap]}
-              strokeDashoffset={0}
-              transform={`rotate(${currentAngle}, ${cx}, ${cy})`}
-            />
-          );
-        })}
-      <SvgText x={cx} y={cy - 4} textAnchor="middle" fontSize={22} fontWeight="bold" fill="#0F172A">
-        {total}
-      </SvgText>
-      <SvgText x={cx} y={cy + 13} textAnchor="middle" fontSize={10} fill="#94A3B8">
-        unidades
-      </SvgText>
-    </Svg>
-  );
-}
 
 // ── KPI tile ─────────────────────────────────────────────────────────────────
 type Kpi = { key: string; icon: IconName; value: string | number; label: string; sub: string; color: string; bg: string };
@@ -101,81 +50,70 @@ type DashView = 'kpi' | 'dist';
 
 export default function DashboardScreen() {
   const insets = useSafeAreaInsets();
-  const { apartments, towers, project, measurements, serviceStages, profile, loading } = useObras();
+  const { apartments, towers, project, measurements, profile, loading } = useObras();
   const [alertOpen, setAlertOpen] = useState(false);
   const [kpiModal, setKpiModal] = useState<Kpi | null>(null);
   const [view, setView] = useState<DashView>('kpi');
 
-  const bottleneckSummary = useMemo(() => summarizeBottlenecks(apartments), [apartments]);
-  const scheduleSummary = useMemo(
-    () => summarizeSchedule(apartments, (id) => towers.find((t) => t.id === id)?.name ?? id),
-    [apartments, towers],
-  );
-
-  // Checklist dos níveis de torre (fundação, terreno, reservatório...) — não está
-  // no contexto; carregado sob demanda como no cronograma. Alimenta as etapas de
-  // nível do Gantt e as contagens de emergências/observações.
-  const [towerItems, setTowerItems] = useState<{ towerId: string; item: db.TowerChecklistItem }[]>([]);
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      if (towers.length === 0) { setTowerItems([]); return; }
-      const results = await Promise.all(
-        towers.map((t) =>
-          db.loadTowerChecklist(t.id)
-            .then((items) => ({ towerId: t.id, items }))
-            .catch(() => ({ towerId: t.id, items: [] as db.TowerChecklistItem[] })),
-        ),
-      );
-      if (!cancelled) setTowerItems(results.flatMap(({ towerId, items }) => items.map((item) => ({ towerId, item }))));
-    })();
-    return () => { cancelled = true; };
-  }, [towers]);
-
-  const towerScheduled = useMemo<TowerScheduledInput[]>(
-    () =>
-      towerItems.map(({ towerId, item }) => ({
-        item,
-        towerId,
-        levelCode: item.levelCode,
-        levelLabel: getTowerLevel(item.levelCode)?.label ?? item.levelCode,
-        levelOrder: TOWER_LEVELS.findIndex((l) => l.code === item.levelCode),
-      })),
-    [towerItems],
-  );
-
-  // Mesma fonte do Gantt: buildCronogramaFromData. Workers/assignments não mudam o
-  // status, então passamos vazios. status 'Atrasada' = fim planejado no passado e
-  // etapa não concluída — vale para apartamentos e níveis.
-  const cronograma = useMemo(
-    () => buildCronogramaFromData(apartments, serviceStages, [], {}, towers, towerScheduled),
-    [apartments, serviceStages, towers, towerScheduled],
+  // Etapas "Atrasada": calculadas no banco (RPC), com a MESMA regra do Gantt.
+  // Antes, o Início rodava buildCronogramaFromData sobre todos os ~17k itens só
+  // para achar as poucas atrasadas. Recarrega ao focar a aba; o "hoje" é a data
+  // LOCAL do aparelho, para bater com o cálculo do cliente.
+  const [dashboard, setDashboard] = useState<db.ObraDashboard | null>(null);
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
+      const now = new Date();
+      const today = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+      db.loadObraDashboard(today)
+        .then((d) => alive && setDashboard(d))
+        .catch(() => {});
+      return () => { alive = false; };
+    }, []),
   );
 
   const lateSteps = useMemo(
     () =>
-      cronograma.tasks
-        .filter((t) => t.status === 'Atrasada')
-        .sort((a, b) => b.atrasoDias - a.atrasoDias)
-        .map((t) => ({
-          id: t.id,
-          location: t.apartmentId
-            ? `${t.tower ? `${t.tower} · ` : ''}Apto ${t.apartmentNumber}`
-            : t.pavimento,
-          service: t.etapa,
-          delayDays: t.atrasoDias,
-          plannedEnd: t.end,
-        })),
-    [cronograma],
+      (dashboard?.late ?? []).map((r) => {
+        const towerPrefix = r.towerName ? `${r.towerName} · ` : '';
+        const location = r.apartmentId
+          ? `${towerPrefix}Apto ${r.aptNumber}`
+          : `${towerPrefix}${getTowerLevel(r.levelCode ?? '')?.label ?? r.levelCode ?? ''}`;
+        const [y, m, d] = r.plannedEnd.split('-').map(Number);
+        return {
+          id: r.id,
+          location,
+          service: r.label,
+          delayDays: r.delayDays,
+          plannedEnd: new Date(y, m - 1, d),
+        };
+      }),
+    [dashboard],
   );
 
-  const lateUnits = useMemo(
-    () =>
-      new Set(
-        cronograma.tasks.filter((t) => t.status === 'Atrasada').map((t) => t.apartmentId || t.pavimento),
-      ).size,
-    [cronograma],
-  );
+  const lateUnits = dashboard?.lateUnits ?? 0;
+
+  // Focos derivados do RPC: "torre mais atrasada" e "apartamentos atrasados" saem
+  // das linhas de atraso; "serviço mais pendente" sai de pending_by_service filtrado
+  // pelos serviços que travam outros (mapa de dependências do cliente).
+  const dashSummary = useMemo(() => {
+    const aptLate = (dashboard?.late ?? []).filter((r) => r.apartmentId);
+    const delayedApartments = new Set(aptLate.map((r) => r.apartmentId)).size;
+    const towerDelays = new Map<string, number>();
+    for (const r of aptLate) {
+      if (r.towerName) towerDelays.set(r.towerName, Math.max(towerDelays.get(r.towerName) ?? 0, r.delayDays));
+    }
+    const mostDelayedTower = [...towerDelays.entries()].sort((a, b) => b[1] - a[1])[0];
+    const depMap = getServiceDependencyMap();
+    const mostPending = (dashboard?.pendingByService ?? [])
+      .filter((p) => (depMap[p.label]?.length ?? 0) > 0)
+      .sort((a, b) => b.apartments - a.apartments)[0];
+    return {
+      delayedApartments,
+      mostDelayedTower: mostDelayedTower ? { towerName: mostDelayedTower[0], delayDays: mostDelayedTower[1] } : undefined,
+      mostPendingService: mostPending ? { service: mostPending.label, affectedApartments: mostPending.apartments } : undefined,
+    };
+  }, [dashboard]);
 
   const completedAverage = apartments.length
     ? Math.round(apartments.reduce((t, a) => t + a.progress, 0) / apartments.length)
@@ -193,44 +131,15 @@ export default function DashboardScreen() {
     critical: apartments.filter((a) => a.status === 'critical').length,
   }), [apartments]);
 
-  // Emergências: apartamentos/níveis com ao menos uma etapa marcada como
-  // emergência. Observações: total de comentários em apartamentos e níveis.
-  const emergencyUnits = useMemo(() => {
-    let apt = 0;
-    for (const a of apartments) {
-      if (a.checklist.some((i) => i.emergency?.trim())) apt += 1;
-    }
-    const niveis = new Set<string>();
-    for (const { towerId, item } of towerItems) {
-      if (item.emergency?.trim()) niveis.add(`${towerId}|${item.levelCode}`);
-    }
-    return apt + niveis.size;
-  }, [apartments, towerItems]);
-
-  const observations = useMemo(() => {
-    let count = 0;
-    const units = new Set<string>();
-    for (const a of apartments) {
-      const n = a.checklist.filter((i) => i.comment?.trim()).length;
-      count += n;
-      if (n > 0) units.add(a.id);
-    }
-    for (const { towerId, item } of towerItems) {
-      if (item.comment?.trim()) {
-        count += 1;
-        units.add(`${towerId}|${item.levelCode}`);
-      }
-    }
-    return { count, units: units.size };
-  }, [apartments, towerItems]);
+  // Emergências / Observações: contagens vindas do RPC (antes varriam os itens).
+  const emergencyUnits = dashboard?.emergencyUnits ?? 0;
+  const observations = { count: dashboard?.obsCount ?? 0, units: dashboard?.obsUnits ?? 0 };
 
   // Detalhamento de cada KPI: onde a informação está (apto/nível). Alimenta o
   // pop-up que abre ao tocar em um indicador.
   const kpiDetails = useMemo<Record<string, KpiDetailRow[]>>(() => {
     const tName = (id: string) => towers.find((t) => t.id === id)?.name ?? '';
     const aptLoc = (a: Apartment) => `${tName(a.towerId) ? `${tName(a.towerId)} · ` : ''}Apto ${a.number}`;
-    const nivLoc = (towerId: string, levelCode: string) =>
-      `${tName(towerId) ? `${tName(towerId)} · ` : ''}${getTowerLevel(levelCode)?.label ?? levelCode}`;
 
     const done: KpiDetailRow[] = apartments
       .filter((a) => a.status === 'excellent')
@@ -243,32 +152,30 @@ export default function DashboardScreen() {
       badge: `${ls.delayDays}d`,
     }));
 
+    // Localização de uma linha de emergência/observação vinda do RPC.
+    const flagLoc = (r: db.DashboardFlagRow) =>
+      r.scope === 'apt'
+        ? `${r.towerName ? `${r.towerName} · ` : ''}Apto ${r.aptNumber}`
+        : `${r.towerName ? `${r.towerName} · ` : ''}${getTowerLevel(r.levelCode ?? '')?.label ?? r.levelCode ?? ''}`;
+
     // Emergências — uma linha por unidade (apto/nível), juntando os textos.
-    const emergency: KpiDetailRow[] = [];
-    for (const a of apartments) {
-      const ems = a.checklist.filter((i) => i.emergency?.trim());
-      if (ems.length) emergency.push({ id: a.id, primary: aptLoc(a), secondary: ems.map((i) => `${i.label}: ${i.emergency}`).join('  ·  ') });
+    const emergencyByUnit = new Map<string, { loc: string; texts: string[] }>();
+    for (const r of dashboard?.emergency ?? []) {
+      const key = r.scope === 'apt' ? (r.aptId ?? '') : `${r.towerId}|${r.levelCode ?? ''}`;
+      const e = emergencyByUnit.get(key) ?? { loc: flagLoc(r), texts: [] };
+      e.texts.push(`${r.label}: ${r.text}`);
+      emergencyByUnit.set(key, e);
     }
-    const nivEmerg = new Map<string, { loc: string; texts: string[] }>();
-    for (const { towerId, item } of towerItems) {
-      if (!item.emergency?.trim()) continue;
-      const key = `${towerId}|${item.levelCode}`;
-      const e = nivEmerg.get(key) ?? { loc: nivLoc(towerId, item.levelCode), texts: [] };
-      e.texts.push(`${item.label}: ${item.emergency}`);
-      nivEmerg.set(key, e);
-    }
-    for (const [key, v] of nivEmerg) emergency.push({ id: key, primary: v.loc, secondary: v.texts.join('  ·  ') });
+    const emergency: KpiDetailRow[] = [...emergencyByUnit.entries()].map(([key, v]) => ({
+      id: key, primary: v.loc, secondary: v.texts.join('  ·  '),
+    }));
 
     // Observações — uma linha por comentário.
-    const obs: KpiDetailRow[] = [];
-    for (const a of apartments) {
-      for (const i of a.checklist.filter((it) => it.comment?.trim())) {
-        obs.push({ id: `${a.id}-${i.id}`, primary: aptLoc(a), secondary: `${i.label}: ${i.comment}` });
-      }
-    }
-    for (const { towerId, item } of towerItems) {
-      if (item.comment?.trim()) obs.push({ id: `${towerId}-${item.id}`, primary: nivLoc(towerId, item.levelCode), secondary: `${item.label}: ${item.comment}` });
-    }
+    const obs: KpiDetailRow[] = (dashboard?.observations ?? []).map((r) => ({
+      id: r.scope === 'apt' ? `${r.aptId}-${r.itemId}` : `${r.towerId}-${r.itemId}`,
+      primary: flagLoc(r),
+      secondary: `${r.label}: ${r.text}`,
+    }));
 
     const value: KpiDetailRow[] = measurements.map((m) => {
       const a = apartments.find((x) => x.id === m.apartmentId);
@@ -276,17 +183,10 @@ export default function DashboardScreen() {
     });
 
     return { done, delayed, emergency, obs, value };
-  }, [apartments, towers, towerItems, lateSteps, measurements]);
+  }, [apartments, towers, dashboard, lateSteps, measurements]);
 
   const total = apartments.length || 1;
   const completedPct = Math.round((statusCounts.excellent / total) * 100);
-
-  // Total de etapas monitoradas (apartamentos + níveis) — dá escala ao painel e
-  // contextualiza o KPI "Atrasadas".
-  const totalSteps = useMemo(
-    () => apartments.reduce((t, a) => t + a.checklist.length, 0) + towerItems.length,
-    [apartments, towerItems],
-  );
 
   const firstName = profile?.name?.trim().split(/\s+/)[0];
 
@@ -296,6 +196,7 @@ export default function DashboardScreen() {
       return {
         id: tower.id,
         name: tower.name,
+        units: apts.length,
         avg: apts.length ? Math.round(apts.reduce((t, a) => t + a.progress, 0) / apts.length) : 0,
         critical: apts.filter((a) => a.status === 'critical').length,
       };
@@ -341,31 +242,51 @@ export default function DashboardScreen() {
       text: `${lateSteps[0].service} · ${lateSteps[0].location} · ${lateSteps[0].delayDays} dia(s)`,
       onPress: () => setAlertOpen(true),
     },
-    bottleneckSummary.mostPendingService && {
+    dashSummary.mostPendingService && {
       icon: 'progress-alert' as IconName, color: '#C2410C', bg: '#FFF7ED',
       title: 'Serviço mais pendente',
-      text: `${bottleneckSummary.mostPendingService.service} · ${bottleneckSummary.mostPendingService.affectedApartments} un.`,
+      text: `${dashSummary.mostPendingService.service} · ${dashSummary.mostPendingService.affectedApartments} un.`,
     },
-    scheduleSummary.delayedApartments > 0 && scheduleSummary.mostDelayedTower && {
+    dashSummary.delayedApartments > 0 && dashSummary.mostDelayedTower && {
       icon: 'office-building-marker-outline' as IconName, color: '#B45309', bg: '#FFFBEB',
       title: 'Torre mais atrasada',
-      text: `${scheduleSummary.mostDelayedTower.towerName} · ${scheduleSummary.mostDelayedTower.delayDays} dia(s)`,
-    },
-    bottleneckSummary.mostBlockedServices[0] && {
-      icon: 'lock-outline' as IconName, color: '#B91C1C', bg: '#FEF2F2',
-      title: 'Principal gargalo',
-      text: `${bottleneckSummary.mostBlockedServices[0].service} · ${bottleneckSummary.mostBlockedServices[0].affectedApartments} un.`,
+      text: `${dashSummary.mostDelayedTower.towerName} · ${dashSummary.mostDelayedTower.delayDays} dia(s)`,
     },
   ].filter(Boolean) as { icon: IconName; color: string; bg: string; title: string; text: string; onPress?: () => void }[];
 
-  const pieSegments: Segment[] = [
-    { value: statusCounts.critical, color: '#DC2626' },
-    { value: statusCounts.attention, color: '#D97706' },
-    { value: statusCounts.good, color: '#2563EB' },
-    { value: statusCounts.excellent, color: '#047857' },
-  ];
+  // Status das unidades — ordenado do melhor ao pior, com % do total. Alimenta a
+  // barra empilhada e a legenda da aba "Distribuição".
+  const statusRows = useMemo(
+    () =>
+      [
+        { key: 'excellent', label: 'Excelente', color: '#047857', count: statusCounts.excellent },
+        { key: 'good', label: 'Bom', color: '#2563EB', count: statusCounts.good },
+        { key: 'attention', label: 'Atenção', color: '#D97706', count: statusCounts.attention },
+        { key: 'critical', label: 'Crítico', color: '#DC2626', count: statusCounts.critical },
+      ].map((r) => ({ ...r, pct: Math.round((r.count / total) * 100) })),
+    [statusCounts, total],
+  );
 
-  const hasAlerts = lateSteps.length > 0 || !!bottleneckSummary.mostPendingService;
+  // Distribuição por faixa de conclusão — revela onde está o volume de trabalho
+  // (quantas unidades a iniciar, em andamento e concluídas).
+  const progressBuckets = useMemo(() => {
+    const defs = [
+      { label: '0%', rep: 0, min: 0, max: 0 },
+      { label: '1–25', rep: 13, min: 1, max: 25 },
+      { label: '26–50', rep: 38, min: 26, max: 50 },
+      { label: '51–75', rep: 63, min: 51, max: 75 },
+      { label: '76–99', rep: 88, min: 76, max: 99 },
+      { label: '100%', rep: 100, min: 100, max: 100 },
+    ];
+    return defs.map((d) => ({
+      label: d.label,
+      color: getProgressColor(d.rep),
+      count: apartments.filter((a) => a.progress >= d.min && a.progress <= d.max).length,
+    }));
+  }, [apartments]);
+  const maxBucket = Math.max(1, ...progressBuckets.map((b) => b.count));
+
+  const hasAlerts = lateSteps.length > 0 || !!dashSummary.mostPendingService;
   const heroColor = getProgressColor(completedAverage);
 
   return (
@@ -428,9 +349,8 @@ export default function DashboardScreen() {
           <Skeleton height={56} width="40%" radius={10} style={{ marginTop: 8 }} />
           <Skeleton height={8} radius={999} style={{ marginTop: 10 }} />
           <View style={s.heroStatRow}>
-            <Skeleton width={80} height={32} radius={8} />
-            <Skeleton width={80} height={32} radius={8} />
-            <Skeleton width={80} height={32} radius={8} />
+            <Skeleton width={90} height={32} radius={8} />
+            <Skeleton width={90} height={32} radius={8} />
           </View>
         </View>
       ) : (
@@ -450,177 +370,220 @@ export default function DashboardScreen() {
               <Text style={s.heroStatValue}>{apartments.length}</Text>
               <Text style={s.heroStatLabel}>Unidades</Text>
             </View>
-            <View style={s.heroStatDivider} />
-            <View style={s.heroStat}>
-              <Text style={s.heroStatValue}>{totalSteps}</Text>
-              <Text style={s.heroStatLabel}>Etapas</Text>
-            </View>
           </View>
         </View>
       )}
 
-      {/* SEGMENTED CONTROL — mirrors the Catálogos toggle */}
-      <View style={s.toggleWrap}>
-        <View style={s.viewToggle}>
-          <Pressable
-            onPress={() => setView('kpi')}
-            accessibilityRole="button"
-            accessibilityState={{ selected: view === 'kpi' }}
-            style={[s.viewBtn, view === 'kpi' && s.viewBtnActive]}>
-            <MaterialCommunityIcons name="view-dashboard-outline" size={16} color={view === 'kpi' ? '#2563EB' : '#94A3B8'} />
-            <Text style={[s.viewBtnText, view === 'kpi' && s.viewBtnTextActive]}>Indicadores</Text>
-          </Pressable>
-          <Pressable
-            onPress={() => setView('dist')}
-            accessibilityRole="button"
-            accessibilityState={{ selected: view === 'dist' }}
-            style={[s.viewBtn, view === 'dist' && s.viewBtnActive]}>
-            <MaterialCommunityIcons name="chart-donut" size={16} color={view === 'dist' ? '#2563EB' : '#94A3B8'} />
-            <Text style={[s.viewBtnText, view === 'dist' && s.viewBtnTextActive]}>Distribuição</Text>
-          </Pressable>
+      {/* FOCOS DE ATENÇÃO — sempre visível, acima das abas: é o que exige ação */}
+      {loading ? (
+        <View style={s.focosCard}>
+          <Skeleton height={16} width="45%" radius={6} />
+          <Skeleton height={44} radius={12} style={{ marginTop: 12 }} />
+          <Skeleton height={44} radius={12} style={{ marginTop: 8 }} />
+        </View>
+      ) : (
+        <View style={s.focosCard}>
+          <View style={s.panelHead}>
+            <MaterialCommunityIcons name="target" size={16} color="#0F172A" />
+            <Text style={s.panelTitle}>Focos de atenção</Text>
+          </View>
+          {focos.length === 0 ? (
+            <View style={s.allClearInline}>
+              <MaterialCommunityIcons name="check-circle-outline" size={18} color="#047857" />
+              <Text style={s.allClearText}>Obra sem pontos críticos no momento</Text>
+            </View>
+          ) : (
+            <View style={s.focoList}>
+              {focos.map((f, i) => (
+                <Pressable
+                  key={i}
+                  onPress={f.onPress}
+                  disabled={!f.onPress}
+                  accessibilityRole={f.onPress ? 'button' : undefined}
+                  style={({ pressed }) => [s.focoRow, i === 0 && s.focoRowFirst, pressed && f.onPress && { opacity: 0.7 }]}>
+                  <View style={[s.focoIcon, { backgroundColor: f.bg }]}>
+                    <MaterialCommunityIcons name={f.icon} size={16} color={f.color} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.focoTitle}>{f.title}</Text>
+                    <Text style={s.focoText} numberOfLines={1}>{f.text}</Text>
+                  </View>
+                  {f.onPress && <MaterialCommunityIcons name="chevron-right" size={16} color="#CBD5E1" />}
+                </Pressable>
+              ))}
+            </View>
+          )}
+        </View>
+      )}
+
+      {/* MÓDULO DE ABAS — o controle e o conteúdo vivem num mesmo cartão, deixando
+          claro que o que está abaixo pertence à aba selecionada */}
+      <View style={s.tabModule}>
+        <View style={s.tabModuleHeader}>
+          <View style={s.viewToggle}>
+            <Pressable
+              onPress={() => setView('kpi')}
+              accessibilityRole="button"
+              accessibilityState={{ selected: view === 'kpi' }}
+              style={[s.viewBtn, view === 'kpi' && s.viewBtnActive]}>
+              <MaterialCommunityIcons name="view-dashboard-outline" size={16} color={view === 'kpi' ? '#2563EB' : '#94A3B8'} />
+              <Text style={[s.viewBtnText, view === 'kpi' && s.viewBtnTextActive]}>Indicadores</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => setView('dist')}
+              accessibilityRole="button"
+              accessibilityState={{ selected: view === 'dist' }}
+              style={[s.viewBtn, view === 'dist' && s.viewBtnActive]}>
+              <MaterialCommunityIcons name="chart-bar" size={16} color={view === 'dist' ? '#2563EB' : '#94A3B8'} />
+              <Text style={[s.viewBtnText, view === 'dist' && s.viewBtnTextActive]}>Distribuição</Text>
+            </Pressable>
+          </View>
+        </View>
+
+        <View style={s.tabModuleBody}>
+          {/* ── TAB: INDICADORES ── */}
+          {view === 'kpi' && (
+            loading ? (
+              <>
+                <View style={s.kpiGrid}>
+                  {[1, 2, 3, 4].map((i) => (
+                    <Skeleton key={i} height={96} radius={14} style={{ flexGrow: 1, flexBasis: '47%' }} />
+                  ))}
+                </View>
+                <Skeleton height={64} radius={14} />
+              </>
+            ) : (
+              <>
+                <View style={s.kpiGrid}>
+                  {kpis.map((kpi) => <KpiCard key={kpi.key} kpi={kpi} onPress={() => setKpiModal(kpi)} />)}
+                </View>
+
+                {/* Medido — valor financeiro tem forma própria (faixa larga) */}
+                <Pressable
+                  onPress={() => setKpiModal(medidoKpi)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Medido: ${medidoKpi.value}. Toque para ver detalhes`}
+                  style={({ pressed }) => [s.medidoBand, pressed && s.cardPressed]}>
+                  <View style={[s.kpiIcon, { backgroundColor: medidoKpi.bg }]}>
+                    <MaterialCommunityIcons name={medidoKpi.icon} size={18} color={medidoKpi.color} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.kpiLabel}>Medido</Text>
+                    <Text style={s.kpiSub} numberOfLines={1}>{medidoKpi.sub}</Text>
+                  </View>
+                  <Text style={[s.medidoValue, { color: medidoKpi.color }]} numberOfLines={1}>{medidoKpi.value}</Text>
+                  <MaterialCommunityIcons name="chevron-right" size={16} color="#CBD5E1" />
+                </Pressable>
+              </>
+            )
+          )}
+
+          {/* ── TAB: DISTRIBUIÇÃO ── */}
+          {view === 'dist' && (
+            loading ? (
+              <>
+                <Skeleton height={16} width="50%" radius={6} />
+                <Skeleton height={26} radius={8} style={{ marginTop: 4 }} />
+                <View style={{ gap: 8, marginTop: 4 }}>
+                  <Skeleton height={12} radius={6} />
+                  <Skeleton height={12} radius={6} />
+                  <Skeleton height={12} radius={6} />
+                </View>
+                <Skeleton height={128} radius={10} style={{ marginTop: 12 }} />
+              </>
+            ) : (
+              <>
+                {/* Status das unidades — barra 100% empilhada + legenda com % */}
+                <View style={s.section}>
+                  <View style={s.panelHead}>
+                    <MaterialCommunityIcons name="poll" size={16} color="#0F172A" />
+                    <Text style={s.panelTitle}>Status das unidades</Text>
+                  </View>
+                  <View style={s.stackBar}>
+                    {statusRows.filter((r) => r.count > 0).length === 0 ? (
+                      <View style={s.stackEmpty} />
+                    ) : (
+                      statusRows
+                        .filter((r) => r.count > 0)
+                        .map((r) => (
+                          <View key={r.key} style={[s.stackSeg, { flex: r.count, backgroundColor: r.color }]}>
+                            {r.pct >= 10 && <Text style={s.stackSegText}>{r.pct}%</Text>}
+                          </View>
+                        ))
+                    )}
+                  </View>
+                  <View style={s.statusLegend}>
+                    {statusRows.map((r) => (
+                      <View key={r.key} style={s.statusLegendRow}>
+                        <View style={[s.legendDot, { backgroundColor: r.color }]} />
+                        <Text style={s.statusLegendLabel}>{r.label}</Text>
+                        <Text style={s.statusLegendCount}>{r.count}</Text>
+                        <Text style={[s.statusLegendPct, { color: r.color }]}>{r.pct}%</Text>
+                      </View>
+                    ))}
+                  </View>
+                </View>
+
+                {/* Avanço das unidades — histograma por faixa de conclusão */}
+                <View style={[s.section, s.sectionDivided]}>
+                  <View style={s.panelHead}>
+                    <MaterialCommunityIcons name="chart-bar" size={16} color="#0F172A" />
+                    <Text style={s.panelTitle}>Avanço das unidades</Text>
+                  </View>
+                  <View style={s.histRow}>
+                    {progressBuckets.map((b) => (
+                      <View key={b.label} style={s.histCol}>
+                        <View style={s.histBarArea}>
+                          <Text style={s.histCount}>{b.count}</Text>
+                          <View
+                            style={[
+                              s.histBar,
+                              b.count > 0
+                                ? { height: 10 + Math.round((b.count / maxBucket) * 86), backgroundColor: b.color }
+                                : { height: 3, backgroundColor: '#E2E8F0' },
+                            ]}
+                          />
+                        </View>
+                        <Text style={s.histAxis} numberOfLines={1}>{b.label}</Text>
+                      </View>
+                    ))}
+                  </View>
+                  <Text style={s.histCaption}>Unidades por faixa de conclusão</Text>
+                </View>
+
+                {/* Progresso por torre — avanço médio e nº de unidades */}
+                <View style={[s.section, s.sectionDivided]}>
+                  <View style={s.panelHead}>
+                    <MaterialCommunityIcons name="office-building-outline" size={16} color="#0F172A" />
+                    <Text style={s.panelTitle}>Progresso por torre</Text>
+                  </View>
+                  {towerStats.map((tower) => (
+                    <View key={tower.id} style={s.towerBarRow}>
+                      <View style={s.towerBarInfo}>
+                        <Text style={s.towerBarLabel} numberOfLines={1}>{tower.name}</Text>
+                        <Text style={s.towerBarUnits}>{tower.units} un.</Text>
+                      </View>
+                      <View style={s.towerBarTrack}>
+                        <View style={[s.towerBarFill, {
+                          width: `${tower.avg}%` as `${number}%`,
+                          backgroundColor: getProgressColor(tower.avg),
+                        }]} />
+                      </View>
+                      <Text style={s.towerBarPct}>{tower.avg}%</Text>
+                      {tower.critical > 0 && (
+                        <View style={s.towerBarBadge}>
+                          <MaterialCommunityIcons name="alert" size={10} color="#B91C1C" />
+                          <Text style={s.towerBarBadgeText}>{tower.critical}</Text>
+                        </View>
+                      )}
+                    </View>
+                  ))}
+                </View>
+              </>
+            )
+          )}
         </View>
       </View>
-
-      {/* ── TAB: INDICADORES ── */}
-      {view === 'kpi' && (
-        loading ? (
-          <View style={s.tabBody}>
-            <View style={s.kpiGrid}>
-              {[1, 2, 3, 4].map((i) => (
-                <Skeleton key={i} height={96} radius={14} style={{ flexGrow: 1, flexBasis: '47%' }} />
-              ))}
-            </View>
-            <Skeleton height={64} radius={14} style={{ marginHorizontal: 16 }} />
-          </View>
-        ) : (
-          <View style={s.tabBody}>
-            <View style={s.kpiGrid}>
-              {kpis.map((kpi) => <KpiCard key={kpi.key} kpi={kpi} onPress={() => setKpiModal(kpi)} />)}
-            </View>
-
-            {/* Medido — valor financeiro tem forma própria (faixa larga) */}
-            <Pressable
-              onPress={() => setKpiModal(medidoKpi)}
-              accessibilityRole="button"
-              accessibilityLabel={`Medido: ${medidoKpi.value}. Toque para ver detalhes`}
-              style={({ pressed }) => [s.medidoBand, pressed && s.cardPressed]}>
-              <View style={[s.kpiIcon, { backgroundColor: medidoKpi.bg }]}>
-                <MaterialCommunityIcons name={medidoKpi.icon} size={18} color={medidoKpi.color} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={s.kpiLabel}>Medido</Text>
-                <Text style={s.kpiSub} numberOfLines={1}>{medidoKpi.sub}</Text>
-              </View>
-              <Text style={[s.medidoValue, { color: medidoKpi.color }]} numberOfLines={1}>{medidoKpi.value}</Text>
-              <MaterialCommunityIcons name="chevron-right" size={16} color="#CBD5E1" />
-            </Pressable>
-
-            {/* Focos de atenção — where to act next */}
-            <View style={s.panel}>
-              <View style={s.panelHead}>
-                <MaterialCommunityIcons name="target" size={16} color="#0F172A" />
-                <Text style={s.panelTitle}>Focos de atenção</Text>
-              </View>
-              {focos.length === 0 ? (
-                <View style={s.allClearInline}>
-                  <MaterialCommunityIcons name="check-circle-outline" size={18} color="#047857" />
-                  <Text style={s.allClearText}>Obra sem pontos críticos no momento</Text>
-                </View>
-              ) : (
-                <View style={s.focoList}>
-                  {focos.map((f, i) => (
-                    <Pressable
-                      key={i}
-                      onPress={f.onPress}
-                      disabled={!f.onPress}
-                      accessibilityRole={f.onPress ? 'button' : undefined}
-                      style={({ pressed }) => [s.focoRow, i === 0 && s.focoRowFirst, pressed && f.onPress && { opacity: 0.7 }]}>
-                      <View style={[s.focoIcon, { backgroundColor: f.bg }]}>
-                        <MaterialCommunityIcons name={f.icon} size={16} color={f.color} />
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <Text style={s.focoTitle}>{f.title}</Text>
-                        <Text style={s.focoText} numberOfLines={1}>{f.text}</Text>
-                      </View>
-                      {f.onPress && <MaterialCommunityIcons name="chevron-right" size={16} color="#CBD5E1" />}
-                    </Pressable>
-                  ))}
-                </View>
-              )}
-            </View>
-          </View>
-        )
-      )}
-
-      {/* ── TAB: DISTRIBUIÇÃO ── */}
-      {view === 'dist' && (
-        loading ? (
-          <View style={s.tabBody}>
-            <View style={s.panel}>
-              <Skeleton height={18} width="50%" radius={6} />
-              <View style={s.chartRow}>
-                <Skeleton width={150} height={150} radius={75} />
-                <View style={{ flex: 1, gap: 10 }}>
-                  <Skeleton height={14} radius={6} />
-                  <Skeleton height={14} radius={6} />
-                  <Skeleton height={14} radius={6} />
-                  <Skeleton height={14} radius={6} />
-                </View>
-              </View>
-            </View>
-          </View>
-        ) : (
-          <View style={s.tabBody}>
-            <View style={s.panel}>
-              <View style={s.panelHead}>
-                <MaterialCommunityIcons name="chart-donut" size={16} color="#0F172A" />
-                <Text style={s.panelTitle}>Distribuição de status</Text>
-              </View>
-              <View style={s.chartRow}>
-                <DonutChart segments={pieSegments} size={150} />
-                <View style={s.chartLegend}>
-                  {[
-                    { label: 'Excelente', color: '#047857', count: statusCounts.excellent },
-                    { label: 'Bom', color: '#2563EB', count: statusCounts.good },
-                    { label: 'Atenção', color: '#D97706', count: statusCounts.attention },
-                    { label: 'Crítico', color: '#DC2626', count: statusCounts.critical },
-                  ].map((item) => (
-                    <View key={item.label} style={s.legendItem}>
-                      <View style={[s.legendDot, { backgroundColor: item.color }]} />
-                      <Text style={s.legendLabel}>{item.label}</Text>
-                      <Text style={[s.legendCount, { color: item.color }]}>{item.count}</Text>
-                    </View>
-                  ))}
-                </View>
-              </View>
-            </View>
-
-            <View style={s.panel}>
-              <View style={s.panelHead}>
-                <MaterialCommunityIcons name="office-building-outline" size={16} color="#0F172A" />
-                <Text style={s.panelTitle}>Progresso por torre</Text>
-              </View>
-              {towerStats.map((tower) => (
-                <View key={tower.id} style={s.towerBarRow}>
-                  <Text style={s.towerBarLabel} numberOfLines={1}>{tower.name}</Text>
-                  <View style={s.towerBarTrack}>
-                    <View style={[s.towerBarFill, {
-                      width: `${tower.avg}%` as `${number}%`,
-                      backgroundColor: getProgressColor(tower.avg),
-                    }]} />
-                  </View>
-                  <Text style={s.towerBarPct}>{tower.avg}%</Text>
-                  {tower.critical > 0 && (
-                    <View style={s.towerBarBadge}>
-                      <Text style={s.towerBarBadgeText}>{tower.critical} ⚠</Text>
-                    </View>
-                  )}
-                </View>
-              ))}
-            </View>
-          </View>
-        )
-      )}
 
       {/* ALERT MODAL */}
       <Modal
@@ -684,7 +647,7 @@ export default function DashboardScreen() {
                 </View>
               )}
 
-              {bottleneckSummary.mostPendingService && (
+              {dashSummary.mostPendingService && (
                 <View style={s.modalAlertItem}>
                   <View style={[s.modalAlertIcon, { backgroundColor: '#FEE2E2' }]}>
                     <MaterialCommunityIcons name="lock-alert-outline" size={20} color="#B91C1C" />
@@ -692,14 +655,9 @@ export default function DashboardScreen() {
                   <View style={s.modalAlertContent}>
                     <Text style={s.modalAlertTitle}>Gargalo principal</Text>
                     <Text style={s.modalAlertText}>
-                      <Text style={s.modalAlertBold}>{bottleneckSummary.mostPendingService.service}</Text>
-                      {` está pendente em ${bottleneckSummary.mostPendingService.affectedApartments} apartamento(s).`}
+                      <Text style={s.modalAlertBold}>{dashSummary.mostPendingService.service}</Text>
+                      {` está pendente em ${dashSummary.mostPendingService.affectedApartments} apartamento(s).`}
                     </Text>
-                    {bottleneckSummary.mostBlockedServices.length > 0 && (
-                      <Text style={s.modalAlertText}>
-                        Serviços travados: <Text style={s.modalAlertBold}>{bottleneckSummary.mostBlockedServices.slice(0, 3).map((sv) => sv.service).join(', ')}{bottleneckSummary.mostBlockedServices.length > 3 ? '…' : ''}</Text>
-                      </Text>
-                    )}
                   </View>
                 </View>
               )}
@@ -774,13 +732,14 @@ const s = StyleSheet.create({
   scroll: { backgroundColor: '#F8FAFC' },
   container: { paddingBottom: 40 },
 
-  // header — mesmo slate do Perfil (telas conectadas pelo avatar)
-  header: { backgroundColor: '#334155', paddingHorizontal: 20, paddingBottom: 22 },
+  // header — mesmo slate do Perfil (telas conectadas pelo avatar); maior, para
+  // dar peso à saudação e ao nome da obra
+  header: { backgroundColor: '#334155', paddingHorizontal: 20, paddingBottom: 32 },
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12 },
   headerLeft: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 14 },
-  avatar: { width: 50, height: 50, borderRadius: 25, backgroundColor: 'rgba(255,255,255,0.18)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.3)', alignItems: 'center', justifyContent: 'center' },
-  headerGreeting: { color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: '600' },
-  headerProject: { color: '#FFFFFF', fontSize: 22, fontWeight: '900', marginTop: 2 },
+  avatar: { width: 56, height: 56, borderRadius: 28, backgroundColor: 'rgba(255,255,255,0.18)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.3)', alignItems: 'center', justifyContent: 'center' },
+  headerGreeting: { color: 'rgba(255,255,255,0.7)', fontSize: 14.5, fontWeight: '600', letterSpacing: 0.2 },
+  headerProject: { color: '#FFFFFF', fontSize: 26, fontWeight: '900', lineHeight: 30, marginTop: 3 },
   headerActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   headerBtnPressed: { backgroundColor: 'rgba(255,255,255,0.3)' },
   alertBtn: { padding: 9, borderRadius: 999, backgroundColor: 'rgba(255,255,255,0.15)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.3)' },
@@ -800,19 +759,21 @@ const s = StyleSheet.create({
   heroStatLabel: { color: '#94A3B8', fontSize: 11, fontWeight: '600', marginTop: 2 },
   heroStatDivider: { width: 1, height: 32, backgroundColor: '#E2E8F0' },
 
+  // módulo de abas — um cartão único que agrupa o controle e o conteúdo da aba
+  tabModule: { marginHorizontal: 16, marginTop: 12, backgroundColor: '#FFFFFF', borderRadius: 18, borderWidth: 1, borderColor: '#E2E8F0', overflow: 'hidden', shadowColor: '#0F172A', shadowOpacity: 0.05, shadowRadius: 10, shadowOffset: { width: 0, height: 3 }, elevation: 2 },
+  tabModuleHeader: { padding: 10, borderBottomWidth: 1, borderBottomColor: '#EEF2F7' },
+  tabModuleBody: { padding: 14, gap: 12 },
+
   // segmented control
-  toggleWrap: { paddingHorizontal: 16, paddingTop: 14, paddingBottom: 4 },
   viewToggle: { flexDirection: 'row', backgroundColor: '#F1F5F9', borderRadius: 12, padding: 3, gap: 3 },
   viewBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 10, borderRadius: 10 },
   viewBtnActive: { backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#E2E8F0' },
   viewBtnText: { color: '#94A3B8', fontSize: 13, fontWeight: '700' },
   viewBtnTextActive: { color: '#2563EB' },
 
-  tabBody: { gap: 12, paddingTop: 8 },
-
   // kpi grid — 2×2 fixo; a faixa colorida à esquerda ecoa os cards do checklist
-  kpiGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, paddingHorizontal: 16 },
-  kpiCard: { flexGrow: 1, flexBasis: '47%', backgroundColor: '#FFFFFF', borderRadius: 14, borderWidth: 1, borderColor: '#E2E8F0', borderLeftWidth: 3, padding: 14, gap: 6 },
+  kpiGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  kpiCard: { flexGrow: 1, flexBasis: '47%', backgroundColor: '#F8FAFC', borderRadius: 14, borderWidth: 1, borderColor: '#EEF2F7', borderLeftWidth: 3, padding: 14, gap: 6 },
   cardPressed: { backgroundColor: '#F8FAFC', transform: [{ scale: 0.98 }] },
   kpiCardHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
   kpiIcon: { width: 34, height: 34, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
@@ -821,7 +782,7 @@ const s = StyleSheet.create({
   kpiLabel: { color: '#0F172A', fontSize: 13, fontWeight: '800' },
   kpiSub: { color: '#94A3B8', fontSize: 11, fontWeight: '600' },
   // medido — faixa financeira de largura total
-  medidoBand: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#FFFFFF', borderRadius: 14, borderWidth: 1, borderColor: '#E2E8F0', borderLeftWidth: 3, borderLeftColor: '#0F766E', padding: 14, marginHorizontal: 16 },
+  medidoBand: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#F8FAFC', borderRadius: 14, borderWidth: 1, borderColor: '#EEF2F7', borderLeftWidth: 3, borderLeftColor: '#0F766E', padding: 14 },
   medidoValue: { fontSize: 18, fontWeight: '900' },
   // kpi detail modal
   kpiModalSub: { color: '#94A3B8', fontSize: 12, fontWeight: '600', marginTop: 1 },
@@ -834,12 +795,12 @@ const s = StyleSheet.create({
   kpiDetailEmpty: { alignItems: 'center', gap: 8, paddingVertical: 28 },
   kpiDetailEmptyText: { color: '#94A3B8', fontSize: 13, fontWeight: '600' },
 
-  // generic panel
-  panel: { backgroundColor: '#FFFFFF', borderRadius: 16, borderWidth: 1, borderColor: '#E2E8F0', padding: 16, marginHorizontal: 16, gap: 14 },
+  // section headers (usadas no cartão de focos e nas seções da aba)
   panelHead: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   panelTitle: { color: '#0F172A', fontSize: 15, fontWeight: '800' },
 
-  // focos de atenção
+  // focos de atenção — cartão próprio, sempre visível acima das abas
+  focosCard: { backgroundColor: '#FFFFFF', borderRadius: 16, borderWidth: 1, borderColor: '#E2E8F0', padding: 16, marginHorizontal: 16, marginTop: 12, gap: 14 },
   allClearInline: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#F0FDF4', borderColor: '#A7F3D0', borderWidth: 1, borderRadius: 12, padding: 12 },
   allClearText: { color: '#047857', fontSize: 13, fontWeight: '600', flex: 1 },
   focoList: { gap: 0 },
@@ -849,19 +810,40 @@ const s = StyleSheet.create({
   focoTitle: { color: '#0F172A', fontSize: 13, fontWeight: '800' },
   focoText: { color: '#64748B', fontSize: 12, fontWeight: '600', marginTop: 1 },
 
-  // chart
-  chartRow: { flexDirection: 'row', alignItems: 'center', gap: 16 },
-  chartLegend: { flex: 1, gap: 10 },
-  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  // seções da aba Distribuição — separadas por hairline dentro do módulo
+  section: { gap: 12 },
+  sectionDivided: { borderTopWidth: 1, borderTopColor: '#F1F5F9', paddingTop: 14 },
   legendDot: { width: 10, height: 10, borderRadius: 5 },
-  legendLabel: { flex: 1, color: '#475569', fontSize: 13, fontWeight: '700' },
-  legendCount: { fontSize: 14, fontWeight: '900' },
+
+  // status das unidades — barra 100% empilhada + legenda
+  stackBar: { flexDirection: 'row', height: 28, borderRadius: 8, overflow: 'hidden', backgroundColor: '#F1F5F9', gap: 2 },
+  stackSeg: { alignItems: 'center', justifyContent: 'center' },
+  stackSegText: { color: '#FFFFFF', fontSize: 11, fontWeight: '800' },
+  stackEmpty: { flex: 1 },
+  statusLegend: { gap: 9 },
+  statusLegendRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  statusLegendLabel: { flex: 1, color: '#475569', fontSize: 13, fontWeight: '700' },
+  statusLegendCount: { color: '#0F172A', fontSize: 14, fontWeight: '900', width: 34, textAlign: 'right' },
+  statusLegendPct: { fontSize: 12, fontWeight: '800', width: 42, textAlign: 'right' },
+
+  // avanço das unidades — histograma de barras verticais
+  histRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 6 },
+  histCol: { flex: 1, alignItems: 'center' },
+  histBarArea: { height: 116, justifyContent: 'flex-end', alignItems: 'center', gap: 4 },
+  histCount: { color: '#334155', fontSize: 11, fontWeight: '800' },
+  histBar: { width: '72%', minWidth: 14, borderTopLeftRadius: 6, borderTopRightRadius: 6 },
+  histAxis: { color: '#64748B', fontSize: 10, fontWeight: '700', marginTop: 6 },
+  histCaption: { color: '#94A3B8', fontSize: 11, fontWeight: '600', textAlign: 'center' },
+
+  // progresso por torre
   towerBarRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  towerBarLabel: { color: '#0F172A', fontSize: 12, fontWeight: '700', width: 76 },
+  towerBarInfo: { width: 84 },
+  towerBarLabel: { color: '#0F172A', fontSize: 12, fontWeight: '700' },
+  towerBarUnits: { color: '#94A3B8', fontSize: 10.5, fontWeight: '600', marginTop: 1 },
   towerBarTrack: { flex: 1, height: 10, backgroundColor: '#E2E8F0', borderRadius: 999, overflow: 'hidden' },
   towerBarFill: { height: '100%', borderRadius: 999 },
   towerBarPct: { color: '#475569', fontSize: 12, fontWeight: '700', width: 34, textAlign: 'right' },
-  towerBarBadge: { backgroundColor: '#FEE2E2', borderRadius: 6, paddingHorizontal: 5, paddingVertical: 2 },
+  towerBarBadge: { flexDirection: 'row', alignItems: 'center', gap: 2, backgroundColor: '#FEE2E2', borderRadius: 6, paddingHorizontal: 5, paddingVertical: 2 },
   towerBarBadgeText: { color: '#B91C1C', fontSize: 10, fontWeight: '800' },
 
   // modal

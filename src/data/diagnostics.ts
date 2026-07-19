@@ -16,6 +16,7 @@ import { consolidatedReportHeader, hasKeyValueCellPattern } from '@/src/data/rep
 import {
   canGenerateReportText,
   createGeneratedReport,
+  type ReportDataSource,
   formatReportDateTime,
   getNomeServicoOuEtapa,
   reportCsvHeader,
@@ -159,6 +160,17 @@ export const createDiagnosticText = (report: DiagnosticReport) => {
   return lines.join('\n');
 };
 
+const groupByApartment = <T extends { apartmentId?: string }>(items: T[]) => {
+  const map = new Map<string, T[]>();
+  for (const item of items) {
+    const key = item.apartmentId ?? '';
+    const list = map.get(key);
+    if (list) list.push(item);
+    else map.set(key, [item]);
+  }
+  return map;
+};
+
 export const runMvpDiagnostics = (): DiagnosticReport => {
   const results: DiagnosticResult[] = [];
   const storageKeys = getStorageKeys();
@@ -176,6 +188,17 @@ export const runMvpDiagnostics = (): DiagnosticReport => {
   const allStoredChecklistItems = apartments.flatMap((apartment) =>
     getStoredChecklist(apartment.id).map((item) => ({ ...item, apartmentId: apartment.id })),
   );
+  // Este autoteste roda sobre as fixtures mock deste arquivo, não sobre a obra
+  // real: serve para validar a mecânica do gerador de relatórios.
+  const diagnosticsReportData: ReportDataSource = {
+    projectName: project.name,
+    responsible: 'Diagnóstico',
+    towers,
+    apartments,
+    measurements: allMeasurements,
+    photosByApartment: groupByApartment(allPhotos),
+    visitsByApartment: groupByApartment(allVisits),
+  };
 
   addResult(
     results,
@@ -948,7 +971,7 @@ export const runMvpDiagnostics = (): DiagnosticReport => {
     includePhotos: false,
     includeSchedule: true,
     includeSummary: true,
-  });
+  }, diagnosticsReportData);
   const filteredApartmentReport = createGeneratedReport('apartment', {
     apartment: '11',
     contractor: '',
@@ -966,7 +989,7 @@ export const runMvpDiagnostics = (): DiagnosticReport => {
     includePhotos: false,
     includeSchedule: true,
     includeSummary: true,
-  });
+  }, diagnosticsReportData);
   const reportWithoutOptionalData = createGeneratedReport('daily', {
     apartment: '',
     contractor: '',
@@ -984,11 +1007,11 @@ export const runMvpDiagnostics = (): DiagnosticReport => {
     includePhotos: false,
     includeSchedule: true,
     includeSummary: true,
-  });
+  }, diagnosticsReportData);
   addResult(
     results,
     'Gerar relatório - texto',
-    canGenerateReportText() ? 'OK' : 'Erro',
+    canGenerateReportText(diagnosticsReportData) ? 'OK' : 'Erro',
     'Relatório texto para WhatsApp/e-mail pode ser gerado.',
   );
   addResult(

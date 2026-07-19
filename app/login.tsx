@@ -11,10 +11,13 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
+import { Image } from 'expo-image';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Text } from '@/src/ui/Text';
 
 import { useAuth } from '@/src/data/AuthContext';
+
+const LOGO = require('@/assets/images/slash.svg');
 
 export default function LoginScreen() {
   const insets = useSafeAreaInsets();
@@ -49,9 +52,7 @@ export default function LoginScreen() {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}>
           <View style={s.brand}>
-            <View style={s.logo}>
-              <MaterialCommunityIcons name="office-building-marker" size={34} color="#FFFFFF" />
-            </View>
+            <Image source={LOGO} style={s.logo} contentFit="contain" transition={200} />
             <Text style={s.title}>Vistoria de Obras</Text>
             <Text style={s.subtitle}>Entre para acessar as vistorias da obra</Text>
           </View>
@@ -124,10 +125,7 @@ const s = StyleSheet.create({
   content: { flexGrow: 1, paddingHorizontal: 24, justifyContent: 'center' },
 
   brand: { alignItems: 'center', gap: 6, marginBottom: 26 },
-  logo: {
-    width: 68, height: 68, borderRadius: 20, backgroundColor: '#2563EB',
-    alignItems: 'center', justifyContent: 'center', marginBottom: 8,
-  },
+  logo: { width: 168, height: 168, marginBottom: 4 },
   title: { fontSize: 24, fontWeight: '900', color: '#0F172A' },
   subtitle: { fontSize: 13.5, color: '#64748B', textAlign: 'center' },
 
