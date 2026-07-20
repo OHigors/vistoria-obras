@@ -45,6 +45,10 @@ expo-web*.log
 /supabase/*
 # ...but DO version the schema migrations — pure DDL (schema, policies, grants), no secrets.
 !/supabase/migrations/
+# Edge Functions também são código-fonte: a validação roda ali, e os segredos vêm
+# do ambiente da plataforma, nunca do arquivo. Só os .env ficam de fora.
+!/supabase/functions/
+/supabase/functions/**/.env*
 
 # typescript
 *.tsbuildinfo

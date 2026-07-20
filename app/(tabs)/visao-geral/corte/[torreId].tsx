@@ -29,6 +29,7 @@ import {
 import { getProgressMapStyle } from '@/src/ui/status';
 import { ReadOnlyBanner } from '@/src/ui/ReadOnlyBanner';
 import { Skeleton } from '@/src/ui/Skeleton';
+import { useTutorialAnchor, useTutorialScreen } from '@/src/features/tutorial/TutorialContext';
 
 // ── Prancha (technical drawing) tokens ────────────────────────────────────────
 const INK = '#0F172A';
@@ -112,6 +113,13 @@ export default function CorteDaTorreScreen() {
   const [loadingItems, setLoadingItems] = useState(true);
   const [needsMigration, setNeedsMigration] = useState(false);
   const [expandedFloor, setExpandedFloor] = useState<string | null>(null);
+
+  // Tutorial: coach marks da primeira visita ao corte.
+  useTutorialScreen('corte', Boolean(tower) && !loadingItems && !needsMigration);
+  const legendaAnchor = useTutorialAnchor('corte.legenda');
+  const pavimentoAnchor = useTutorialAnchor('corte.pavimento');
+  const ghostAnchor = useTutorialAnchor('corte.ghost');
+  const prumadaAnchor = useTutorialAnchor('corte.prumada');
 
   const loadItems = useCallback(async () => {
     if (!torreId) return;
@@ -230,6 +238,13 @@ export default function CorteDaTorreScreen() {
     [itemsByLevel],
   );
 
+  // Primeiro nível vazio na ordem visual do corte (de cima para baixo) — âncora
+  // do passo "criar etapas" do tutorial.
+  const firstGhostCode = useMemo(() => {
+    const defs = [...[...LEVELS_ABOVE_FLOORS].reverse(), ...[...LEVELS_BELOW_FLOORS].reverse()];
+    return defs.find((d) => (itemsByLevel.get(d.code) ?? []).length === 0)?.code;
+  }, [itemsByLevel]);
+
   // ── Render helpers ────────────────────────────────────────────────────────────
   const renderGuide = () => <View pointerEvents="none" style={s.guideLine} />;
 
@@ -240,19 +255,24 @@ export default function CorteDaTorreScreen() {
     const fg = map.fg;
     const bg = map.bg;
     const hatched = def.kind === 'below';
+    // Viewer (sem escrita): um nível vazio só existe para RECEBER etapas — a única
+    // ação lá é criar. Sem permissão, não abrimos essa porta a partir do corte.
+    // Níveis com etapas seguem navegáveis (visualização read-only, como os aptos).
+    const locked = ghost && !canWrite;
     return (
       <View key={def.code} style={s.row}>
         {renderGuide()}
         <Text style={s.rail}>{def.rail}</Text>
         <Pressable
-          onPress={() => router.push(`/visao-geral/nivel/${torreId}/${def.code}` as never)}
-          disabled={needsMigration}
+          {...(ghost && def.code === firstGhostCode ? ghostAnchor : undefined)}
+          onPress={() => { if (!locked) router.push(`/visao-geral/nivel/${torreId}/${def.code}` as never); }}
+          disabled={needsMigration || locked}
           style={[
             s.band,
             { width: KIND_WIDTH[def.kind] },
             def.kind === 'site' && s.bandSite,
             ghost ? s.bandGhost : { backgroundColor: bg },
-            needsMigration && s.bandDisabled,
+            (needsMigration || locked) && s.bandDisabled,
           ]}>
           {hatched && !ghost && <Hatch height={BAND_MIN_H} />}
           <View style={s.bandInner}>
@@ -262,12 +282,12 @@ export default function CorteDaTorreScreen() {
               </Text>
               <Text style={s.bandSub} numberOfLines={1}>
                 {ghost
-                  ? def.hint
+                  ? (locked ? 'Sem etapas' : def.hint)
                   : `${items.length} ${items.length === 1 ? 'etapa' : 'etapas'}${critical ? ' · etapa crítica em aberto' : ''}`}
               </Text>
             </View>
             {ghost ? (
-              <MaterialCommunityIcons name="plus" size={16} color="#94A3B8" />
+              <MaterialCommunityIcons name={locked ? 'lock-outline' : 'plus'} size={16} color="#94A3B8" />
             ) : (
               <Text style={[s.bandPct, { color: fg }]}>{progress}%</Text>
             )}
@@ -280,26 +300,29 @@ export default function CorteDaTorreScreen() {
   // Trecho do túnel do elevador / escada que passa por um pavimento. Cada trecho é
   // um "nível" dinâmico (level_code `elevador-<n>` / `escada-<n>`) — toque abre a
   // mesma tela de etapas usada pelos níveis.
-  const renderSegmentStrip = (prefix: FloorSegmentPrefix, floorOrder: number) => {
+  const renderSegmentStrip = (prefix: FloorSegmentPrefix, floorOrder: number, anchored = false) => {
     const seg = FLOOR_SEGMENTS.find((sg) => sg.prefix === prefix)!;
     const code = floorSegmentCode(prefix, floorOrder);
     const items = itemsByLevel.get(code) ?? [];
     const ghost = items.length === 0;
     const progress = calcProgress(items);
     const map = getProgressMapStyle(progress);
+    // Mesma regra das faixas: prumada vazia é só ponto de criação — travada para viewer.
+    const locked = ghost && !canWrite;
     return (
       <Pressable
         key={code}
-        onPress={() => router.push(`/visao-geral/nivel/${torreId}/${code}` as never)}
-        disabled={needsMigration}
+        {...(anchored ? prumadaAnchor : undefined)}
+        onPress={() => { if (!locked) router.push(`/visao-geral/nivel/${torreId}/${code}` as never); }}
+        disabled={needsMigration || locked}
         accessibilityRole="button"
         accessibilityLabel={`${seg.label} do pavimento ${floorOrder || 'térreo'}`}
         style={[
           s.segStrip,
           ghost ? s.segStripGhost : { backgroundColor: map.bg, borderColor: INK },
-          needsMigration && s.bandDisabled,
+          (needsMigration || locked) && s.bandDisabled,
         ]}>
-        <MaterialCommunityIcons name={seg.icon as never} size={14} color={ghost ? '#94A3B8' : map.fg} />
+        <MaterialCommunityIcons name={(locked ? 'lock-outline' : seg.icon) as never} size={14} color={ghost ? '#94A3B8' : map.fg} />
         <Text style={[s.segPct, { color: ghost ? '#94A3B8' : map.fg }]}>
           {ghost ? '—' : `${progress}%`}
         </Text>
@@ -307,7 +330,7 @@ export default function CorteDaTorreScreen() {
     );
   };
 
-  const renderFloorBand = (floor: (typeof floors)[number]) => {
+  const renderFloorBand = (floor: (typeof floors)[number], isFirst = false) => {
     // Cor puramente por % de conclusão (mesma paleta dos níveis e apartamentos).
     const map = getProgressMapStyle(floor.progress);
     const fg = map.fg;
@@ -322,6 +345,7 @@ export default function CorteDaTorreScreen() {
           <View style={s.floorCore}>
           {/* Pavimento · escada e elevador, ambos à direita (as duas prumadas do core) */}
           <Pressable
+            {...(isFirst ? pavimentoAnchor : undefined)}
             onPress={() => setExpandedFloor(expanded ? null : floor.floor)}
             style={[
               s.band,
@@ -346,7 +370,7 @@ export default function CorteDaTorreScreen() {
               />
             </View>
           </Pressable>
-          {renderSegmentStrip('escada', floorOrder)}
+          {renderSegmentStrip('escada', floorOrder, isFirst)}
           {renderSegmentStrip('elevador', floorOrder)}
           </View>
         </View>
@@ -468,7 +492,7 @@ export default function CorteDaTorreScreen() {
 
         {/* ── Legenda: reflete o "jogo de cores" real (paleta por % de conclusão),
             + sem etapas (tracejado) e hachurado (níveis enterrados). ── */}
-        <View style={s.legend}>
+        <View style={s.legend} {...legendaAnchor}>
           {[10, 30, 50, 70, 90].map((pct) => {
             const m = getProgressMapStyle(pct);
             return (
@@ -511,7 +535,7 @@ export default function CorteDaTorreScreen() {
         ) : (
           <View style={s.sheet}>
             {aboveLevels.map(renderLevelBand)}
-            {floors.map(renderFloorBand)}
+            {floors.map((floor, floorIdx) => renderFloorBand(floor, floorIdx === 0))}
             {belowLevels.map((def, idx) => (
               <View key={def.code}>
                 {renderLevelBand(def)}

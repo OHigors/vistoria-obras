@@ -10,6 +10,7 @@ import { useObras } from '@/src/data/ObrasContext';
 import { summarizeSchedule, summarizeScheduleBoard } from '@/src/data/schedule';
 import { ReadOnlyBanner } from '@/src/ui/ReadOnlyBanner';
 import { Skeleton } from '@/src/ui/Skeleton';
+import { useTutorialAnchor, useTutorialScreen } from '@/src/features/tutorial/TutorialContext';
 
 // Teal é a cor do cronograma no restante do app; aqui ela sai da borda e vira o
 // fundo do card principal — é o único elemento colorido da tela, e é o que põe
@@ -56,6 +57,14 @@ export default function CronogramaScreen() {
   const busy = loading || loadingSchedule;
   const hasDelays = board.delayedApartments > 0;
 
+  // Tutorial: coach marks da primeira visita à aba Cronograma.
+  useTutorialScreen('cronograma', !busy);
+  const heroAnchor = useTutorialAnchor('cron.hero');
+  const kpisAnchor = useTutorialAnchor('cron.kpis');
+  // A mesma âncora vale para o card da principal etapa e para o estado vazio —
+  // só um dos dois está montado por vez.
+  const topStepAnchor = useTutorialAnchor('cron.topstep');
+
   return (
     <ScrollView
       style={s.scroll}
@@ -66,6 +75,7 @@ export default function CronogramaScreen() {
 
       {/* CRONOGRAMA DA OBRA — o destino principal da aba, em fundo teal */}
       <Pressable
+        {...heroAnchor}
         onPress={() => router.push('/cronograma/obra' as any)}
         accessibilityRole="button"
         accessibilityLabel="Abrir o Cronograma da Obra"
@@ -87,7 +97,7 @@ export default function CronogramaScreen() {
           <Skeleton height={104} radius={14} style={{ flex: 1 }} />
         </View>
       ) : (
-        <View style={s.kpiRow}>
+        <View style={s.kpiRow} {...kpisAnchor}>
           <View style={s.kpiCard}>
             <MaterialCommunityIcons
               name={hasDelays ? 'calendar-remove' : 'calendar-check'}
@@ -111,7 +121,7 @@ export default function CronogramaScreen() {
       {busy ? (
         <Skeleton height={116} radius={16} />
       ) : board.topStep ? (
-        <View style={s.section}>
+        <View style={s.section} {...topStepAnchor}>
           <Text style={s.sectionTitle}>Principal etapa do Cronograma</Text>
           <View style={s.topStepRow}>
             <View style={s.topStepIcon}>
@@ -126,7 +136,7 @@ export default function CronogramaScreen() {
           </View>
         </View>
       ) : (
-        <View style={[s.section, s.sectionCentered]}>
+        <View style={[s.section, s.sectionCentered]} {...topStepAnchor}>
           <MaterialCommunityIcons name="calendar-blank-outline" size={40} color="#CBD5E1" />
           <Text style={s.emptyTitle}>Nenhuma etapa planejada</Text>
           <Text style={s.emptySub}>

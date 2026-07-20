@@ -182,6 +182,13 @@ export async function getInspectionPhotoUrl(storagePath: string): Promise<string
   return data.signedUrl;
 }
 
+// Rota validada: a Edge Function `upload-inspection-photo` confere a ASSINATURA
+// do arquivo (o bucket só confere o Content-Type declarado). Fica atrás de uma
+// flag porque a função precisa estar publicada antes — ligar isso sem o deploy
+// derruba o envio de fotos. Sem a flag, o upload segue direto para o Storage,
+// que continua protegido por RLS, limite de 10 MB e allowlist de MIME.
+const UPLOAD_VIA_FUNCTION = process.env.EXPO_PUBLIC_PHOTO_UPLOAD_FN === '1';
+
 export async function uploadInspectionPhoto(
   localUri: string,
   destinationPath: string,
@@ -190,15 +197,30 @@ export async function uploadInspectionPhoto(
   // Works for data:, file:, http(s):, blob: — fetch handles them all in RN/web.
   const response = await fetch(localUri);
   const blob = await response.blob();
+  // Espelho local dos limites do servidor: falha cedo, com mensagem em português,
+  // sem gastar a subida. Quem manda é o bucket (10 MB + MIME) e a RLS.
   if (!contentType.startsWith('image/')) {
     throw new Error(`Tipo de arquivo não permitido: ${contentType}`);
   }
   if (blob.size > MAX_PHOTO_BYTES) {
     throw new Error('Foto excede o tamanho máximo de 10 MB.');
   }
+
+  if (UPLOAD_VIA_FUNCTION) {
+    const { error } = await supabase.functions.invoke('upload-inspection-photo', {
+      body: blob,
+      headers: { 'x-photo-path': destinationPath },
+    });
+    if (error) throw error;
+    return destinationPath;
+  }
+
+  // upsert: false — o caminho carrega um id único por foto, então colisão só
+  // acontece por engano ou por má-fé. Sobrescrever calado uma evidência de obra
+  // é perda de prova; melhor falhar e aparecer.
   const { error } = await supabase.storage
     .from(INSPECTION_PHOTOS_BUCKET)
-    .upload(destinationPath, blob, { contentType, upsert: true });
+    .upload(destinationPath, blob, { contentType, upsert: false });
   if (error) throw error;
   return destinationPath;
 }
