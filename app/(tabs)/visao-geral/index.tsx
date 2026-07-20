@@ -7,11 +7,19 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { formatCurrency } from '@/src/data/localMeasurements';
 import { useObras } from '@/src/data/ObrasContext';
 import { Skeleton } from '@/src/ui/Skeleton';
+import { useTutorialAnchor, useTutorialScreen } from '@/src/features/tutorial/TutorialContext';
 
 export default function VisaoGeralScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { apartments, towers, measurements, loading } = useObras();
+
+  // Tutorial: coach marks da primeira visita à Visão Geral.
+  useTutorialScreen('visao-geral', !loading);
+  const torresAnchor = useTutorialAnchor('vg.torres');
+  const servicosAnchor = useTutorialAnchor('vg.servicos');
+  const medicoesAnchor = useTutorialAnchor('vg.medicoes');
+  const relatoriosAnchor = useTutorialAnchor('vg.relatorios');
 
   return (
     <ScrollView
@@ -24,7 +32,7 @@ export default function VisaoGeralScreen() {
         <Text style={s.sectionTitle}>Torres</Text>
         {loading
           ? [1, 2].map((i) => <Skeleton key={i} height={100} radius={10} />)
-          : towers.map((tower) => {
+          : towers.map((tower, towerIdx) => {
               const apts = apartments.filter((a) => a.towerId === tower.id);
               const avg = apts.length ? Math.round(apts.reduce((t, a) => t + a.progress, 0) / apts.length) : 0;
               const criticalCount = apts.filter((a) => a.status === 'critical').length;
@@ -32,6 +40,7 @@ export default function VisaoGeralScreen() {
               return (
                 <Pressable
                   key={tower.id}
+                  {...(towerIdx === 0 ? torresAnchor : undefined)}
                   onPress={() => router.push({ pathname: '/visao-geral/corte/[torreId]', params: { torreId: tower.id } })}
                   style={s.towerCard}>
                   <View style={s.towerTop}>
@@ -66,6 +75,7 @@ export default function VisaoGeralScreen() {
       ].map((item) => (
         <Pressable
           key={item.href}
+          {...(item.label === 'Serviços e Etapas' ? servicosAnchor : medicoesAnchor)}
           onPress={() => router.push(item.href as any)}
           accessibilityRole="button"
           accessibilityLabel={`Abrir ${item.label}`}
@@ -123,7 +133,7 @@ export default function VisaoGeralScreen() {
       </View>
 
       {/* RELATÓRIOS */}
-      <View style={s.section}>
+      <View style={s.section} {...relatoriosAnchor}>
         <Text style={s.sectionTitle}>Relatórios</Text>
         {[
           { href: '/visao-geral/relatorios/relatorio-geral', icon: 'table-large', label: 'Relatório Geral', desc: 'Tabela completa: apartamentos, itens em aberto, cronograma, medições e visitas.' },

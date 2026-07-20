@@ -1,10 +1,14 @@
 import { Tabs } from 'expo-router';
+import { View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { HapticTab } from '@/components/haptic-tab';
 import { IconSymbol } from '@/components/ui/icon-symbol';
 import { AreaFilterProvider } from '@/src/data/AreaFilterContext';
 import { ObrasProvider } from '@/src/data/ObrasContext';
+import { CoachMarkOverlay } from '@/src/features/tutorial/CoachMarkOverlay';
+import { TutorialProvider } from '@/src/features/tutorial/TutorialContext';
+import { WelcomeCarousel } from '@/src/features/tutorial/WelcomeCarousel';
 
 export default function TabLayout() {
   const insets = useSafeAreaInsets();
@@ -13,6 +17,10 @@ export default function TabLayout() {
   return (
     <AreaFilterProvider>
     <ObrasProvider>
+    {/* Tutorial por cima de tudo (inclusive da barra de abas): o overlay é
+        irmão do <Tabs> dentro de um contêiner de tela cheia. */}
+    <TutorialProvider>
+    <View style={{ flex: 1 }}>
     <Tabs
       screenOptions={{
         tabBarActiveTintColor: '#2563EB',
@@ -56,6 +64,10 @@ export default function TabLayout() {
       {/* Perfil: acessível pelo ícone do usuário no Início, fora da barra de abas. */}
       <Tabs.Screen name="perfil" options={{ href: null }} />
     </Tabs>
+    <WelcomeCarousel />
+    <CoachMarkOverlay />
+    </View>
+    </TutorialProvider>
     </ObrasProvider>
     </AreaFilterProvider>
   );

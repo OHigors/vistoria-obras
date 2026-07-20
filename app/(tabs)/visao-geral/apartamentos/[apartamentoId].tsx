@@ -42,6 +42,7 @@ import { checklistConfig, getProgressMapStyle, statusConfig } from '@/src/ui/sta
 import { computeApartmentStatus as calculateApartmentStatus } from '@/src/data/apartmentStatus';
 import { ReadOnlyBanner } from '@/src/ui/ReadOnlyBanner';
 import { inspectionStyles as s } from '@/src/features/inspection/inspectionStyles';
+import { useTutorialAnchor, useTutorialScreen } from '@/src/features/tutorial/TutorialContext';
 
 // Ordem dos botões de status: Concluído → Em andamento → Não iniciado → N/A.
 const progressOrder: ChecklistState[] = ['ok', 'partial', 'pending', 'notApplicable'];
@@ -171,6 +172,15 @@ export default function ApartmentDetailScreen() {
   const goBackToTower = useCallback(() => {
     router.push(apartment ? `/(tabs)/visao-geral/corte/${apartment.towerId}` as any : '/(tabs)/visao-geral' as any);
   }, [router, apartment?.towerId]);
+
+  // Tutorial: coach marks da primeira visita a um apartamento. Fotos e
+  // Cronograma ancoram nos BOTÕES de aba (sempre presentes na barra).
+  useTutorialScreen('apartamento', Boolean(apartment) && !loading);
+  const kpisAnchor = useTutorialAnchor('apto.kpis');
+  const abasAnchor = useTutorialAnchor('apto.abas');
+  const checklistAnchor = useTutorialAnchor('apto.checklist');
+  const fotosAnchor = useTutorialAnchor('apto.fotos');
+  const cronoAnchor = useTutorialAnchor('apto.cronograma');
 
   const [checklist, setChecklist] = useState<EditableChecklistItem[]>([]);
   // Baseline carregado do banco — usado por "restaurar" (descartar alterações).
@@ -1205,7 +1215,7 @@ export default function ApartmentDetailScreen() {
         ) : null}
 
         {/* KPI ROW */}
-        <View style={s.kpiRow}>
+        <View style={s.kpiRow} {...kpisAnchor}>
           {[
             { icon: 'clipboard-list-outline', value: pendingItems.length, label: 'Em aberto', color: '#4a5565', borderColor: undefined },
             { icon: 'lock-outline', value: lockedStepsCount, label: 'Travados', color: '#B45309' },
@@ -1221,7 +1231,7 @@ export default function ApartmentDetailScreen() {
         </View>
 
         {/* TAB BAR */}
-        <View style={s.tabBarWrap}>
+        <View style={s.tabBarWrap} {...abasAnchor}>
           <ScrollView
             ref={tabScrollRef}
             horizontal
@@ -1234,7 +1244,11 @@ export default function ApartmentDetailScreen() {
             {detailTabs.map((tab) => {
               const active = activeTab === tab;
               return (
-                <Pressable key={tab} onPress={() => setActiveTab(tab)} style={[s.tabBtn, active && s.tabBtnActive]}>
+                <Pressable
+                  key={tab}
+                  {...(tab === 'Fotos' ? fotosAnchor : tab === 'Cronograma' ? cronoAnchor : undefined)}
+                  onPress={() => setActiveTab(tab)}
+                  style={[s.tabBtn, active && s.tabBtnActive]}>
                   <MaterialCommunityIcons name={TAB_ICONS[tab] as any} size={14} color={active ? '#2563EB' : '#94A3B8'} />
                   <Text style={[s.tabBtnText, active && s.tabBtnTextActive]}>{tab}</Text>
                 </Pressable>
@@ -1354,7 +1368,7 @@ export default function ApartmentDetailScreen() {
         {/* ── CHECKLIST ── */}
         {activeTab === 'Checklist' && (
           <>
-            <View style={s.checklistHeader}>
+            <View style={s.checklistHeader} {...checklistAnchor}>
               <Text style={s.checklistProgress}>{areaOkCount} / {areaChecklist.length} concluídos</Text>
               <View style={s.checklistHeaderActions}>
                 {canWrite && (

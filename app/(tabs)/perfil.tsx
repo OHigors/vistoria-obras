@@ -8,6 +8,7 @@ import { Text } from '@/src/ui/Text';
 import { useAuth } from '@/src/data/AuthContext';
 import { useObras } from '@/src/data/ObrasContext';
 import * as db from '@/src/data/db';
+import { useTutorial, useTutorialAnchor, useTutorialScreen } from '@/src/features/tutorial/TutorialContext';
 
 const HEADER = '#334155';
 
@@ -22,6 +23,12 @@ export default function PerfilScreen() {
   const [savingName, setSavingName] = useState(false);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [switchedTo, setSwitchedTo] = useState<string | null>(null);
+
+  // Tutorial: coach marks da primeira visita ao Perfil + "Rever tutorial".
+  const { resetTutorial } = useTutorial();
+  useTutorialScreen('perfil', true);
+  const obrasAnchor = useTutorialAnchor('perfil.obras');
+  const papelAnchor = useTutorialAnchor('perfil.papel');
 
   const displayName = profile?.name?.trim() || user?.email?.split('@')[0] || 'Usuário';
   const email = profile?.email || user?.email || '';
@@ -129,23 +136,30 @@ export default function PerfilScreen() {
         </View>
 
         {myObras.length === 0 ? (
-          <View style={[s.card, s.cardCentered]}>
+          <View style={[s.card, s.cardCentered]} {...obrasAnchor}>
             <MaterialCommunityIcons name="office-building-outline" size={30} color="#CBD5E1" />
             <Text style={s.emptyText}>Nenhuma obra atribuída ao seu usuário.</Text>
             <Text style={s.emptySub}>Peça a um administrador para liberar o acesso.</Text>
           </View>
         ) : (
-          myObras.map((o) => {
+          myObras.map((o, obraIdx) => {
             const active = o.id === activeObraId;
+            // Âncoras do tutorial: a lista no primeiro card; o selo de papel no
+            // card da obra ativa (ou no primeiro, se nenhuma estiver ativa).
+            const anchorsRole = activeObraId ? active : obraIdx === 0;
             return (
-              <Pressable key={o.id} onPress={() => onPickObra(o.id)} style={[s.obraCard, active && s.obraCardActive]}>
+              <Pressable
+                key={o.id}
+                {...(obraIdx === 0 ? obrasAnchor : undefined)}
+                onPress={() => onPickObra(o.id)}
+                style={[s.obraCard, active && s.obraCardActive]}>
                 <View style={[s.obraIcon, active && s.obraIconActive]}>
                   <MaterialCommunityIcons name="office-building" size={20} color={active ? '#FFFFFF' : '#64748B'} />
                 </View>
                 <View style={s.obraInfo}>
                   <Text style={s.obraName}>{o.name}</Text>
                   {!!o.summary && <Text style={s.obraSummary} numberOfLines={1}>{o.summary}</Text>}
-                  <View style={s.roleBadge}>
+                  <View style={s.roleBadge} {...(anchorsRole ? papelAnchor : undefined)}>
                     <Text style={s.roleBadgeText}>{o.role}</Text>
                   </View>
                 </View>
@@ -164,6 +178,16 @@ export default function PerfilScreen() {
           })
         )}
       </ScrollView>
+
+      {/* ── Rever tutorial — limpa o progresso salvo e reabre as boas-vindas ── */}
+      <Pressable
+        onPress={resetTutorial}
+        accessibilityRole="button"
+        accessibilityLabel="Rever o tutorial do aplicativo"
+        style={s.replayBtn}>
+        <MaterialCommunityIcons name="replay" size={18} color="#2563EB" />
+        <Text style={s.replayText}>Rever tutorial</Text>
+      </Pressable>
 
       {/* ── Sair — ancorado embaixo, acima da barra de abas ── */}
       <Pressable onPress={() => signOut()} style={s.logoutBtn}>
@@ -228,6 +252,14 @@ const s = StyleSheet.create({
   roleBadgeText: { fontSize: 10, fontWeight: '800', color: '#64748B', textTransform: 'uppercase' },
   activePill: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#2563EB', borderRadius: 999, paddingHorizontal: 9, paddingVertical: 4 },
   activePillText: { color: '#FFFFFF', fontSize: 10.5, fontWeight: '800' },
+
+  // rever tutorial — mesmo formato do "Sair", em azul de ação
+  replayBtn: {
+    marginHorizontal: 16, marginBottom: 8,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    backgroundColor: '#FFFFFF', borderRadius: 14, borderWidth: 1, borderColor: '#BFDBFE', paddingVertical: 14,
+  },
+  replayText: { color: '#2563EB', fontSize: 14, fontWeight: '800' },
 
   // botão solto, ancorado embaixo — a barra de abas já cobre a safe area
   logoutBtn: {

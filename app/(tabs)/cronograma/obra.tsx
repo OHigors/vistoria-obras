@@ -23,6 +23,7 @@ import {
 } from '@/src/data/mockCronograma';
 import { buildCronogramaFromData, getCronogramaStages, type TowerScheduledInput } from '@/src/data/cronogramaReal';
 import { getTowerLevel, TOWER_LEVELS } from '@/src/data/towerLevels';
+import { useTutorialAnchor, useTutorialScreen } from '@/src/features/tutorial/TutorialContext';
 
 // ── Color token (teal) ──────────────────────────────────────────────────────────
 const C = { primary: '#0D9488', light: '#F0FDFA', medium: '#14B8A6' } as const;
@@ -276,6 +277,14 @@ export default function CronogramaObraScreen() {
 
   const hasTasks = result.tasks.length > 0;
   const isLoading = loading && apartments.length === 0;
+
+  // Tutorial: coach marks da primeira visita ao Gantt. Sem tarefas, os passos
+  // sem âncora caem no card central — os conceitos valem do mesmo jeito.
+  useTutorialScreen('gantt', !isLoading);
+  const legendaAnchor = useTutorialAnchor('gantt.legenda');
+  const filtrosAnchor = useTutorialAnchor('gantt.filtros');
+  // Mesma âncora no botão normal e no do estado vazio — nunca montam juntos.
+  const addAnchor = useTutorialAnchor('gantt.add');
 
   const openAdd = () => {
     if (!canWrite) return;
@@ -560,7 +569,7 @@ export default function CronogramaObraScreen() {
               atribuir datas e responsáveis a uma etapa.
             </Text>
             {canWrite && (
-              <Pressable onPress={openAdd} style={s.emptyBtn}>
+              <Pressable {...addAnchor} onPress={openAdd} style={s.emptyBtn}>
                 <MaterialCommunityIcons name="plus" size={18} color="#FFFFFF" />
                 <Text style={s.emptyBtnText}>Adicionar tarefa</Text>
               </Pressable>
@@ -587,7 +596,7 @@ export default function CronogramaObraScreen() {
             {/* ADD BUTTON */}
             {canWrite && (
               <>
-                <Pressable onPress={openAdd} style={s.addBtn}>
+                <Pressable {...addAnchor} onPress={openAdd} style={s.addBtn}>
                   <MaterialCommunityIcons name="plus-circle-outline" size={18} color={C.primary} />
                   <Text style={s.addBtnText}>Adicionar tarefa ao cronograma</Text>
                 </Pressable>
@@ -616,7 +625,7 @@ export default function CronogramaObraScreen() {
             )}
 
             {/* VIEW TOGGLE */}
-            <View style={s.toggle}>
+            <View style={s.toggle} {...filtrosAnchor}>
               {([['pavimento', 'Por pavimento', 'stairs'], ['etapa', 'Por etapa', 'layers-triple-outline']] as const).map(
                 ([v, label, icon]) => {
                   const active = view === v;
@@ -657,7 +666,7 @@ export default function CronogramaObraScreen() {
                 )}
 
             {/* LEGEND */}
-            <View style={s.legend}>
+            <View style={s.legend} {...legendaAnchor}>
               <View style={s.legendItem}>
                 <View style={[s.legendSwatch, { backgroundColor: '#3B82F6', borderColor: '#1D4ED8' }]} />
                 <Text style={s.legendText}>Previsto</Text>

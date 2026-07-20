@@ -25,6 +25,7 @@ import { checklistConfig, getProgressMapStyle, statusConfig } from '@/src/ui/sta
 import { computeApartmentStatus as calcStatus } from '@/src/data/apartmentStatus';
 import { ReadOnlyBanner } from '@/src/ui/ReadOnlyBanner';
 import { inspectionStyles as s } from '@/src/features/inspection/inspectionStyles';
+import { useTutorialAnchor, useTutorialScreen } from '@/src/features/tutorial/TutorialContext';
 
 type TowerItem = db.TowerChecklistItem;
 
@@ -98,6 +99,11 @@ export default function NivelDaTorreScreen() {
   const [items, setItems] = useState<TowerItem[]>([]);
   const [photos, setPhotos] = useState<InspectionPhoto[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // Tutorial: coach marks da primeira visita a um nível da torre.
+  useTutorialScreen('nivel', Boolean(tower && level) && !loading);
+  const etapasAnchor = useTutorialAnchor('nivel.etapas');
+  const addStepAnchor = useTutorialAnchor('nivel.add');
   const [needsMigration, setNeedsMigration] = useState(false);
   const [activeTab, setActiveTab] = useState<DetailTab>('Resumo');
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
@@ -492,7 +498,7 @@ export default function NivelDaTorreScreen() {
           <View style={s.headerBar}>
             <View style={[s.headerBarFill, { width: `${progress}%` as `${number}%` }]} />
           </View>
-          <View style={s.headerMeta}>
+          <View style={s.headerMeta} {...etapasAnchor}>
             <View style={s.headerMetaItem}>
               <MaterialCommunityIcons name="checkbox-marked-circle-outline" size={13} color="rgba(255,255,255,0.8)" />
               <Text style={s.headerMetaText}>{okCount} de {items.length} etapas concluídas</Text>
@@ -630,7 +636,7 @@ export default function NivelDaTorreScreen() {
               <Text style={s.checklistProgress}>{okCount} / {items.length} concluídos</Text>
               <View style={s.checklistHeaderActions}>
                 {canWrite && (
-                  <Pressable onPress={() => { setAddStepSearch(''); setAddStepOpen(true); }} style={s.addStepBtn}>
+                  <Pressable {...addStepAnchor} onPress={() => { setAddStepSearch(''); setAddStepOpen(true); }} style={s.addStepBtn}>
                     <MaterialCommunityIcons name="plus-circle-outline" size={14} color="#2563EB" />
                     <Text style={s.addStepBtnText}>Adicionar etapa</Text>
                   </Pressable>

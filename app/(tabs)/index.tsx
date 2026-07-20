@@ -13,6 +13,7 @@ import { getServiceDependencyMap } from '@/src/data/serviceStages';
 import { getTowerLevel } from '@/src/data/towerLevels';
 import { getProgressColor } from '@/src/ui/status';
 import { Skeleton } from '@/src/ui/Skeleton';
+import { useTutorialAnchor, useTutorialScreen } from '@/src/features/tutorial/TutorialContext';
 
 const pad2 = (n: number) => String(n).padStart(2, '0');
 const fmtDateBr = (d: Date) => `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()}`;
@@ -54,6 +55,14 @@ export default function DashboardScreen() {
   const [alertOpen, setAlertOpen] = useState(false);
   const [kpiModal, setKpiModal] = useState<Kpi | null>(null);
   const [view, setView] = useState<DashView>('kpi');
+
+  // Tutorial: coach marks da primeira visita ao Início.
+  useTutorialScreen('inicio', !loading);
+  const heroAnchor = useTutorialAnchor('inicio.hero');
+  const focosAnchor = useTutorialAnchor('inicio.focos');
+  const abasAnchor = useTutorialAnchor('inicio.abas');
+  const kpisAnchor = useTutorialAnchor('inicio.kpis');
+  const sinoAnchor = useTutorialAnchor('inicio.sino');
 
   // Etapas "Atrasada": calculadas no banco (RPC), com a MESMA regra do Gantt.
   // Antes, o Início rodava buildCronogramaFromData sobre todos os ~17k itens só
@@ -315,6 +324,7 @@ export default function DashboardScreen() {
           </View>
           <View style={s.headerActions}>
             <Pressable
+              {...sinoAnchor}
               onPress={() => setAlertOpen(true)}
               accessibilityRole="button"
               accessibilityLabel={lateSteps.length > 0 ? `Alertas da obra: ${lateSteps.length} etapa(s) atrasada(s)` : 'Alertas da obra'}
@@ -354,7 +364,7 @@ export default function DashboardScreen() {
           </View>
         </View>
       ) : (
-        <View style={s.heroCard}>
+        <View style={s.heroCard} {...heroAnchor}>
           <Text style={s.heroLabel}>Progresso geral da obra</Text>
           <Text style={[s.heroPercent, { color: heroColor }]}>{completedAverage}%</Text>
           <View style={s.heroBar}>
@@ -382,7 +392,7 @@ export default function DashboardScreen() {
           <Skeleton height={44} radius={12} style={{ marginTop: 8 }} />
         </View>
       ) : (
-        <View style={s.focosCard}>
+        <View style={s.focosCard} {...focosAnchor}>
           <View style={s.panelHead}>
             <MaterialCommunityIcons name="target" size={16} color="#0F172A" />
             <Text style={s.panelTitle}>Focos de atenção</Text>
@@ -420,7 +430,7 @@ export default function DashboardScreen() {
           claro que o que está abaixo pertence à aba selecionada */}
       <View style={s.tabModule}>
         <View style={s.tabModuleHeader}>
-          <View style={s.viewToggle}>
+          <View style={s.viewToggle} {...abasAnchor}>
             <Pressable
               onPress={() => setView('kpi')}
               accessibilityRole="button"
@@ -454,7 +464,7 @@ export default function DashboardScreen() {
               </>
             ) : (
               <>
-                <View style={s.kpiGrid}>
+                <View style={s.kpiGrid} {...kpisAnchor}>
                   {kpis.map((kpi) => <KpiCard key={kpi.key} kpi={kpi} onPress={() => setKpiModal(kpi)} />)}
                 </View>
 
