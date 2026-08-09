@@ -17,6 +17,10 @@ export type CronogramaTask = {
   pavimento: string;
   pavimentoOrder: number;
   tower?: string;
+  // Só nas tarefas de NÍVEL (apartmentId === ''): destino para abrir a tela do
+  // nível a partir do cronograma. Tarefa de apartamento navega por apartmentId.
+  towerId?: string;
+  levelCode?: string;
   etapaId: string;
   etapa: string;
   etapaAbrev: string;

@@ -1,4 +1,4 @@
-import { Link, useFocusEffect } from 'expo-router';
+import { Link, useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useMemo, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { Text } from '@/src/ui/Text';
@@ -22,7 +22,8 @@ type IconName = React.ComponentProps<typeof MaterialCommunityIcons>['name'];
 
 // ── KPI tile ─────────────────────────────────────────────────────────────────
 type Kpi = { key: string; icon: IconName; value: string | number; label: string; sub: string; color: string; bg: string };
-type KpiDetailRow = { id: string; primary: string; secondary?: string; badge?: string };
+// `href` presente = a linha leva a algum lugar (apartamento ou nível da torre).
+type KpiDetailRow = { id: string; primary: string; secondary?: string; badge?: string; href?: string };
 
 function KpiCard({ kpi, onPress }: { kpi: Kpi; onPress: () => void }) {
   return (
@@ -51,6 +52,7 @@ type DashView = 'kpi' | 'dist';
 
 export default function DashboardScreen() {
   const insets = useSafeAreaInsets();
+  const router = useRouter();
   const { apartments, towers, project, measurements, profile, loading } = useObras();
   const [alertOpen, setAlertOpen] = useState(false);
   const [kpiModal, setKpiModal] = useState<Kpi | null>(null);
@@ -167,16 +169,24 @@ export default function DashboardScreen() {
         ? `${r.towerName ? `${r.towerName} · ` : ''}Apto ${r.aptNumber}`
         : `${r.towerName ? `${r.towerName} · ` : ''}${getTowerLevel(r.levelCode ?? '')?.label ?? r.levelCode ?? ''}`;
 
+    // Onde a marcação está: apartamento abre a unidade, nível abre as etapas do
+    // pavimento. Sem id resolvido (dado incompleto do RPC), a linha fica só
+    // informativa em vez de navegar para lugar nenhum.
+    const flagHref = (r: db.DashboardFlagRow) =>
+      r.scope === 'apt'
+        ? (r.aptId ? `/visao-geral/apartamentos/${r.aptId}` : undefined)
+        : (r.towerId && r.levelCode ? `/visao-geral/nivel/${r.towerId}/${r.levelCode}` : undefined);
+
     // Emergências — uma linha por unidade (apto/nível), juntando os textos.
-    const emergencyByUnit = new Map<string, { loc: string; texts: string[] }>();
+    const emergencyByUnit = new Map<string, { loc: string; href?: string; texts: string[] }>();
     for (const r of dashboard?.emergency ?? []) {
       const key = r.scope === 'apt' ? (r.aptId ?? '') : `${r.towerId}|${r.levelCode ?? ''}`;
-      const e = emergencyByUnit.get(key) ?? { loc: flagLoc(r), texts: [] };
+      const e = emergencyByUnit.get(key) ?? { loc: flagLoc(r), href: flagHref(r), texts: [] };
       e.texts.push(`${r.label}: ${r.text}`);
       emergencyByUnit.set(key, e);
     }
     const emergency: KpiDetailRow[] = [...emergencyByUnit.entries()].map(([key, v]) => ({
-      id: key, primary: v.loc, secondary: v.texts.join('  ·  '),
+      id: key, primary: v.loc, secondary: v.texts.join('  ·  '), href: v.href,
     }));
 
     // Observações — uma linha por comentário.
@@ -184,6 +194,7 @@ export default function DashboardScreen() {
       id: r.scope === 'apt' ? `${r.aptId}-${r.itemId}` : `${r.towerId}-${r.itemId}`,
       primary: flagLoc(r),
       secondary: `${r.label}: ${r.text}`,
+      href: flagHref(r),
     }));
 
     const value: KpiDetailRow[] = measurements.map((m) => {
@@ -193,6 +204,13 @@ export default function DashboardScreen() {
 
     return { done, delayed, emergency, obs, value };
   }, [apartments, towers, dashboard, lateSteps, measurements]);
+
+  // Abre o destino de uma linha do pop-up. Fecha o modal ANTES de navegar: se
+  // ficasse aberto, cobriria a tela recém-aberta.
+  const openKpiTarget = useCallback((href: string) => {
+    setKpiModal(null);
+    router.push(href as never);
+  }, [router]);
 
   const total = apartments.length || 1;
   const completedPct = Math.round((statusCounts.excellent / total) * 100);
@@ -714,20 +732,38 @@ export default function DashboardScreen() {
                     </View>
                   );
                 }
-                return rows.map((r) => (
-                  <View key={r.id} style={s.kpiDetailRow}>
-                    <View style={[s.kpiDetailDot, { backgroundColor: kpiModal?.color ?? '#94A3B8' }]} />
-                    <View style={{ flex: 1 }}>
-                      <Text style={s.kpiDetailPrimary} numberOfLines={1}>{r.primary}</Text>
-                      {!!r.secondary && <Text style={s.kpiDetailSecondary} numberOfLines={2}>{r.secondary}</Text>}
-                    </View>
-                    {!!r.badge && (
-                      <View style={s.kpiDetailBadge}>
-                        <Text style={[s.kpiDetailBadgeText, { color: kpiModal?.color ?? '#334155' }]}>{r.badge}</Text>
+                return rows.map((r) => {
+                  const inner = (
+                    <>
+                      <View style={[s.kpiDetailDot, { backgroundColor: kpiModal?.color ?? '#94A3B8' }]} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={s.kpiDetailPrimary} numberOfLines={1}>{r.primary}</Text>
+                        {!!r.secondary && <Text style={s.kpiDetailSecondary} numberOfLines={2}>{r.secondary}</Text>}
                       </View>
-                    )}
-                  </View>
-                ));
+                      {!!r.badge && (
+                        <View style={s.kpiDetailBadge}>
+                          <Text style={[s.kpiDetailBadgeText, { color: kpiModal?.color ?? '#334155' }]}>{r.badge}</Text>
+                        </View>
+                      )}
+                      {/* A seta só aparece onde há destino — é o que diferencia
+                          uma linha tocável de uma puramente informativa. */}
+                      {!!r.href && <MaterialCommunityIcons name="chevron-right" size={16} color="#CBD5E1" />}
+                    </>
+                  );
+                  if (!r.href) {
+                    return <View key={r.id} style={s.kpiDetailRow}>{inner}</View>;
+                  }
+                  return (
+                    <Pressable
+                      key={r.id}
+                      onPress={() => openKpiTarget(r.href!)}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Abrir ${r.primary}`}
+                      style={({ pressed }) => [s.kpiDetailRow, pressed && s.kpiDetailRowPressed]}>
+                      {inner}
+                    </Pressable>
+                  );
+                });
               })()}
             </ScrollView>
           </Pressable>
@@ -796,7 +832,8 @@ const s = StyleSheet.create({
   medidoValue: { fontSize: 18, fontWeight: '900' },
   // kpi detail modal
   kpiModalSub: { color: '#94A3B8', fontSize: 12, fontWeight: '600', marginTop: 1 },
-  kpiDetailRow: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#F8FAFC', borderRadius: 10, borderWidth: 1, borderColor: '#EEF2F7', paddingVertical: 10, paddingHorizontal: 12 },
+  kpiDetailRow: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#F8FAFC', borderRadius: 10, borderWidth: 1, borderColor: '#EEF2F7', paddingVertical: 10, paddingHorizontal: 12, minHeight: 44 },
+  kpiDetailRowPressed: { backgroundColor: '#EEF2F7', borderColor: '#CBD5E1' },
   kpiDetailDot: { width: 8, height: 8, borderRadius: 4 },
   kpiDetailPrimary: { color: '#0F172A', fontSize: 13, fontWeight: '800' },
   kpiDetailSecondary: { color: '#64748B', fontSize: 11.5, fontWeight: '600', marginTop: 1 },

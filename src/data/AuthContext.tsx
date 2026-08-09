@@ -3,11 +3,17 @@ import type { Session, User } from '@supabase/supabase-js';
 
 import { supabase } from '@/src/lib/supabase';
 
+// `code` classifica a falha para quem chama decidir o que fazer — em especial, o
+// bloqueio da tela de login só deve contar falha de CREDENCIAL ('invalid'), não
+// erro de rede (senão uma internet ruim trancaria o usuário legítimo).
+export type SignInCode = 'invalid' | 'unconfirmed' | 'rate_limit' | 'network' | 'other';
+export type SignInResult = { error: string | null; code: SignInCode | null };
+
 type AuthContextValue = {
   session: Session | null;
   user: User | null;
   loading: boolean; // true enquanto a sessão inicial está sendo restaurada
-  signIn: (email: string, password: string) => Promise<{ error: string | null }>;
+  signIn: (email: string, password: string) => Promise<SignInResult>;
   signOut: () => Promise<void>;
 };
 
@@ -35,9 +41,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const signIn = useCallback(async (email: string, password: string) => {
+  const signIn = useCallback(async (email: string, password: string): Promise<SignInResult> => {
     const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
-    return { error: error ? mapAuthError(error.message) : null };
+    if (!error) return { error: null, code: null };
+    return mapAuthError(error.message);
   }, []);
 
   const signOut = useCallback(async () => {
@@ -58,12 +65,12 @@ export function useAuth(): AuthContextValue {
   return ctx;
 }
 
-// Mensagens amigáveis em PT para os erros de auth mais comuns.
-function mapAuthError(message: string): string {
+// Mensagens amigáveis em PT + código da falha para os erros de auth mais comuns.
+function mapAuthError(message: string): SignInResult {
   const m = message.toLowerCase();
-  if (m.includes('invalid login credentials')) return 'E-mail ou senha incorretos.';
-  if (m.includes('email not confirmed')) return 'E-mail ainda não confirmado.';
-  if (m.includes('rate limit') || m.includes('too many')) return 'Muitas tentativas. Aguarde um momento e tente de novo.';
-  if (m.includes('network') || m.includes('fetch')) return 'Sem conexão. Verifique a internet e tente de novo.';
-  return 'Não foi possível entrar. Tente novamente.';
+  if (m.includes('invalid login credentials')) return { error: 'E-mail ou senha incorretos.', code: 'invalid' };
+  if (m.includes('email not confirmed')) return { error: 'E-mail ainda não confirmado.', code: 'unconfirmed' };
+  if (m.includes('rate limit') || m.includes('too many')) return { error: 'Muitas tentativas. Aguarde um momento e tente de novo.', code: 'rate_limit' };
+  if (m.includes('network') || m.includes('fetch')) return { error: 'Sem conexão. Verifique a internet e tente de novo.', code: 'network' };
+  return { error: 'Não foi possível entrar. Tente novamente.', code: 'other' };
 }
