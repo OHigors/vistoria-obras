@@ -46,13 +46,13 @@ const progressFromState = (state: string): number =>
   state === 'ok' ? 1 : state === 'partial' ? 0.5 : 0;
 
 // Etapas elegíveis ao cronograma (para o seletor do formulário).
-export type CronogramaStage = { id: string; nome: string; ordem: number };
+export type CronogramaStage = { id: string; nome: string; ordem: number; categoria: string };
 
 export function getCronogramaStages(serviceStages: ServiceStage[]): CronogramaStage[] {
   return serviceStages
     .filter((s) => s.ativo && s.apareceNoCronograma)
     .sort((a, b) => a.ordemExecucao - b.ordemExecucao)
-    .map((s) => ({ id: s.id, nome: s.nome, ordem: s.ordemExecucao }));
+    .map((s) => ({ id: s.id, nome: s.nome, ordem: s.ordemExecucao, categoria: s.categoria?.trim() || 'Outras' }));
 }
 
 type RawTask = Omit<
@@ -129,7 +129,7 @@ export function buildCronogramaFromData(
 
   // 1b) Etapas de níveis de torre com datas planejadas. Entram como tarefas do
   // "Por pavimento" agrupadas sob o cabeçalho "Torre · Nível" (pavimento = rótulo).
-  for (const { item, towerId, levelLabel, levelOrder } of towerScheduled) {
+  for (const { item, towerId, levelCode, levelLabel, levelOrder } of towerScheduled) {
     const stage = stageByName.get(item.label);
     if (stage && (!stage.ativo || !stage.apareceNoCronograma)) continue;
     if (item.state === 'notApplicable') continue;
@@ -149,6 +149,8 @@ export function buildCronogramaFromData(
       pavimento: tName ? `${tName} · ${levelLabel}` : levelLabel,
       pavimentoOrder: 900 + Math.max(0, levelOrder),
       tower: tName,
+      towerId,
+      levelCode,
       etapaId: stage?.id ?? item.label,
       etapa: item.label,
       etapaAbrev: abbrev(item.label),

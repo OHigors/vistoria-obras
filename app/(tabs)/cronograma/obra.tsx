@@ -1,5 +1,6 @@
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Text } from '@/src/ui/Text';
@@ -10,7 +11,8 @@ import { useObras } from '@/src/data/ObrasContext';
 import * as db from '@/src/data/db';
 import type { Apartment, ChecklistState, Tower } from '@/src/data/mockObras';
 import type { Worker } from '@/src/data/serviceWorkers';
-import { isValidBrDate, maskDateBr, type ScheduledChecklistItem } from '@/src/data/schedule';
+import { isScheduledItem, isValidBrDate, maskDateBr, type ScheduledChecklistItem } from '@/src/data/schedule';
+import { categoryOrderIndex } from '@/src/data/serviceStages';
 import {
   buildCategoryGantt,
   buildPavimentoGantt,
@@ -24,9 +26,29 @@ import {
 import { buildCronogramaFromData, getCronogramaStages, type TowerScheduledInput } from '@/src/data/cronogramaReal';
 import { getTowerLevel, TOWER_LEVELS } from '@/src/data/towerLevels';
 import { useTutorialAnchor, useTutorialScreen } from '@/src/features/tutorial/TutorialContext';
+import { Skeleton } from '@/src/ui/Skeleton';
+import { useToast } from '@/src/ui/Toast';
 
 // ── Color token (teal) ──────────────────────────────────────────────────────────
 const C = { primary: '#0D9488', light: '#F0FDFA', medium: '#14B8A6' } as const;
+
+// ── Escala do eixo ──────────────────────────────────────────────────────────────
+// A grade é montada em COLUNAS, não em dias: no "dia" cada coluna é um dia; em
+// "semana"/"mês" a coluna agrega o intervalo. Todo o resto (barras, marcadores,
+// linha de hoje) trabalha em cima de `columns`, então a troca de escala não
+// duplica lógica de desenho.
+type Scale = 'dia' | 'semana' | 'mes';
+const SCALE_W: Record<Scale, number> = { dia: 34, semana: 52, mes: 60 };
+const MONTHS = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'] as const;
+
+type GanttCol = {
+  key: string;
+  top: string;
+  bottom: string;
+  startOffset: number; // primeiro dia da coluna (inclusivo)
+  endOffset: number;   // primeiro dia FORA da coluna (exclusivo)
+  weekend: boolean;    // só existe na escala de dia
+};
 
 // ── Gantt geometry ──────────────────────────────────────────────────────────────
 const DAY_W = 34;
@@ -56,8 +78,22 @@ const nivelKey = (towerId: string, code: string) => `${towerId}|${code}`;
 const REAL_GREEN = '#22C55E';
 const REAL_AMBER = '#F59E0B';
 const REAL_RED = '#EF4444';
-const realCellColor = (t: CronogramaTask, dayIndex: number) =>
-  t.status === 'Em andamento' ? REAL_AMBER : dayIndex < t.endOffset ? REAL_GREEN : REAL_RED;
+// Mesma regra, mas por COLUNA: se o trecho realizado que cai nesta coluna passa
+// do fim previsto, a coluna inteira acusa atraso (na escala de dia isso equivale
+// exatamente ao comportamento célula a célula de antes).
+const realColColor = (t: CronogramaTask, col: GanttCol) => {
+  if (t.status === 'Em andamento') return REAL_AMBER;
+  const coveredEnd = Math.min(col.endOffset, t.actualEndOffset ?? 0);
+  return coveredEnd > t.endOffset ? REAL_RED : REAL_GREEN;
+};
+
+// Tom fechado de cada cor da barra: o marcador "i" se apoia nele para pertencer
+// à célula em que está, em vez de flutuar como um elemento estranho por cima.
+const MARKER_DEEP: Record<string, string> = {
+  [REAL_GREEN]: '#15803D',
+  [REAL_AMBER]: '#B45309',
+  [REAL_RED]: '#B91C1C',
+};
 
 // soma dias a uma data BR (DD/MM/YYYY) → nova data BR
 function addDaysToBr(br: string, days: number): string {
@@ -68,6 +104,14 @@ function addDaysToBr(br: string, days: number): string {
 }
 
 type MainView = 'pavimento' | 'etapa';
+
+// Preferências de visualização. As vars de módulo evitam o "pisca" ao navegar
+// dentro da sessão; o AsyncStorage (localStorage na web) mantém a escolha através
+// de um refresh da página, que zera o módulo.
+const PREFS_KEY = '@cronograma-prefs';
+let lastTowerFilter = 'all';
+let lastScale: Scale = 'dia';
+let lastView: MainView = 'pavimento';
 
 const StatusPill = ({ status }: { status: CronogramaStatus }) => {
   const c = STATUS_COLORS[status];
@@ -81,17 +125,51 @@ const StatusPill = ({ status }: { status: CronogramaStatus }) => {
 export default function CronogramaObraScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const toast = useToast();
   const { apartments, towers, serviceStages, loading, refreshData, canWrite } = useObras();
 
-  const [view, setView] = useState<MainView>('pavimento');
+  // Inicializa com a última escolha do usuário (persistida em módulo).
+  const [view, setView] = useState<MainView>(lastView);
+  const [scale, setScale] = useState<Scale>(lastScale);
   const [breakdown, setBreakdown] = useState<{ title: string; sub: string; tasks: CronogramaTask[] } | null>(null);
-  const [towerFilter, setTowerFilter] = useState<string>('all');
+  const [towerFilter, setTowerFilter] = useState<string>(lastTowerFilter);
+  // Hidrata do storage no mount (sobrevive ao refresh da página). Só aplica se
+  // ainda for o padrão inicial, para não atropelar uma escolha já feita nesta sessão.
+  useEffect(() => {
+    let alive = true;
+    AsyncStorage.getItem(PREFS_KEY)
+      .then((raw) => {
+        if (!alive || !raw) return;
+        try {
+          const p = JSON.parse(raw) as { towerFilter?: string; scale?: Scale; view?: MainView };
+          if (p.towerFilter) setTowerFilter(p.towerFilter);
+          if (p.scale) setScale(p.scale);
+          if (p.view) setView(p.view);
+        } catch {
+          // preferência corrompida → ignora
+        }
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
+  // Persiste a cada mudança (módulo p/ navegação + storage p/ refresh).
+  useEffect(() => {
+    lastTowerFilter = towerFilter;
+    lastScale = scale;
+    lastView = view;
+    AsyncStorage.setItem(PREFS_KEY, JSON.stringify({ towerFilter, scale, view })).catch(() => {});
+  }, [towerFilter, scale, view]);
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
 
   // dados reais carregados sob demanda (não estão no contexto)
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [assignmentsByApt, setAssignmentsByApt] = useState<Record<string, Record<string, string[]>>>({});
   const [towerScheduled, setTowerScheduled] = useState<TowerScheduledInput[]>([]);
+  // O Gantt depende de DUAS cargas assíncronas além do contexto. Sem rastreá-las,
+  // a tela mostrava "Nenhuma tarefa com datas" como se fosse resposta enquanto os
+  // checklists ainda estavam vindo — e só então as barras apareciam.
+  const [checklistLoaded, setChecklistLoaded] = useState(false);
+  const [towerLoaded, setTowerLoaded] = useState(false);
 
   // ── add-task form ──
   const [addOpen, setAddOpen] = useState(false);
@@ -161,18 +239,31 @@ export default function CronogramaObraScreen() {
   }, [towers]);
 
   useEffect(() => {
-    loadTowerScheduled().catch(() => {});
+    let alive = true;
+    setTowerLoaded(false);
+    loadTowerScheduled()
+      .catch(() => {})
+      .finally(() => { if (alive) setTowerLoaded(true); });
+    return () => { alive = false; };
   }, [loadTowerScheduled]);
 
   // LAZY: itens de todos os apartamentos, carregados ao FOCAR a aba (o boot não os
   // traz mais). Cronograma não é a aba inicial, então isso só acontece ao abri-la.
   const [checklistByApt, setChecklistByApt] = useState<Map<string, ScheduledChecklistItem[]>>(new Map());
+  // O Gantt é montado sobre este mapa. Recarregá-lo é o que faz a tela refletir
+  // uma etapa recém-adicionada/removida — sem isso, salvar não muda nada na tela.
+  const reloadChecklist = useCallback(async () => {
+    const m = await db.loadAllChecklistItems();
+    setChecklistByApt(m);
+  }, []);
   useFocusEffect(
     useCallback(() => {
       let alive = true;
-      db.loadAllChecklistItems().then((m) => alive && setChecklistByApt(m)).catch(() => {});
+      reloadChecklist()
+        .catch(() => {})
+        .finally(() => { if (alive) setChecklistLoaded(true); });
       return () => { alive = false; };
-    }, []),
+    }, [reloadChecklist]),
   );
   const apartmentsFull = useMemo(
     () => apartments.map((a) => ({ ...a, checklist: checklistByApt.get(a.id) ?? [] })),
@@ -189,9 +280,12 @@ export default function CronogramaObraScreen() {
     () => [...new Set(result.tasks.map((t) => t.tower).filter((t): t is string => !!t))].sort((a, b) => a.localeCompare(b, 'pt-BR')),
     [result],
   );
-  const effectiveTower = towerFilter !== 'all' && !towerOptions.includes(towerFilter) ? 'all' : towerFilter;
+  // O cronograma é dividido POR TORRE: mostra uma torre por vez, nunca todas
+  // empilhadas. Se o filtro atual não é uma torre válida (estado inicial ou torre
+  // que sumiu), cai na primeira — sempre há uma torre em foco.
+  const effectiveTower = towerOptions.includes(towerFilter) ? towerFilter : (towerOptions[0] ?? null);
   const visibleTasks = useMemo(
-    () => (effectiveTower === 'all' ? result.tasks : result.tasks.filter((t) => t.tower === effectiveTower)),
+    () => (effectiveTower ? result.tasks.filter((t) => t.tower === effectiveTower) : result.tasks),
     [result, effectiveTower],
   );
 
@@ -245,11 +339,110 @@ export default function CronogramaObraScreen() {
     return { total, concluidas, andamento, atrasadas };
   }, [visibleTasks]);
 
-  const gridW = result.totalDias * DAY_W;
-  const days = useMemo(
-    () => Array.from({ length: result.totalDias }, (_, i) => new Date(result.projectStart.getTime() + i * MS_DAY)),
-    [result],
+  // ── Colunas do eixo, conforme a escala ────────────────────────────────────────
+  // Folga de 5 dias depois de hoje: com o traço colado na borda direita não dá
+  // para ver o que vem a seguir, e é justamente aí que está o trabalho por fazer.
+  const TODAY_PAD_DAYS = 5;
+  const totalDays = useMemo(
+    () => Math.max(result.totalDias, result.hojeOffset + 1 + TODAY_PAD_DAYS),
+    [result.totalDias, result.hojeOffset],
   );
+  const colW = SCALE_W[scale];
+  const columns = useMemo<GanttCol[]>(() => {
+    const total = totalDays;
+    const dayAt = (i: number) => new Date(result.projectStart.getTime() + i * MS_DAY);
+
+    if (scale === 'dia') {
+      return Array.from({ length: total }, (_, i) => {
+        const d = dayAt(i);
+        const dow = d.getDay();
+        return {
+          key: `d${i}`,
+          top: WEEKDAYS[dow],
+          bottom: String(d.getDate()),
+          startOffset: i,
+          endOffset: i + 1,
+          weekend: dow === 0 || dow === 6,
+        };
+      });
+    }
+
+    const cols: GanttCol[] = [];
+    let i = 0;
+    while (i < total) {
+      const d = dayAt(i);
+      // semana fecha no sábado; mês fecha no último dia do mês. A primeira e a
+      // última coluna podem ser parciais — o projeto raramente começa domingo.
+      const span =
+        scale === 'semana'
+          ? Math.min(7 - d.getDay(), total - i)
+          : Math.min(new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate() - d.getDate() + 1, total - i);
+      const last = dayAt(i + span - 1);
+      cols.push({
+        key: `${scale}${i}`,
+        top: scale === 'semana' ? MONTHS[d.getMonth()] : String(d.getFullYear()).slice(2),
+        bottom: scale === 'semana' ? `${d.getDate()}–${last.getDate()}` : MONTHS[d.getMonth()],
+        startOffset: i,
+        endOffset: i + span,
+        weekend: false,
+      });
+      i += span;
+    }
+    return cols;
+  }, [result, scale, totalDays]);
+
+  const gridW = columns.length * colW;
+
+  // Dia → índice da coluna. Evita varrer as colunas para cada marcador.
+  const colOfDay = useMemo(() => {
+    const arr = new Int32Array(Math.max(totalDays, 1));
+    columns.forEach((c, idx) => {
+      for (let d = c.startOffset; d < c.endOffset; d++) arr[d] = idx;
+    });
+    return arr;
+  }, [columns, totalDays]);
+
+  const todayColIdx = useMemo(
+    () => columns.findIndex((c) => result.hojeOffset >= c.startOffset && result.hojeOffset < c.endOffset),
+    [columns, result.hojeOffset],
+  );
+
+  // Linha de hoje no FIM do dia corrente (não no começo): o traço marca o instante
+  // "agora", que é a fronteira entre hoje e amanhã. Em semana/mês ela cai na
+  // posição proporcional do dia dentro da coluna, em vez do fim do bloco inteiro —
+  // senão apontaria vários dias no futuro.
+  const todayX = useMemo(() => {
+    if (todayColIdx < 0) return null;
+    const c = columns[todayColIdx];
+    const span = c.endOffset - c.startOffset;
+    return todayColIdx * colW + ((result.hojeOffset - c.startOffset + 1) / span) * colW;
+  }, [columns, todayColIdx, colW, result.hojeOffset]);
+
+  // ── Marcadores de término por apartamento ("i" dentro da barra agregada) ──────
+  // Cada linha do "Por pavimento" soma várias etapas de vários apartamentos. O
+  // marcador fica onde CADA etapa terminou de fato (linha Realizado), agrupado por
+  // coluna: se duas terminam no mesmo dia, é um só "i" e o pop-up lista as duas.
+  const rowMarkers = useMemo(() => {
+    const out = new Map<string, Map<number, CronogramaTask[]>>();
+    if (view !== 'pavimento') return out;
+    for (const g of groups) {
+      for (const r of g.rows) {
+        if (!r.breakdown?.length) continue;
+        const real = new Map<number, CronogramaTask[]>();
+        for (const t of r.breakdown) {
+          if (t.actualEndOffset == null) continue;
+          const lastDay = t.actualEndOffset - 1;
+          if (lastDay < 0 || lastDay >= colOfDay.length) continue;
+          const idx = colOfDay[lastDay];
+          const list = real.get(idx);
+          if (list) list.push(t);
+          else real.set(idx, [t]);
+        }
+        if (real.size) out.set(r.id, real);
+      }
+    }
+    return out;
+  }, [groups, view, colOfDay]);
 
   const breakdownTotals = useMemo(() => {
     if (!breakdown) return null;
@@ -259,9 +452,11 @@ export default function CronogramaObraScreen() {
     return { planned, actual, hasActual: withActual.length > 0 };
   }, [breakdown]);
 
-  // Para cada etapa do cronograma, conta em quantos dos apartamentos selecionados
-  // ela já está agendada. Selecionar uma etapa que já existe em alguns deles
-  // sobrescreve as datas — o badge no chip torna isso explícito.
+  // Para cada etapa, conta em quantos dos apartamentos selecionados ela já está
+  // NO CRONOGRAMA (com data planejada). Contar a mera presença no checklist
+  // estava errado: uma etapa removida do cronograma continua no checklist, então
+  // o badge dizia "1 já agendada" mesmo depois de removida. Só conta o que tem
+  // data — isScheduledItem — para o número refletir o cronograma de verdade.
   const stageAlreadyCount = useMemo(() => {
     const counts = new Map<string, number>();
     if (fApts.length === 0) return counts;
@@ -269,14 +464,77 @@ export default function CronogramaObraScreen() {
     for (const apt of apartmentsFull) {
       if (!selectedSet.has(apt.id)) continue;
       for (const item of apt.checklist as ScheduledChecklistItem[]) {
+        if (!isScheduledItem(item)) continue;
         counts.set(item.label, (counts.get(item.label) ?? 0) + 1);
       }
     }
     return counts;
   }, [apartmentsFull, fApts]);
 
+  // Etapas do cronograma agrupadas por categoria — no formulário de adicionar,
+  // em vez de uma parede única de chips. Grupos ordenados pela ordem de execução
+  // da categoria (mesma do checklist).
+  const cronStagesByCat = useMemo(() => {
+    const map = new Map<string, typeof cronStages>();
+    for (const st of cronStages) {
+      const cat = st.categoria || 'Outras';
+      const list = map.get(cat);
+      if (list) list.push(st);
+      else map.set(cat, [st]);
+    }
+    return [...map.entries()].sort(
+      (a, b) => categoryOrderIndex(a[0]) - categoryOrderIndex(b[0]) || a[0].localeCompare(b[0], 'pt-BR'),
+    );
+  }, [cronStages]);
+
   const hasTasks = result.tasks.length > 0;
-  const isLoading = loading && apartments.length === 0;
+  // O skeleton precisa cobrir a espera REAL: contexto + checklists + etapas de
+  // nível. Só depois disso "nenhuma tarefa" é resposta, e não estado intermediário.
+  const isLoading = (loading && apartments.length === 0) || !checklistLoaded || !towerLoaded;
+
+  // Entrega REAL: a entrega prevista trabalha no tempo PLANEJADO (ignora a
+  // realidade); a real trabalha no tempo REAL e se ajusta sozinha. A projeção de
+  // cada etapa preserva a DURAÇÃO planejada a partir do início real — então um
+  // atraso de 3 dias no início/execução empurra o fim dela em 3 dias, e a entrega
+  // real (o maior fim entre as etapas) anda junto. Ao concluir, passa a valer o
+  // fim real registrado; ao adiantar, a entrega pode voltar. Recomputa a cada
+  // recarga de dados e a cada render, então acompanha o passar dos dias.
+  const realTimeline = useMemo(() => {
+    if (result.tasks.length === 0) return null;
+    const midnight = new Date();
+    midnight.setHours(0, 0, 0, 0);
+    const todayMs = midnight.getTime();
+    let startMs = Infinity;
+    let endMs = -Infinity;
+
+    for (const t of result.tasks) {
+      const startCandidate = (t.actualStart ?? t.start).getTime();
+      let projectedEnd: number;
+      if (t.actualEnd) {
+        // Concluída → vale o que de fato aconteceu (pode ter sido antes ou depois).
+        projectedEnd = t.actualEnd.getTime();
+      } else {
+        const plannedSpan = t.end.getTime() - t.start.getTime();
+        // Início efetivo: quando a etapa realmente começa. Não iniciada e já
+        // vencido o começo previsto? Só pode arrancar hoje — e isso escorrega
+        // mais a cada dia até começar.
+        const effStart = t.actualStart ? t.actualStart.getTime() : Math.max(t.start.getTime(), todayMs);
+        // Mantém a duração planejada a partir do início real (a propagação do atraso),
+        // e nunca projeta um fim no passado para algo ainda em aberto.
+        projectedEnd = Math.max(effStart + plannedSpan, todayMs);
+      }
+      if (startCandidate < startMs) startMs = startCandidate;
+      if (projectedEnd > endMs) endMs = projectedEnd;
+    }
+
+    const plannedEndMs = result.projectEnd.getTime();
+    return {
+      start: new Date(startMs),
+      end: new Date(endMs),
+      delayDays: Math.max(0, Math.round((endMs - plannedEndMs) / MS_DAY)),
+      delayed: endMs > plannedEndMs,
+    };
+  }, [result]);
 
   // Tutorial: coach marks da primeira visita ao Gantt. Sem tarefas, os passos
   // sem âncora caem no card central — os conceitos valem do mesmo jeito.
@@ -291,7 +549,10 @@ export default function CronogramaObraScreen() {
     setFScope('apartamento');
     setFApts([]);
     setFNiveis([]);
-    setCollapsedAptGroups({});
+    // Torres fechadas de saída: o formulário abre compacto, e quem quer escolher
+    // apartamentos expande só a torre que interessa. A seleção fica visível pelo
+    // resumo e pela contagem em cada torre, então fechar não esconde escolhas.
+    setCollapsedAptGroups(Object.fromEntries(towers.map((t) => [t.id, true])));
     setExpandedFloors({});
     setFStage('');
     setFStart('');
@@ -372,6 +633,7 @@ export default function CronogramaObraScreen() {
         );
         await loadTowerScheduled();
         setAddOpen(false);
+        toast.saved(fNiveis.length > 1 ? `Tarefa agendada em ${fNiveis.length} níveis` : 'Tarefa adicionada ao cronograma');
       } catch {
         setFError('Não foi possível salvar. Verifique a conexão e tente novamente.');
       } finally {
@@ -382,8 +644,24 @@ export default function CronogramaObraScreen() {
 
     // ── Escopo: APARTAMENTOS ─────────────────────────────────────────────────
     if (fApts.length === 0) return setFError('Selecione ao menos um apartamento.');
-    const selectedApts = apartmentsFull.filter((a) => fApts.includes(a.id));
-    if (selectedApts.length === 0) return setFError('Apartamentos não encontrados.');
+    const chosenApts = apartmentsFull.filter((a) => fApts.includes(a.id));
+    if (chosenApts.length === 0) return setFError('Apartamentos não encontrados.');
+
+    // Bloqueia recriar: um apartamento onde a etapa JÁ está no cronograma (com
+    // data) é ignorado — adicionar de novo sobrescreveria em silêncio. Para mudar
+    // as datas, remova a etapa do cronograma e adicione outra vez.
+    const isStageScheduled = (apt: (typeof chosenApts)[number]) => {
+      const it = (apt.checklist as ScheduledChecklistItem[]).find((i) => i.label === fStage);
+      return Boolean(it && isScheduledItem(it));
+    };
+    const selectedApts = chosenApts.filter((a) => !isStageScheduled(a));
+    if (selectedApts.length === 0) {
+      return setFError(
+        chosenApts.length === 1
+          ? 'Esta etapa já está no cronograma deste apartamento.'
+          : 'Esta etapa já está no cronograma de todos os apartamentos selecionados.',
+      );
+    }
 
     setSaving(true);
     setFError(null);
@@ -433,12 +711,13 @@ export default function CronogramaObraScreen() {
       );
 
       // 3) refresh único do contexto + cache de assignments dos apartamentos tocados.
-      await refreshData();
+      await Promise.all([refreshData(), reloadChecklist()]);
       const freshAssignments = await Promise.all(
         selectedApts.map(async (apt) => [apt.id, await db.loadStepAssignments(apt.id)] as const),
       );
       setAssignmentsByApt((prev) => ({ ...prev, ...Object.fromEntries(freshAssignments) }));
       setAddOpen(false);
+      toast.saved(selectedApts.length > 1 ? `Tarefa adicionada em ${selectedApts.length} apartamentos` : 'Tarefa adicionada ao cronograma');
     } catch {
       setFError('Não foi possível salvar. Verifique a conexão e tente novamente.');
     } finally {
@@ -468,7 +747,7 @@ export default function CronogramaObraScreen() {
         actualStart: undefined,
         actualEnd: undefined,
       });
-      await refreshData();
+      await Promise.all([refreshData(), reloadChecklist()]);
       if (breakdown) {
         const remaining = breakdown.tasks.filter((t) => t.id !== target.id);
         if (remaining.length === 0) setBreakdown(null);
@@ -501,7 +780,7 @@ export default function CronogramaObraScreen() {
           actualEnd: undefined,
         });
       }
-      await refreshData();
+      await Promise.all([refreshData(), reloadChecklist()]);
       setClearOpen(false);
     } catch {
       // modo teste — ignora falhas
@@ -525,9 +804,6 @@ export default function CronogramaObraScreen() {
               <Text style={s.headerTitle}>Cronograma da Obra</Text>
               <Text style={s.headerSub}>Planejado × Executado</Text>
             </View>
-            <Pressable onPress={() => refreshData()} style={s.headerRefresh} hitSlop={8}>
-              <MaterialCommunityIcons name="refresh" size={20} color="#FFFFFF" />
-            </Pressable>
             {canWrite && (
               <Pressable onPress={openAdd} style={s.headerAdd} hitSlop={8}>
                 <MaterialCommunityIcons name="plus" size={22} color={C.primary} />
@@ -535,28 +811,95 @@ export default function CronogramaObraScreen() {
             )}
           </View>
 
-          {hasTasks && (
-            <View style={s.timeline}>
-              <View style={s.timelineItem}>
-                <Text style={s.timelineLabel}>Início</Text>
-                <Text style={s.timelineValue}>{formatFull(result.projectStart)}</Text>
-              </View>
-              <MaterialCommunityIcons name="arrow-right" size={16} color="rgba(255,255,255,0.6)" />
-              <View style={s.timelineItem}>
-                <Text style={s.timelineLabel}>Entrega prevista</Text>
-                <Text style={s.timelineValue}>{formatFull(result.projectEnd)}</Text>
-              </View>
+          {isLoading ? (
+            <View style={s.timelineWrap}>
+              {[0, 1].map((i) => (
+                <View key={i} style={s.timeline}>
+                  <View style={s.timelineItem}>
+                    <Skeleton width={44} height={9} radius={4} />
+                    <Skeleton width={78} height={15} radius={5} style={{ marginTop: 4 }} />
+                  </View>
+                  <View style={{ flex: 1 }} />
+                  <View style={s.timelineItem}>
+                    <Skeleton width={80} height={9} radius={4} />
+                    <Skeleton width={78} height={15} radius={5} style={{ marginTop: 4 }} />
+                  </View>
+                </View>
+              ))}
             </View>
-          )}
+          ) : hasTasks ? (
+            <View style={s.timelineWrap}>
+              {/* Planejado */}
+              <View style={s.timeline}>
+                <View style={s.timelineItem}>
+                  <Text style={s.timelineLabel}>Início</Text>
+                  <Text style={s.timelineValue}>{formatFull(result.projectStart)}</Text>
+                </View>
+                <MaterialCommunityIcons name="arrow-right" size={16} color="rgba(255,255,255,0.6)" />
+                <View style={s.timelineItem}>
+                  <Text style={s.timelineLabel}>Entrega prevista</Text>
+                  <Text style={s.timelineValue}>{formatFull(result.projectEnd)}</Text>
+                </View>
+              </View>
+              {/* Real — o que o cronograma aponta considerando atrasos */}
+              {realTimeline && (
+                <View style={[s.timeline, realTimeline.delayed && s.timelineReal]}>
+                  <View style={s.timelineItem}>
+                    <Text style={s.timelineLabel}>Início</Text>
+                    <Text style={s.timelineValue}>{formatFull(realTimeline.start)}</Text>
+                  </View>
+                  <MaterialCommunityIcons name="arrow-right" size={16} color="rgba(255,255,255,0.6)" />
+                  <View style={s.timelineItem}>
+                    <Text style={s.timelineLabel}>Entrega real</Text>
+                    <View style={s.timelineValueRow}>
+                      <Text style={s.timelineValue}>{formatFull(realTimeline.end)}</Text>
+                      {realTimeline.delayed && (
+                        <View style={s.timelineDelay}>
+                          <Text style={s.timelineDelayText}>+{realTimeline.delayDays}d</Text>
+                        </View>
+                      )}
+                    </View>
+                  </View>
+                </View>
+              )}
+            </View>
+          ) : null}
         </View>
 
         {!canWrite && <ReadOnlyBanner />}
 
         {isLoading ? (
-          <View style={s.empty}>
-            <ActivityIndicator color={C.primary} />
-            <Text style={s.emptyText}>Carregando dados da obra…</Text>
-          </View>
+          /* Skeleton com a MESMA forma da tela pronta (KPIs, controles, eixo e
+             linhas do Gantt), para nada saltar de lugar quando os dados chegam. */
+          <>
+            <View style={s.kpiRow}>
+              {[0, 1, 2, 3].map((i) => (
+                <Skeleton key={i} height={62} radius={12} style={{ flex: 1 }} />
+              ))}
+            </View>
+            <Skeleton height={44} radius={12} style={{ marginHorizontal: 16, marginTop: 12 }} />
+            <View style={{ flexDirection: 'row', gap: 8, marginHorizontal: 16, marginTop: 12 }}>
+              <Skeleton height={38} radius={10} style={{ flex: 1 }} />
+              <Skeleton height={38} radius={10} style={{ flex: 1 }} />
+            </View>
+            <View style={s.skelGantt}>
+              <View style={{ flexDirection: 'row', gap: 10 }}>
+                <Skeleton height={AXIS_H - 10} width={LABEL_W - 10} radius={6} />
+                <Skeleton height={AXIS_H - 10} radius={6} style={{ flex: 1 }} />
+              </View>
+              {[0, 1, 2].map((g) => (
+                <View key={g} style={{ gap: 8, marginTop: 12 }}>
+                  <Skeleton height={GROUP_H - 16} width="45%" radius={6} />
+                  {[0, 1].map((r) => (
+                    <View key={r} style={{ flexDirection: 'row', gap: 10 }}>
+                      <Skeleton height={PAV_BLOCK_H - 6} width={LABEL_W - 10} radius={6} />
+                      <Skeleton height={PAV_BLOCK_H - 6} radius={6} style={{ flex: 1 }} />
+                    </View>
+                  ))}
+                </View>
+              ))}
+            </View>
+          </>
         ) : !hasTasks ? (
           /* ── EMPTY STATE ──────────────────────────────────────────────────── */
           <View style={s.empty}>
@@ -608,24 +951,54 @@ export default function CronogramaObraScreen() {
               </>
             )}
 
-            {/* TOWER FILTER (aplica nas duas abas) */}
-            {towerOptions.length > 1 && (
-              <View style={s.towerFilter}>
-                {['all', ...towerOptions].map((tw) => {
-                  const active = effectiveTower === tw;
-                  return (
-                    <Pressable key={tw} onPress={() => setTowerFilter(tw)} style={[s.towerChip, active && s.towerChipActive]}>
-                      <Text style={[s.towerChipText, active && s.towerChipTextActive]} numberOfLines={1}>
-                        {tw === 'all' ? 'Todas as torres' : tw}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
-            )}
+            {/* CONTROLES DO GRÁFICO — Torre (em cima) e Escala (embaixo), agrupados
+                acima das tabs. Cada um com o rótulo sobre as opções. */}
+            <View style={s.controls} {...filtrosAnchor}>
+              {towerOptions.length > 1 && (
+                <View style={s.controlBlock}>
+                  <Text style={s.controlCaption}>Torre</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.controlChips}>
+                    {towerOptions.map((tw) => {
+                      const active = effectiveTower === tw;
+                      return (
+                        <Pressable
+                          key={tw}
+                          onPress={() => setTowerFilter(tw)}
+                          accessibilityRole="button"
+                          accessibilityState={{ selected: active }}
+                          accessibilityLabel={`Ver o cronograma da ${tw}`}
+                          style={[s.towerChip, active && s.towerChipActive]}>
+                          <Text style={[s.towerChipText, active && s.towerChipTextActive]} numberOfLines={1}>{tw}</Text>
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+                </View>
+              )}
 
-            {/* VIEW TOGGLE */}
-            <View style={s.toggle} {...filtrosAnchor}>
+              <View style={s.controlBlock}>
+                <Text style={s.controlCaption}>Escala</Text>
+                <View style={s.scaleGroup}>
+                  {([['dia', 'Dia'], ['semana', 'Semana'], ['mes', 'Mês']] as const).map(([v, label]) => {
+                    const active = scale === v;
+                    return (
+                      <Pressable
+                        key={v}
+                        onPress={() => setScale(v)}
+                        accessibilityRole="button"
+                        accessibilityState={{ selected: active }}
+                        accessibilityLabel={`Ver o cronograma por ${label.toLowerCase()}`}
+                        style={[s.scaleBtn, active && s.scaleBtnActive]}>
+                        <Text style={[s.scaleText, active && s.scaleTextActive]}>{label}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+            </View>
+
+            {/* VIEW TOGGLE (tabs) */}
+            <View style={s.toggle}>
               {([['pavimento', 'Por pavimento', 'stairs'], ['etapa', 'Por etapa', 'layers-triple-outline']] as const).map(
                 ([v, label, icon]) => {
                   const active = view === v;
@@ -720,13 +1093,14 @@ export default function CronogramaObraScreen() {
                   <View style={{ width: gridW }}>
                     {/* axis */}
                     <View style={[s.axis, { height: AXIS_H }]}>
-                      {days.map((d, i) => {
-                        const weekend = d.getDay() === 0 || d.getDay() === 6;
-                        const isToday = i === result.hojeOffset;
+                      {columns.map((c, i) => {
+                        const isToday = i === todayColIdx;
                         return (
-                          <View key={i} style={[s.axisCell, weekend && s.axisCellWeekend, isToday && s.axisCellToday]}>
-                            <Text style={[s.axisDow, isToday && s.axisTextToday]}>{WEEKDAYS[d.getDay()]}</Text>
-                            <Text style={[s.axisText, isToday && s.axisTextToday]}>{d.getDate()}</Text>
+                          <View
+                            key={c.key}
+                            style={[s.axisCell, { width: colW }, c.weekend && s.axisCellWeekend, isToday && s.axisCellToday]}>
+                            <Text style={[s.axisDow, isToday && s.axisTextToday]}>{c.top}</Text>
+                            <Text style={[s.axisText, isToday && s.axisTextToday]}>{c.bottom}</Text>
                           </View>
                         );
                       })}
@@ -738,25 +1112,63 @@ export default function CronogramaObraScreen() {
                         {g.rows.map((r) => {
                           const t = r.tasks[0];
                           const hasActual = t.actualStartOffset != null && t.actualEndOffset != null;
+                          const markers = rowMarkers.get(r.id);
                           return (
                             <View key={r.id} style={[s.pavGrid, { height: PAV_BLOCK_H, width: gridW }]}>
                               {/* Previsto */}
                               <View style={[s.pavSubRow, { height: PAV_SUBROW_H }]}>
-                                {days.map((d, i) => {
-                                  const weekend = d.getDay() === 0 || d.getDay() === 6;
-                                  const inRange = i >= t.startOffset && i < t.endOffset;
-                                  return <View key={i} style={[s.pavCell, weekend && s.gridCellWeekend, inRange && s.prevCell]} />;
+                                {columns.map((c) => {
+                                  const inRange = t.startOffset < c.endOffset && t.endOffset > c.startOffset;
+                                  return (
+                                    <View
+                                      key={c.key}
+                                      style={[s.pavCell, { width: colW }, c.weekend && s.gridCellWeekend, inRange && s.prevCell]}
+                                    />
+                                  );
                                 })}
                               </View>
                               {/* Realizado */}
                               <View style={[s.pavSubRow, { height: PAV_SUBROW_H, borderBottomWidth: 0 }]}>
-                                {days.map((d, i) => {
-                                  const weekend = d.getDay() === 0 || d.getDay() === 6;
-                                  const inRange = hasActual && i >= t.actualStartOffset! && i < t.actualEndOffset!;
-                                  return <View key={i} style={[s.pavCell, weekend && s.gridCellWeekend, inRange && { backgroundColor: realCellColor(t, i) }]} />;
+                                {columns.map((c) => {
+                                  const inRange =
+                                    hasActual && t.actualStartOffset! < c.endOffset && t.actualEndOffset! > c.startOffset;
+                                  return (
+                                    <View
+                                      key={c.key}
+                                      style={[
+                                        s.pavCell,
+                                        { width: colW },
+                                        c.weekend && s.gridCellWeekend,
+                                        inRange && { backgroundColor: realColColor(t, c) },
+                                      ]}
+                                    />
+                                  );
                                 })}
+                                {markers &&
+                                  [...markers.entries()].map(([idx, tasks]) => {
+                                    const cellColor = realColColor(t, columns[idx]);
+                                    return (
+                                      <Pressable
+                                        key={idx}
+                                        onPress={() =>
+                                          setBreakdown({ title: r.label, sub: `${g.title} · término real`, tasks })
+                                        }
+                                        hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                                        accessibilityRole="button"
+                                        accessibilityLabel={`Ver ${tasks.length} ${tasks.length === 1 ? 'etapa concluída' : 'etapas concluídas'} nesta data`}
+                                        style={[s.endMarkerHit, { left: idx * colW, width: colW }]}>
+                                        <View
+                                          style={[
+                                            s.endMarker,
+                                            { backgroundColor: MARKER_DEEP[cellColor] ?? cellColor },
+                                          ]}>
+                                          <MaterialCommunityIcons name="information-variant" size={9} color="#FFFFFF" />
+                                        </View>
+                                      </Pressable>
+                                    );
+                                  })}
                               </View>
-                              <View style={[s.todayLine, { left: result.hojeOffset * DAY_W }]} />
+                              {todayX != null && <View style={[s.todayLine, { left: todayX }]} />}
                             </View>
                           );
                         })}
@@ -769,8 +1181,8 @@ export default function CronogramaObraScreen() {
 
             <Text style={s.hint}>
               {view === 'pavimento'
-                ? 'Cada linha é um grupo de serviços do pavimento, somando o tempo de todas as suas etapas: Previsto (azul) em cima, Realizado (verde/vermelho) embaixo. Cada célula é um dia; linha vermelha = hoje.'
-                : 'Etapas desta categoria, somadas por pavimento (Previsto azul / Realizado verde). Cada célula é um dia; linha vermelha = hoje.'}
+                ? `Cada linha é um grupo de serviços do pavimento, somando o tempo de todas as suas etapas: Previsto (azul) em cima, Realizado (verde/vermelho) embaixo. Toque no "i" para ver qual apartamento concluiu a etapa ali. Cada célula é ${scale === 'dia' ? 'um dia' : scale === 'semana' ? 'uma semana' : 'um mês'}; linha vermelha = hoje.`
+                : `Etapas desta categoria, somadas por pavimento (Previsto azul / Realizado verde). Cada célula é ${scale === 'dia' ? 'um dia' : scale === 'semana' ? 'uma semana' : 'um mês'}; linha vermelha = hoje.`}
             </Text>
               </>
             )}
@@ -820,8 +1232,26 @@ export default function CronogramaObraScreen() {
                 )}
 
                 <ScrollView style={mod.list} contentContainerStyle={mod.listContent} showsVerticalScrollIndicator={false}>
-                  {breakdown.tasks.map((t) => (
-                    <View key={t.id} style={mod.taskCard}>
+                  {breakdown.tasks.map((t) => {
+                    // Apartamento abre a unidade; etapa de nível abre o pavimento
+                    // da torre. Sem destino resolvido, o card fica informativo.
+                    const href = t.apartmentId
+                      ? `/visao-geral/apartamentos/${t.apartmentId}`
+                      : t.towerId && t.levelCode
+                        ? `/visao-geral/nivel/${t.towerId}/${t.levelCode}`
+                        : null;
+                    const CardRoot = href ? Pressable : View;
+                    return (
+                    <CardRoot
+                      key={t.id}
+                      {...(href
+                        ? {
+                            onPress: () => { setBreakdown(null); router.push(href as never); },
+                            accessibilityRole: 'button' as const,
+                            accessibilityLabel: `Abrir ${t.apartmentId ? `apartamento ${t.apartmentNumber}` : t.pavimento}`,
+                            style: ({ pressed }: { pressed: boolean }) => [mod.taskCard, pressed && mod.taskCardPressed],
+                          }
+                        : { style: mod.taskCard })}>
                       <View style={[mod.taskStripe, { backgroundColor: STATUS_COLORS[t.status].bar }]} />
                       <View style={mod.taskInner}>
                         <View style={mod.taskTop}>
@@ -861,8 +1291,16 @@ export default function CronogramaObraScreen() {
                         </View>
                         {!!t.note && <Text style={mod.taskNote}>{t.note}</Text>}
                       </View>
-                    </View>
-                  ))}
+                      {/* seta só onde há destino — separa o card que leva a algum
+                          lugar do que é apenas informativo */}
+                      {href && (
+                        <View style={mod.taskChevron}>
+                          <MaterialCommunityIcons name="chevron-right" size={18} color="#CBD5E1" />
+                        </View>
+                      )}
+                    </CardRoot>
+                    );
+                  })}
                   <View style={{ height: 32 }} />
                 </ScrollView>
               </>
@@ -893,14 +1331,20 @@ export default function CronogramaObraScreen() {
               </Pressable>
             </View>
 
-            <ScrollView style={mod.list} contentContainerStyle={form.content} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-              <View style={form.notice}>
-                <MaterialCommunityIcons name="content-save-outline" size={14} color={C.primary} />
-                <Text style={form.noticeText}>
-                  {fScope === 'apartamento'
-                    ? 'A mesma etapa pode ser aplicada a vários apartamentos de uma vez — datas idênticas.'
-                    : 'Agende etapas estruturais (fundação, terreno, reservatório…) em um ou mais níveis das torres.'}
-                </Text>
+            <ScrollView style={form.scroll} contentContainerStyle={form.content} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+              {/* ── LOCAL ── */}
+              <View style={form.sectionHead}>
+                <MaterialCommunityIcons name="map-marker-outline" size={15} color={C.primary} />
+                <Text style={form.sectionTitle}>Local</Text>
+                {(fScope === 'apartamento' ? fApts.length : fNiveis.length) > 0 && (
+                  <View style={form.selBadge}>
+                    <Text style={form.selBadgeText}>
+                      {fScope === 'apartamento'
+                        ? `${fApts.length} apto(s)`
+                        : `${fNiveis.length} nível(is)`}
+                    </Text>
+                  </View>
+                )}
               </View>
 
               {/* Escopo: apartamentos ou níveis */}
@@ -918,10 +1362,6 @@ export default function CronogramaObraScreen() {
 
               {fScope === 'apartamento' ? (
                 <>
-                  <View style={form.aptHeader}>
-                    <Text style={form.label}>Apartamento(s)</Text>
-                    <Text style={form.aptCount}>{fApts.length} de {apartments.length} selecionado(s)</Text>
-                  </View>
                   <View style={form.bulkRow}>
                     <Pressable onPress={selectAllApts} style={form.bulkBtn}>
                       <MaterialCommunityIcons name="checkbox-multiple-marked-outline" size={13} color={C.primary} />
@@ -997,76 +1437,91 @@ export default function CronogramaObraScreen() {
                     );
                   })}
                 </>
+              ) : nivelGroups.length === 0 ? (
+                <Text style={form.empty}>Nenhuma torre cadastrada.</Text>
               ) : (
-                <>
-                  <View style={form.aptHeader}>
-                    <Text style={form.label}>Nível(is)</Text>
-                    <Text style={form.aptCount}>{fNiveis.length} selecionado(s)</Text>
-                  </View>
-                  {nivelGroups.length === 0 ? (
-                    <Text style={form.empty}>Nenhuma torre cadastrada.</Text>
-                  ) : (
-                    nivelGroups.map(({ tower: t, levels }) => {
-                      const keys = levels.map((l) => nivelKey(t.id, l.code));
-                      const selectedInTower = keys.filter((k) => fNiveis.includes(k)).length;
-                      const allSelected = selectedInTower === keys.length;
-                      return (
-                        <View key={t.id} style={form.aptGroup}>
-                          <Pressable onPress={() => toggleTowerNiveis(keys)} style={form.aptGroupSelect} hitSlop={6}>
-                            <MaterialCommunityIcons
-                              name={allSelected ? 'checkbox-marked' : selectedInTower > 0 ? 'checkbox-intermediate' : 'checkbox-blank-outline'}
-                              size={15}
-                              color={selectedInTower > 0 ? C.primary : '#94A3B8'}
-                            />
-                            <Text style={form.aptGroupLabel}>{t.name}</Text>
-                            {selectedInTower > 0 && <Text style={form.aptGroupCount}>{selectedInTower}/{keys.length}</Text>}
-                          </Pressable>
-                          <View style={form.chipsWrap}>
-                            {levels.map((l) => {
-                              const key = nivelKey(t.id, l.code);
-                              const active = fNiveis.includes(key);
-                              return (
-                                <Pressable key={key} onPress={() => toggleNivel(key)} style={[form.chip, active && form.chipActive]}>
-                                  {active && <MaterialCommunityIcons name="check" size={13} color={C.primary} style={{ marginRight: 4 }} />}
-                                  <Text style={[form.chipText, active && form.chipTextActive]}>{l.label}</Text>
-                                </Pressable>
-                              );
-                            })}
-                          </View>
+                nivelGroups.map(({ tower: t, levels }) => {
+                  const keys = levels.map((l) => nivelKey(t.id, l.code));
+                  const selectedInTower = keys.filter((k) => fNiveis.includes(k)).length;
+                  const allSelected = selectedInTower === keys.length;
+                  const collapsed = collapsedAptGroups[t.id] === true;
+                  return (
+                    <View key={t.id} style={form.towerBlock}>
+                      <View style={form.aptGroupHead}>
+                        <Pressable onPress={() => toggleTowerNiveis(keys)} style={form.aptGroupSelect} hitSlop={6}>
+                          <MaterialCommunityIcons
+                            name={allSelected ? 'checkbox-marked' : selectedInTower > 0 ? 'checkbox-intermediate' : 'checkbox-blank-outline'}
+                            size={16}
+                            color={selectedInTower > 0 ? C.primary : '#94A3B8'}
+                          />
+                          <MaterialCommunityIcons name="office-building-outline" size={14} color="#64748B" />
+                          <Text style={form.towerName}>{t.name}</Text>
+                        </Pressable>
+                        {selectedInTower > 0 && <Text style={form.aptGroupCount}>{selectedInTower}/{keys.length}</Text>}
+                        <Pressable onPress={() => toggleAptCollapse(t.id)} hitSlop={8} style={form.aptGroupChevron}>
+                          <MaterialCommunityIcons name={collapsed ? 'chevron-down' : 'chevron-up'} size={18} color="#94A3B8" />
+                        </Pressable>
+                      </View>
+                      {!collapsed && (
+                        <View style={form.chipsWrap}>
+                          {levels.map((l) => {
+                            const key = nivelKey(t.id, l.code);
+                            const active = fNiveis.includes(key);
+                            return (
+                              <Pressable key={key} onPress={() => toggleNivel(key)} style={[form.chip, active && form.chipActive]}>
+                                {active && <MaterialCommunityIcons name="check" size={13} color={C.primary} style={{ marginRight: 4 }} />}
+                                <Text style={[form.chipText, active && form.chipTextActive]}>{l.label}</Text>
+                              </Pressable>
+                            );
+                          })}
                         </View>
-                      );
-                    })
-                  )}
-                </>
+                      )}
+                    </View>
+                  );
+                })
               )}
 
-              {/* Etapa */}
-              <Text style={form.label}>Etapa / serviço</Text>
+              {/* ── ETAPA ── */}
+              <View style={[form.sectionHead, form.sectionDivided]}>
+                <MaterialCommunityIcons name="hammer-wrench" size={15} color={C.primary} />
+                <Text style={form.sectionTitle}>Etapa</Text>
+              </View>
               {cronStages.length === 0 ? (
                 <Text style={form.empty}>Nenhuma etapa de cronograma cadastrada no catálogo.</Text>
               ) : (
-                <View style={form.chipsWrap}>
-                  {cronStages.map((e) => {
-                    const active = e.nome === fStage;
-                    const already = stageAlreadyCount.get(e.nome) ?? 0;
-                    return (
-                      <Pressable key={e.id} onPress={() => setFStage(e.nome)} style={[form.chip, active && form.chipActive]}>
-                        <Text style={[form.chipText, active && form.chipTextActive]} numberOfLines={1}>{e.nome}</Text>
-                        {already > 0 && (
-                          <View style={form.chipBadge}>
-                            <Text style={form.chipBadgeText}>{already} já agendada(s)</Text>
-                          </View>
-                        )}
-                      </Pressable>
-                    );
-                  })}
-                </View>
+                // Agrupadas por categoria: cada grupo com um subtítulo e seus chips,
+                // em vez de uma parede única de etapas soltas.
+                cronStagesByCat.map(([cat, stages]) => (
+                  <View key={cat} style={form.stageGroup}>
+                    <Text style={form.stageGroupLabel}>{cat}</Text>
+                    <View style={form.chipsWrap}>
+                      {stages.map((e) => {
+                        const active = e.nome === fStage;
+                        const already = stageAlreadyCount.get(e.nome) ?? 0;
+                        return (
+                          <Pressable key={e.id} onPress={() => setFStage(e.nome)} style={[form.chip, active && form.chipActive]}>
+                            <Text style={[form.chipText, active && form.chipTextActive]} numberOfLines={1}>{e.nome}</Text>
+                            {already > 0 && (
+                              <View style={form.chipBadge}>
+                                <Text style={form.chipBadgeText}>{already} já agendada(s)</Text>
+                              </View>
+                            )}
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  </View>
+                ))
               )}
 
-              {/* Início + duração */}
+              {/* ── PRAZO ── */}
+              <View style={[form.sectionHead, form.sectionDivided]}>
+                <MaterialCommunityIcons name="calendar-range" size={15} color={C.primary} />
+                <Text style={form.sectionTitle}>Prazo</Text>
+              </View>
               <View style={form.row}>
                 <View style={{ flex: 1.4 }}>
-                  <Text style={form.label}>Início</Text>
+                  <Text style={form.fieldLabel}>Início</Text>
                   <TextInput
                     value={fStart}
                     onChangeText={(v) => setFStart(maskDateBr(v))}
@@ -1077,7 +1532,7 @@ export default function CronogramaObraScreen() {
                   />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Text style={form.label}>Duração (dias)</Text>
+                  <Text style={form.fieldLabel}>Duração (dias)</Text>
                   <TextInput
                     value={fDays}
                     onChangeText={(v) => setFDays(v.replace(/\D/g, '').slice(0, 3))}
@@ -1089,10 +1544,14 @@ export default function CronogramaObraScreen() {
                 </View>
               </View>
 
-              {/* Responsáveis — só apartamentos têm atribuição de colaboradores */}
+              {/* ── RESPONSÁVEIS (só apartamentos têm atribuição) ── */}
               {fScope === 'apartamento' && (
                 <>
-                  <Text style={form.label}>Responsáveis</Text>
+                  <View style={[form.sectionHead, form.sectionDivided]}>
+                    <MaterialCommunityIcons name="account-hard-hat" size={15} color={C.primary} />
+                    <Text style={form.sectionTitle}>Responsáveis</Text>
+                    <Text style={form.sectionOptional}>opcional</Text>
+                  </View>
                   {workers.length === 0 ? (
                     <Text style={form.empty}>Nenhum colaborador cadastrado.</Text>
                   ) : (
@@ -1111,8 +1570,12 @@ export default function CronogramaObraScreen() {
                 </>
               )}
 
-              {/* Observação */}
-              <Text style={form.label}>Observação (opcional)</Text>
+              {/* ── OBSERVAÇÃO ── */}
+              <View style={[form.sectionHead, form.sectionDivided]}>
+                <MaterialCommunityIcons name="note-text-outline" size={15} color={C.primary} />
+                <Text style={form.sectionTitle}>Observação</Text>
+                <Text style={form.sectionOptional}>opcional</Text>
+              </View>
               <TextInput
                 value={fNote}
                 onChangeText={setFNote}
@@ -1122,29 +1585,34 @@ export default function CronogramaObraScreen() {
                 style={[form.input, form.inputMulti]}
               />
 
-              {!!fError && <Text style={form.error}>{fError}</Text>}
-
-              <View style={form.actions}>
-                <Pressable onPress={() => setAddOpen(false)} disabled={saving} style={[form.actionBtn, form.cancelBtn]}>
-                  <Text style={form.cancelText}>Cancelar</Text>
-                </Pressable>
-                <Pressable onPress={saveTask} disabled={saving} style={[form.actionBtn, form.saveBtn, saving && { opacity: 0.7 }]}>
-                  {saving ? (
-                    <ActivityIndicator size="small" color="#FFFFFF" />
-                  ) : (
-                    <MaterialCommunityIcons name="check" size={18} color="#FFFFFF" />
-                  )}
-                  <Text style={form.saveText}>
-                    {saving
-                      ? 'Salvando…'
-                      : fScope === 'nivel'
-                        ? (fNiveis.length > 1 ? `Salvar em ${fNiveis.length} níveis` : 'Salvar no nível')
-                        : (fApts.length > 1 ? `Salvar em ${fApts.length} aptos` : 'Salvar tarefa')}
-                  </Text>
-                </Pressable>
-              </View>
-              <View style={{ height: 12 }} />
+              {!!fError && (
+                <View style={form.errorBox}>
+                  <MaterialCommunityIcons name="alert-circle-outline" size={15} color="#B91C1C" />
+                  <Text style={form.error}>{fError}</Text>
+                </View>
+              )}
             </ScrollView>
+
+            {/* Rodapé fixo: a ação principal fica sempre à mão, sem rolar o formulário */}
+            <View style={[form.footer, { paddingBottom: Math.max(insets.bottom, 12) }]}>
+              <Pressable onPress={() => setAddOpen(false)} disabled={saving} style={[form.actionBtn, form.cancelBtn]}>
+                <Text style={form.cancelText}>Cancelar</Text>
+              </Pressable>
+              <Pressable onPress={saveTask} disabled={saving} style={[form.actionBtn, form.saveBtn, saving && { opacity: 0.7 }]}>
+                {saving ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <MaterialCommunityIcons name="check" size={18} color="#FFFFFF" />
+                )}
+                <Text style={form.saveText}>
+                  {saving
+                    ? 'Salvando…'
+                    : fScope === 'nivel'
+                      ? (fNiveis.length > 1 ? `Salvar em ${fNiveis.length} níveis` : 'Salvar no nível')
+                      : (fApts.length > 1 ? `Salvar em ${fApts.length} aptos` : 'Salvar tarefa')}
+                </Text>
+              </Pressable>
+            </View>
           </Pressable>
         </Pressable>
       </Modal>
@@ -1220,13 +1688,18 @@ const s = StyleSheet.create({
   headerTop: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   headerTitle: { color: '#FFFFFF', fontSize: 21, fontWeight: '900' },
   headerSub: { color: 'rgba(255,255,255,0.75)', fontSize: 13, marginTop: 2, fontWeight: '600' },
-  headerRefresh: { width: 38, height: 38, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.18)', alignItems: 'center', justifyContent: 'center', marginRight: 8 },
   headerAdd: { width: 38, height: 38, borderRadius: 12, backgroundColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center' },
 
+  timelineWrap: { gap: 8 },
   timeline: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: 'rgba(255,255,255,0.14)', borderRadius: 12, padding: 12 },
+  // bloco "real" quando há atraso — borda âmbar destaca que a entrega escorregou
+  timelineReal: { borderWidth: 1, borderColor: 'rgba(251,191,36,0.7)' },
   timelineItem: { gap: 2 },
   timelineLabel: { color: 'rgba(255,255,255,0.7)', fontSize: 10, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5 },
   timelineValue: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' },
+  timelineValueRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  timelineDelay: { backgroundColor: '#F59E0B', borderRadius: 6, paddingHorizontal: 6, paddingVertical: 1 },
+  timelineDelayText: { color: '#3F2D00', fontSize: 11, fontWeight: '900' },
 
   empty: { marginHorizontal: 16, marginTop: 8, backgroundColor: '#FFFFFF', borderColor: '#E2E8F0', borderWidth: 1, borderRadius: 16, padding: 24, alignItems: 'center', gap: 10 },
   emptyIcon: { width: 60, height: 60, borderRadius: 18, backgroundColor: C.light, alignItems: 'center', justifyContent: 'center' },
@@ -1251,11 +1724,16 @@ const s = StyleSheet.create({
   toggleText: { color: '#94A3B8', fontSize: 13, fontWeight: '700' },
   toggleTextActive: { color: C.primary },
 
-  towerFilter: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginHorizontal: 16 },
-  towerChip: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 999, backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0' },
-  towerChipActive: { backgroundColor: C.light, borderColor: C.medium },
-  towerChipText: { color: '#64748B', fontSize: 12, fontWeight: '700' },
-  towerChipTextActive: { color: C.primary },
+  // Torre — controle primário (o cronograma mostra uma torre por vez)
+  // controles agrupados (Torre em cima, Escala embaixo) acima das tabs
+  controls: { marginHorizontal: 16, marginTop: 12, gap: 12 },
+  controlBlock: { gap: 7 },
+  controlCaption: { color: '#94A3B8', fontSize: 11, fontWeight: '800', letterSpacing: 0.6, textTransform: 'uppercase' },
+  controlChips: { flexDirection: 'row', gap: 7, paddingRight: 16 },
+  towerChip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0' },
+  towerChipActive: { backgroundColor: C.primary, borderColor: C.primary },
+  towerChipText: { color: '#64748B', fontSize: 12.5, fontWeight: '700' },
+  towerChipTextActive: { color: '#FFFFFF', fontWeight: '800' },
 
   // "Por etapa" — lista de categorias + voltar
   catList: { gap: 8, marginHorizontal: 16 },
@@ -1324,6 +1802,38 @@ const s = StyleSheet.create({
 
   todayLine: { position: 'absolute', top: 0, bottom: 0, width: 2, backgroundColor: '#EF4444' },
 
+  // marcador de término de uma etapa individual dentro da barra somada
+  endMarkerHit: { position: 'absolute', top: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
+  // fundo = tom fechado da própria célula (definido inline); o anel claro apenas
+  // destaca o marcador do preenchimento da barra, sem virar um corpo estranho
+  endMarker: {
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.9)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  // escala do eixo (dia · semana · mês)
+  scaleGroup: { flexDirection: 'row', alignSelf: 'flex-start', backgroundColor: '#F1F5F9', borderRadius: 999, padding: 3, gap: 2 },
+  scaleBtn: { paddingVertical: 7, paddingHorizontal: 14, borderRadius: 999, minHeight: 32, justifyContent: 'center' },
+  scaleBtnActive: { backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#CBD5E1' },
+  scaleText: { color: '#64748B', fontSize: 12.5, fontWeight: '700' },
+  scaleTextActive: { color: C.primary, fontWeight: '800' },
+
+  // skeleton do gantt
+  skelGantt: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    marginHorizontal: 16,
+    marginTop: 12,
+    padding: 12,
+  },
+
   hint: { color: '#94A3B8', fontSize: 11, lineHeight: 16, paddingHorizontal: 18 },
   hintStrong: { color: '#475569', fontWeight: '800' },
 
@@ -1354,8 +1864,10 @@ const mod = StyleSheet.create({
   totalValue: { color: '#0F172A', fontSize: 13, fontWeight: '900' },
 
   taskCard: { flexDirection: 'row', backgroundColor: '#FFFFFF', borderColor: '#E2E8F0', borderWidth: 1, borderRadius: 14, overflow: 'hidden' },
+  taskCardPressed: { backgroundColor: '#F8FAFC', borderColor: '#CBD5E1' },
   taskStripe: { width: 4 },
   taskInner: { flex: 1, padding: 12, gap: 6 },
+  taskChevron: { justifyContent: 'center', paddingRight: 8, paddingLeft: 2 },
   taskTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
   taskEtapa: { color: '#0F172A', fontSize: 14, fontWeight: '800', flex: 1 },
   taskActions: { flexDirection: 'row', alignItems: 'center', gap: 6 },
@@ -1376,10 +1888,20 @@ const mod = StyleSheet.create({
 });
 
 const form = StyleSheet.create({
+  // ScrollView flexível: cede espaço ao rodapé fixo quando o formulário é longo.
+  scroll: { flexShrink: 1 },
   content: { paddingHorizontal: 18, paddingTop: 4, paddingBottom: 8, gap: 8 },
-  notice: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: C.light, borderRadius: 10, paddingHorizontal: 10, paddingVertical: 8 },
-  noticeText: { flex: 1, color: C.primary, fontSize: 11, fontWeight: '700', lineHeight: 15 },
-  label: { color: '#334155', fontSize: 12, fontWeight: '800', marginTop: 8, marginBottom: 2 },
+
+  // cabeçalho de seção (Local · Etapa · Prazo · …) — dá âncoras ao olho e quebra
+  // o formulário longo em blocos, em vez de um fluxo único e denso
+  sectionHead: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 },
+  sectionDivided: { borderTopWidth: 1, borderTopColor: '#F1F5F9', paddingTop: 16, marginTop: 12 },
+  sectionTitle: { flex: 1, color: '#0F172A', fontSize: 14, fontWeight: '900' },
+  sectionOptional: { color: '#94A3B8', fontSize: 11, fontWeight: '700' },
+  selBadge: { backgroundColor: C.light, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 3 },
+  selBadgeText: { color: C.primary, fontSize: 11.5, fontWeight: '800' },
+  fieldLabel: { color: '#64748B', fontSize: 12, fontWeight: '700', marginBottom: 4 },
+
   empty: { color: '#94A3B8', fontSize: 12, fontWeight: '600', fontStyle: 'italic', paddingVertical: 6 },
 
   chipsWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 7 },
@@ -1416,6 +1938,9 @@ const form = StyleSheet.create({
   bulkText: { color: C.primary, fontSize: 11, fontWeight: '800' },
   chipBadge: { marginLeft: 6, paddingHorizontal: 6, paddingVertical: 1, borderRadius: 999, backgroundColor: '#FEF3C7' },
   chipBadgeText: { color: '#92400E', fontSize: 9, fontWeight: '800' },
+  // etapas agrupadas por categoria no formulário de adicionar
+  stageGroup: { gap: 7, marginTop: 4 },
+  stageGroupLabel: { color: '#64748B', fontSize: 11, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.4 },
 
   row: { flexDirection: 'row', gap: 12 },
   input: { backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, fontSize: 14, color: '#0F172A', fontWeight: '600' },
@@ -1427,9 +1952,11 @@ const form = StyleSheet.create({
   progText: { color: '#64748B', fontSize: 13, fontWeight: '800' },
   progTextActive: { color: C.primary },
 
-  error: { color: '#B91C1C', fontSize: 12, fontWeight: '700', marginTop: 8 },
+  errorBox: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', borderRadius: 10, padding: 10, marginTop: 14 },
+  error: { flex: 1, color: '#B91C1C', fontSize: 12, fontWeight: '700' },
 
-  actions: { flexDirection: 'row', gap: 10, marginTop: 14 },
+  // rodapé fixo (fora do ScrollView): a ação principal nunca fica soterrada
+  footer: { flexDirection: 'row', gap: 10, paddingHorizontal: 18, paddingTop: 12, borderTopWidth: 1, borderTopColor: '#E2E8F0', backgroundColor: '#FFFFFF' },
   actionBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, borderRadius: 12, paddingVertical: 13 },
   cancelBtn: { flex: 1, backgroundColor: '#F1F5F9' },
   cancelText: { color: '#475569', fontSize: 14, fontWeight: '800' },

@@ -228,6 +228,18 @@ export const getScheduleRows = (checklist: ScheduledChecklistItem[]): ScheduleRo
 export const isScheduledItem = (item: ScheduledChecklistItem) =>
   Boolean(parseDate(item.plannedStart) || parseDate(item.plannedEnd));
 
+// Uma linha dos indicadores: onde a etapa está (apartamento) + estado/atraso.
+// Carrega o apartmentId para a tela navegar direto até ele.
+export type ScheduleBoardItem = {
+  apartmentId: string;
+  towerId: string;
+  number: string;
+  floor: string;
+  label: string;
+  status: ScheduleStatus;
+  delayDays: number;
+};
+
 export type ScheduleBoardSummary = {
   /** Apartamentos com ao menos uma etapa planejada que passou do prazo. */
   delayedApartments: number;
@@ -237,29 +249,49 @@ export type ScheduleBoardSummary = {
   scheduledSteps: number;
   /** Etapa presente no cronograma do maior número de apartamentos. */
   topStep?: { service: string; apartments: number };
+  /** Um item por apartamento atrasado (a etapa de MAIOR atraso dele). */
+  delayed: ScheduleBoardItem[];
+  /** Um item por etapa planejada ainda não concluída, mais atrasadas primeiro. */
+  pending: ScheduleBoardItem[];
 };
 
 export const summarizeScheduleBoard = (apartments: Apartment[]): ScheduleBoardSummary => {
-  let delayedApartments = 0;
-  let pendingSteps = 0;
   let scheduledSteps = 0;
   const apartmentsByStep = new Map<string, Set<string>>();
+  const delayed: ScheduleBoardItem[] = [];
+  const pending: ScheduleBoardItem[] = [];
 
   for (const apartment of apartments) {
     const scheduled = getScheduledChecklistForApartment(apartment).filter(isScheduledItem);
-    let hasDelay = false;
+    // A etapa de maior atraso do apartamento representa ele na lista de atrasados
+    // (a contagem é por apartamento, não por etapa).
+    let worstDelayed: ScheduleBoardItem | null = null;
 
     for (const item of scheduled) {
       scheduledSteps += 1;
-      if (getScheduleStatus(item) === 'Atrasado') hasDelay = true;
-      if (item.state !== 'ok' && item.state !== 'notApplicable') pendingSteps += 1;
+      const status = getScheduleStatus(item);
+      const delayDays = getDelayDays(item);
+      const row: ScheduleBoardItem = {
+        apartmentId: apartment.id,
+        towerId: apartment.towerId,
+        number: apartment.number,
+        floor: apartment.floor,
+        label: item.label,
+        status,
+        delayDays,
+      };
+
+      if (status === 'Atrasado' && (!worstDelayed || delayDays > worstDelayed.delayDays)) {
+        worstDelayed = row;
+      }
+      if (item.state !== 'ok' && item.state !== 'notApplicable') pending.push(row);
 
       const apartmentSet = apartmentsByStep.get(item.label) ?? new Set<string>();
       apartmentSet.add(apartment.id);
       apartmentsByStep.set(item.label, apartmentSet);
     }
 
-    if (hasDelay) delayedApartments += 1;
+    if (worstDelayed) delayed.push(worstDelayed);
   }
 
   // Empate resolvido por nome: sem isso a "principal etapa" trocava a cada
@@ -270,7 +302,20 @@ export const summarizeScheduleBoard = (apartments: Apartment[]): ScheduleBoardSu
       second.apartments - first.apartments || first.service.localeCompare(second.service, 'pt-BR'),
     );
 
-  return { delayedApartments, pendingSteps, scheduledSteps, topStep };
+  // Mais crítico primeiro em ambas as listas: maior atraso no topo.
+  const byUrgency = (a: ScheduleBoardItem, b: ScheduleBoardItem) =>
+    b.delayDays - a.delayDays || a.number.localeCompare(b.number, 'pt-BR', { numeric: true });
+  delayed.sort(byUrgency);
+  pending.sort(byUrgency);
+
+  return {
+    delayedApartments: delayed.length,
+    pendingSteps: pending.length,
+    scheduledSteps,
+    topStep,
+    delayed,
+    pending,
+  };
 };
 
 export const summarizeApartmentSchedule = (apartment: Apartment): ApartmentScheduleSummary => {

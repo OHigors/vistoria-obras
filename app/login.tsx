@@ -16,12 +16,14 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Text } from '@/src/ui/Text';
 
 import { useAuth } from '@/src/data/AuthContext';
+import { formatCooldown, useLoginThrottle } from '@/src/features/auth/useLoginThrottle';
 
 const LOGO = require('@/assets/images/slash.svg');
 
 export default function LoginScreen() {
   const insets = useSafeAreaInsets();
   const { signIn } = useAuth();
+  const { locked, remaining, registerFailure, registerServerLimit, reset } = useLoginThrottle();
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -29,7 +31,7 @@ export default function LoginScreen() {
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  const canSubmit = email.trim().length > 0 && password.length > 0 && !submitting;
+  const canSubmit = email.trim().length > 0 && password.length > 0 && !submitting && !locked;
 
   const onSubmit = async () => {
     if (!canSubmit) return;
@@ -37,8 +39,14 @@ export default function LoginScreen() {
     setError('');
     const result = await signIn(email, password);
     if (result.error) {
+      // Só falha de credencial conta para o bloqueio; o servidor mandando esperar
+      // é respeitado direto. Rede/outros não trancam — não é sinal de brute force.
+      if (result.code === 'invalid') registerFailure();
+      else if (result.code === 'rate_limit') registerServerLimit();
       setError(result.error);
       setSubmitting(false);
+    } else {
+      reset();
     }
     // Em caso de sucesso, o RootNavigator troca para (tabs) automaticamente.
   };
@@ -97,7 +105,16 @@ export default function LoginScreen() {
               </Pressable>
             </View>
 
-            {!!error && (
+            {/* Bloqueado tem precedência sobre o erro: enquanto trava, mostra a
+                contagem em vez da mensagem de "senha incorreta". */}
+            {locked ? (
+              <View style={s.lockBox}>
+                <MaterialCommunityIcons name="lock-clock" size={15} color="#B45309" />
+                <Text style={s.lockText}>
+                  Muitas tentativas. Tente novamente em {formatCooldown(remaining)}.
+                </Text>
+              </View>
+            ) : !!error && (
               <View style={s.errorBox}>
                 <MaterialCommunityIcons name="alert-circle-outline" size={15} color="#B91C1C" />
                 <Text style={s.errorText}>{error}</Text>
@@ -142,6 +159,13 @@ const s = StyleSheet.create({
     backgroundColor: '#FEF2F2', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 8, marginTop: 12,
   },
   errorText: { flex: 1, color: '#B91C1C', fontSize: 12.5, fontWeight: '600' },
+
+  lockBox: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: '#FFFBEB', borderWidth: 1, borderColor: '#FDE68A',
+    borderRadius: 10, paddingHorizontal: 10, paddingVertical: 8, marginTop: 12,
+  },
+  lockText: { flex: 1, color: '#92400E', fontSize: 12.5, fontWeight: '700' },
 
   button: {
     backgroundColor: '#2563EB', borderRadius: 12, paddingVertical: 14,
